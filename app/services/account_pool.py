@@ -1,0 +1,631 @@
+"""
+Account Pool Management Service
+多账号池化管理，支持 CRUD、轮询负载均衡、Token 使用追踪
+"""
+
+import uuid
+from datetime import datetime, date
+from typing import Optional, List, Dict, Any, Tuple
+from collections import defaultdict
+import logging
+
+from sqlalchemy import select, update, delete, and_
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.models.database import (
+    BackendAccount, TokenUsageHistory, get_session_factory
+)
+from app.services.crypto import get_crypto_service
+
+logger = logging.getLogger(__name__)
+
+# 兼容旧名称
+StackAIAccount = BackendAccount
+
+
+class AccountPoolService:
+    """
+    账号池管理服务
+    
+    提供账号 CRUD、轮询负载均衡、Token 使用追踪等功能
+    """
+    
+    def __init__(self):
+        """初始化账号池服务"""
+        # 轮询索引，按模型组分别维护
+        self._round_robin_index: Dict[str, int] = defaultdict(int)
+    
+    # ==================== CRUD Operations ====================
+    # Requirements: 2.1, 2.2
+    
+    async def create_account(
+        self,
+        session: AsyncSession,
+        name: str,
+        org_id: str,
+        flow_id: str,
+        api_key: str,
+        model_group: str,
+        daily_quota: int = 1000000,
+        private_api_key: Optional[str] = None
+    ) -> BackendAccount:
+        """
+        创建新的后端账号
+        
+        Args:
+            session: 数据库会话
+            name: 账号名称
+            org_id: 组织 ID
+            flow_id: 工作流 ID
+            api_key: API Key（明文，将被加密存储）
+            model_group: 所属模型组
+            daily_quota: 每日 Token 配额
+            private_api_key: Private API Key（用于监控，可选）
+            
+        Returns:
+            创建的账号对象
+        """
+        crypto = get_crypto_service()
+        encrypted_key = crypto.encrypt(api_key)
+        encrypted_private_key = crypto.encrypt(private_api_key) if private_api_key else None
+        
+        account = BackendAccount(
+            id=str(uuid.uuid4()),
+            name=name,
+            org_id=org_id,
+            flow_id=flow_id,
+            api_key_encrypted=encrypted_key,
+            private_api_key_encrypted=encrypted_private_key,
+            model_group=model_group,
+            daily_quota=daily_quota,
+            daily_used=0,
+            status="active",
+            created_at=datetime.utcnow(),
+            updated_at=datetime.utcnow()
+        )
+        
+        session.add(account)
+        await session.flush()
+        
+        logger.info(f"Created account: {account.id} ({name}) in group {model_group}")
+        return account
+
+    async def get_account(
+        self,
+        session: AsyncSession,
+        account_id: str
+    ) -> Optional[StackAIAccount]:
+        """
+        获取单个账号
+        
+        Args:
+            session: 数据库会话
+            account_id: 账号 ID
+            
+        Returns:
+            账号对象，如果不存在则返回 None
+        """
+        result = await session.execute(
+            select(StackAIAccount).where(StackAIAccount.id == account_id)
+        )
+        return result.scalar_one_or_none()
+    
+    async def get_all_accounts(
+        self,
+        session: AsyncSession
+    ) -> List[StackAIAccount]:
+        """
+        获取所有账号
+        
+        Args:
+            session: 数据库会话
+            
+        Returns:
+            账号列表
+        """
+        result = await session.execute(select(StackAIAccount))
+        return list(result.scalars().all())
+    
+    async def get_accounts_by_model_group(
+        self,
+        session: AsyncSession,
+        model_group: str
+    ) -> List[StackAIAccount]:
+        """
+        按模型组获取账号列表
+        
+        Args:
+            session: 数据库会话
+            model_group: 模型组名称
+            
+        Returns:
+            该模型组的账号列表
+        """
+        result = await session.execute(
+            select(StackAIAccount).where(StackAIAccount.model_group == model_group)
+        )
+        return list(result.scalars().all())
+    
+    async def update_account(
+        self,
+        session: AsyncSession,
+        account_id: str,
+        **kwargs
+    ) -> Optional[StackAIAccount]:
+        """
+        更新账号信息
+        
+        Args:
+            session: 数据库会话
+            account_id: 账号 ID
+            **kwargs: 要更新的字段
+            
+        Returns:
+            更新后的账号对象，如果不存在则返回 None
+        """
+        account = await self.get_account(session, account_id)
+        if account is None:
+            return None
+        
+        # 如果更新 API Key，需要加密
+        if "api_key" in kwargs:
+            crypto = get_crypto_service()
+            kwargs["api_key_encrypted"] = crypto.encrypt(kwargs.pop("api_key"))
+        
+        # 如果更新 Private API Key，需要加密
+        if "private_api_key" in kwargs:
+            crypto = get_crypto_service()
+            private_key = kwargs.pop("private_api_key")
+            kwargs["private_api_key_encrypted"] = crypto.encrypt(private_key) if private_key else None
+        
+        # 更新字段
+        for key, value in kwargs.items():
+            if hasattr(account, key):
+                setattr(account, key, value)
+        
+        account.updated_at = datetime.utcnow()
+        await session.flush()
+        
+        logger.info(f"Updated account: {account_id}")
+        return account
+    
+    async def delete_account(
+        self,
+        session: AsyncSession,
+        account_id: str
+    ) -> bool:
+        """
+        删除账号
+        
+        Args:
+            session: 数据库会话
+            account_id: 账号 ID
+            
+        Returns:
+            是否成功删除
+        """
+        account = await self.get_account(session, account_id)
+        if account is None:
+            return False
+        
+        await session.delete(account)
+        await session.flush()
+        
+        logger.info(f"Deleted account: {account_id}")
+        return True
+
+    # ==================== Round-Robin Load Balancing ====================
+    # Requirements: 2.3, 2.4, 2.5
+    
+    async def get_available_account(
+        self,
+        session: AsyncSession,
+        model_group: str
+    ) -> Optional[StackAIAccount]:
+        """
+        使用轮询算法获取可用账号
+        
+        从指定模型组中选择一个可用（非耗尽、非禁用）的账号。
+        使用 Round-Robin 算法确保请求均匀分布。
+        
+        Args:
+            session: 数据库会话
+            model_group: 模型组名称
+            
+        Returns:
+            可用的账号对象，如果没有可用账号则返回 None
+        """
+        # 获取该模型组的所有活跃账号
+        result = await session.execute(
+            select(StackAIAccount).where(
+                and_(
+                    StackAIAccount.model_group == model_group,
+                    StackAIAccount.status == "active"
+                )
+            ).order_by(StackAIAccount.id)  # 确保顺序一致
+        )
+        accounts = list(result.scalars().all())
+        
+        if not accounts:
+            logger.warning(f"No available accounts in model group: {model_group}")
+            return None
+        
+        # 获取当前轮询索引
+        current_index = self._round_robin_index[model_group]
+        
+        # 尝试找到一个可用账号（最多尝试 len(accounts) 次）
+        for _ in range(len(accounts)):
+            # 使用模运算确保索引在有效范围内
+            index = current_index % len(accounts)
+            account = accounts[index]
+            
+            # 更新轮询索引
+            current_index += 1
+            self._round_robin_index[model_group] = current_index
+            
+            # 检查账号是否可用（未耗尽）
+            if account.daily_used < account.daily_quota:
+                # 更新最后使用时间
+                account.last_used_at = datetime.utcnow()
+                await session.commit()
+                
+                logger.debug(f"Selected account {account.id} for group {model_group}")
+                return account
+        
+        # 所有账号都已耗尽
+        logger.warning(f"All accounts exhausted in model group: {model_group}")
+        return None
+    
+    def get_round_robin_index(self, model_group: str) -> int:
+        """
+        获取指定模型组的当前轮询索引（用于测试）
+        
+        Args:
+            model_group: 模型组名称
+            
+        Returns:
+            当前轮询索引
+        """
+        return self._round_robin_index[model_group]
+    
+    def reset_round_robin_index(self, model_group: Optional[str] = None) -> None:
+        """
+        重置轮询索引
+        
+        Args:
+            model_group: 模型组名称，如果为 None 则重置所有
+        """
+        if model_group is None:
+            self._round_robin_index.clear()
+        else:
+            self._round_robin_index[model_group] = 0
+    
+    async def mark_account_exhausted(
+        self,
+        session: AsyncSession,
+        account_id: str
+    ) -> bool:
+        """
+        标记账号配额耗尽
+        
+        Args:
+            session: 数据库会话
+            account_id: 账号 ID
+            
+        Returns:
+            是否成功标记
+        """
+        account = await self.get_account(session, account_id)
+        if account is None:
+            return False
+        
+        account.status = "exhausted"
+        account.updated_at = datetime.utcnow()
+        await session.flush()
+        
+        logger.info(f"Marked account {account_id} as exhausted")
+        return True
+
+    # ==================== Token Usage Tracking ====================
+    # Requirements: 3.1, 3.4, 3.5
+    
+    async def update_token_usage(
+        self,
+        session: AsyncSession,
+        account_id: str,
+        input_tokens: int,
+        output_tokens: int
+    ) -> Optional[StackAIAccount]:
+        """
+        更新账号的 Token 使用量
+        
+        Args:
+            session: 数据库会话
+            account_id: 账号 ID
+            input_tokens: 输入 Token 数量
+            output_tokens: 输出 Token 数量
+            
+        Returns:
+            更新后的账号对象，如果不存在则返回 None
+        """
+        account = await self.get_account(session, account_id)
+        if account is None:
+            return None
+        
+        total_tokens = input_tokens + output_tokens
+        account.daily_used += total_tokens
+        account.updated_at = datetime.utcnow()
+        
+        # 检查是否达到配额
+        if account.daily_used >= account.daily_quota:
+            account.status = "exhausted"
+            logger.info(f"Account {account_id} reached quota limit")
+        
+        # 记录到历史表
+        await self._record_usage_history(
+            session, account_id, None, input_tokens, output_tokens
+        )
+        
+        await session.flush()
+        
+        logger.debug(
+            f"Updated token usage for account {account_id}: "
+            f"+{total_tokens} (total: {account.daily_used}/{account.daily_quota})"
+        )
+        return account
+    
+    async def _record_usage_history(
+        self,
+        session: AsyncSession,
+        account_id: Optional[str],
+        api_key_id: Optional[str],
+        input_tokens: int,
+        output_tokens: int
+    ) -> None:
+        """
+        记录 Token 使用历史
+        
+        Args:
+            session: 数据库会话
+            account_id: 账号 ID
+            api_key_id: API Key ID
+            input_tokens: 输入 Token 数量
+            output_tokens: 输出 Token 数量
+        """
+        today = date.today()
+        
+        # 查找今天的记录
+        result = await session.execute(
+            select(TokenUsageHistory).where(
+                and_(
+                    TokenUsageHistory.date == today,
+                    TokenUsageHistory.account_id == account_id,
+                    TokenUsageHistory.api_key_id == api_key_id
+                )
+            )
+        )
+        history = result.scalar_one_or_none()
+        
+        if history:
+            # 更新现有记录
+            history.input_tokens += input_tokens
+            history.output_tokens += output_tokens
+            history.request_count += 1
+        else:
+            # 创建新记录
+            history = TokenUsageHistory(
+                date=today,
+                account_id=account_id,
+                api_key_id=api_key_id,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                request_count=1
+            )
+            session.add(history)
+    
+    def get_usage_percentage(self, account: StackAIAccount) -> float:
+        """
+        计算账号的使用百分比
+        
+        Args:
+            account: 账号对象
+            
+        Returns:
+            使用百分比 (0-100+)
+        """
+        if account.daily_quota <= 0:
+            return 100.0
+        return (account.daily_used / account.daily_quota) * 100
+    
+    def get_usage_status(self, account: StackAIAccount) -> str:
+        """
+        获取账号的使用状态
+        
+        Args:
+            account: 账号对象
+            
+        Returns:
+            状态字符串: "normal", "warning", "exhausted"
+        """
+        percentage = self.get_usage_percentage(account)
+        
+        if percentage >= 100:
+            return "exhausted"
+        elif percentage >= 80:
+            return "warning"
+        else:
+            return "normal"
+    
+    async def check_quota_status(
+        self,
+        session: AsyncSession,
+        account_id: str
+    ) -> Tuple[bool, str, float]:
+        """
+        检查账号配额状态
+        
+        Args:
+            session: 数据库会话
+            account_id: 账号 ID
+            
+        Returns:
+            (是否可用, 状态, 使用百分比)
+        """
+        account = await self.get_account(session, account_id)
+        if account is None:
+            return False, "not_found", 0.0
+        
+        percentage = self.get_usage_percentage(account)
+        status = self.get_usage_status(account)
+        is_available = account.status == "active" and percentage < 100
+        
+        return is_available, status, percentage
+
+    # ==================== Daily Reset ====================
+    # Requirements: 2.7
+    
+    async def reset_daily_usage(
+        self,
+        session: AsyncSession
+    ) -> int:
+        """
+        重置所有账号的每日使用量（UTC 0:00 调用）
+        
+        Args:
+            session: 数据库会话
+            
+        Returns:
+            重置的账号数量
+        """
+        # 获取所有账号
+        result = await session.execute(select(StackAIAccount))
+        accounts = list(result.scalars().all())
+        
+        reset_count = 0
+        for account in accounts:
+            # 重置每日使用量
+            account.daily_used = 0
+            
+            # 如果账号之前是耗尽状态，恢复为活跃
+            if account.status == "exhausted":
+                account.status = "active"
+            
+            account.updated_at = datetime.utcnow()
+            reset_count += 1
+        
+        await session.flush()
+        
+        logger.info(f"Reset daily usage for {reset_count} accounts")
+        return reset_count
+    
+    async def reset_account_daily_usage(
+        self,
+        session: AsyncSession,
+        account_id: str
+    ) -> bool:
+        """
+        重置单个账号的每日使用量
+        
+        Args:
+            session: 数据库会话
+            account_id: 账号 ID
+            
+        Returns:
+            是否成功重置
+        """
+        account = await self.get_account(session, account_id)
+        if account is None:
+            return False
+        
+        account.daily_used = 0
+        if account.status == "exhausted":
+            account.status = "active"
+        account.updated_at = datetime.utcnow()
+        
+        await session.flush()
+        
+        logger.info(f"Reset daily usage for account {account_id}")
+        return True
+    
+    # ==================== Utility Methods ====================
+    
+    def decrypt_api_key(self, account: StackAIAccount) -> str:
+        """
+        解密账号的 API Key
+        
+        Args:
+            account: 账号对象
+            
+        Returns:
+            解密后的 API Key
+        """
+        crypto = get_crypto_service()
+        return crypto.decrypt(account.api_key_encrypted)
+    
+    def decrypt_private_api_key(self, account: StackAIAccount) -> Optional[str]:
+        """
+        解密账号的 Private API Key
+        
+        Args:
+            account: 账号对象
+            
+        Returns:
+            解密后的 Private API Key，如果未设置则返回 None
+        """
+        if not account.private_api_key_encrypted:
+            return None
+        crypto = get_crypto_service()
+        return crypto.decrypt(account.private_api_key_encrypted)
+    
+    async def get_model_group_stats(
+        self,
+        session: AsyncSession,
+        model_group: str
+    ) -> Dict[str, Any]:
+        """
+        获取模型组的统计信息
+        
+        Args:
+            session: 数据库会话
+            model_group: 模型组名称
+            
+        Returns:
+            统计信息字典
+        """
+        accounts = await self.get_accounts_by_model_group(session, model_group)
+        
+        total_quota = sum(a.daily_quota for a in accounts)
+        total_used = sum(a.daily_used for a in accounts)
+        active_count = sum(1 for a in accounts if a.status == "active")
+        exhausted_count = sum(1 for a in accounts if a.status == "exhausted")
+        disabled_count = sum(1 for a in accounts if a.status == "disabled")
+        
+        return {
+            "model_group": model_group,
+            "total_accounts": len(accounts),
+            "active_accounts": active_count,
+            "exhausted_accounts": exhausted_count,
+            "disabled_accounts": disabled_count,
+            "total_quota": total_quota,
+            "total_used": total_used,
+            "usage_percentage": (total_used / total_quota * 100) if total_quota > 0 else 0
+        }
+
+
+# 全局账号池服务实例
+_account_pool_service: Optional[AccountPoolService] = None
+
+
+def get_account_pool_service() -> AccountPoolService:
+    """获取全局账号池服务实例"""
+    global _account_pool_service
+    if _account_pool_service is None:
+        _account_pool_service = AccountPoolService()
+    return _account_pool_service
+
+
+def init_account_pool_service() -> AccountPoolService:
+    """初始化全局账号池服务"""
+    global _account_pool_service
+    _account_pool_service = AccountPoolService()
+    return _account_pool_service

@@ -1,0 +1,464 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>管理后台</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <!-- 登录页面 -->
+    <div id="login-page" class="login-container">
+        <div class="login-box">
+            <h1>🔐 管理后台</h1>
+            <form id="login-form">
+                <div class="form-group">
+                    <label for="username">用户名</label>
+                    <input type="text" id="username" name="username" required placeholder="请输入用户名">
+                </div>
+                <div class="form-group">
+                    <label for="password">密码</label>
+                    <input type="password" id="password" name="password" required placeholder="请输入密码">
+                </div>
+                <div id="login-error" class="text-danger mb-10 hidden"></div>
+                <button type="submit" class="btn btn-primary btn-block">登录</button>
+            </form>
+
+        </div>
+    </div>
+
+    <!-- 管理后台主界面 -->
+    <div id="admin-page" class="admin-layout hidden">
+        <!-- 侧边栏 -->
+        <aside class="sidebar">
+            <div class="sidebar-header">
+                <h2>🚀 API Service</h2>
+            </div>
+            <ul class="sidebar-nav">
+                <li><a href="#" data-page="dashboard" class="active"><span class="icon">📊</span> 仪表板</a></li>
+                <li><a href="#" data-page="accounts"><span class="icon">👤</span> 账号管理</a></li>
+                <li><a href="#" data-page="groups"><span class="icon">📁</span> 模型组</a></li>
+                <li><a href="#" data-page="apikeys"><span class="icon">🔑</span> API Key</a></li>
+                <li><a href="#" id="logout-btn"><span class="icon">🚪</span> 退出登录</a></li>
+            </ul>
+        </aside>
+
+        <!-- 主内容区 -->
+        <main class="main-content">
+            <!-- 仪表板页面 -->
+            <div id="page-dashboard" class="page-content">
+                <div class="page-header">
+                    <h1>📊 监控中心</h1>
+                    <div class="header-actions">
+                        <button class="btn btn-info" onclick="syncAllAccounts()" id="sync-all-btn">
+                            <svg class="sync-icon" viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
+                                <path d="M12 4V1L8 5l4 4V6c3.31 0 6 2.69 6 6 0 1.01-.25 1.97-.7 2.8l1.46 1.46C19.54 15.03 20 13.57 20 12c0-4.42-3.58-8-8-8zm0 14c-3.31 0-6-2.69-6-6 0-1.01.25-1.97.7-2.8L5.24 7.74C4.46 8.97 4 10.43 4 12c0 4.42 3.58 8 8 8v3l4-4-4-4v3z"/>
+                            </svg>
+                            同步全部
+                        </button>
+                    </div>
+                </div>
+                
+                <!-- 系统概览统计 -->
+                <div class="stats-grid stats-grid-4">
+                    <div class="stat-card">
+                        <div class="stat-icon">👤</div>
+                        <div class="stat-label">活跃账号</div>
+                        <div class="stat-value" id="stat-active-accounts">-</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon" style="background: #d1fae5;">🔑</div>
+                        <div class="stat-label">API Key</div>
+                        <div class="stat-value" id="stat-api-keys">-</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon" style="background: #fef3c7;">📡</div>
+                        <div class="stat-label">今日请求</div>
+                        <div class="stat-value" id="stat-today-requests">-</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon" style="background: #e0f2fe;">💎</div>
+                        <div class="stat-label">今日 Token</div>
+                        <div class="stat-value" id="stat-today-tokens">-</div>
+                    </div>
+                </div>
+                
+                <!-- 历史累计统计 -->
+                <div class="stats-grid stats-grid-4" style="margin-top: 16px;">
+                    <div class="stat-card" style="background: linear-gradient(135deg, #f0f9ff 0%, #e0f2fe 100%);">
+                        <div class="stat-icon" style="background: #bae6fd;">📊</div>
+                        <div class="stat-label">总请求数</div>
+                        <div class="stat-value" id="stat-all-time-requests">-</div>
+                    </div>
+                    <div class="stat-card" style="background: linear-gradient(135deg, #f0fdf4 0%, #dcfce7 100%);">
+                        <div class="stat-icon" style="background: #bbf7d0;">💰</div>
+                        <div class="stat-label">总 Token</div>
+                        <div class="stat-value" id="stat-all-time-tokens">-</div>
+                    </div>
+                    <div class="stat-card" style="background: linear-gradient(135deg, #fefce8 0%, #fef9c3 100%);">
+                        <div class="stat-icon" style="background: #fef08a;">📥</div>
+                        <div class="stat-label">总输入 Token</div>
+                        <div class="stat-value" id="stat-all-time-input">-</div>
+                    </div>
+                    <div class="stat-card" style="background: linear-gradient(135deg, #fdf4ff 0%, #fae8ff 100%);">
+                        <div class="stat-icon" style="background: #f5d0fe;">📤</div>
+                        <div class="stat-label">总输出 Token</div>
+                        <div class="stat-value" id="stat-all-time-output">-</div>
+                    </div>
+                </div>
+
+                <!-- 账号监控表格 -->
+                <div class="card">
+                    <div class="card-header-bar">
+                        <h3>📈 账号实时监控</h3>
+                        <span class="text-muted" id="last-sync-time"></span>
+                    </div>
+                    <div class="table-responsive">
+                        <table class="data-table monitor-table" id="monitor-table">
+                            <thead>
+                                <tr>
+                                    <th>账号名称</th>
+                                    <th>今日使用</th>
+                                    <th>剩余配额</th>
+                                    <th>使用率</th>
+                                    <th>总使用量</th>
+                                    <th>状态</th>
+                                </tr>
+                            </thead>
+                            <tbody id="monitor-table-body">
+                                <tr><td colspan="6" class="text-center">加载中...</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 账号管理页面 -->
+            <div id="page-accounts" class="page-content hidden">
+                <div class="page-header">
+                    <h1>👤 账号管理</h1>
+                    <div class="header-actions">
+                        <button class="btn btn-success" onclick="testAllAccounts()" id="test-all-btn">🧪 一键测试全部</button>
+                        <button class="btn btn-primary" onclick="showAddAccountModal()">+ 添加账号</button>
+                    </div>
+                </div>
+                
+                <div class="filter-bar">
+                    <input type="text" id="account-search" placeholder="搜索账号名称..." onkeyup="filterAccounts()">
+                    <select id="account-group-filter" onchange="filterAccounts()">
+                        <option value="">所有模型组</option>
+                    </select>
+                    <select id="account-status-filter" onchange="filterAccounts()">
+                        <option value="">所有状态</option>
+                        <option value="active">正常</option>
+                        <option value="exhausted">耗尽</option>
+                        <option value="disabled">禁用</option>
+                    </select>
+                </div>
+                
+                <!-- 测试进度条 -->
+                <div id="test-progress-container" class="hidden">
+                    <div class="test-progress-bar">
+                        <div class="test-progress-fill" id="test-progress-fill"></div>
+                    </div>
+                    <div class="test-progress-text" id="test-progress-text">测试中...</div>
+                </div>
+                
+                <div class="table-wrapper">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>名称</th>
+                                <th>模型组</th>
+                                <th>今日使用</th>
+                                <th>状态</th>
+                                <th>最后使用</th>
+                                <th>操作</th>
+                            </tr>
+                        </thead>
+                        <tbody id="accounts-table-body">
+                            <tr><td colspan="6" class="text-center">加载中...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- 模型组管理页面 -->
+            <div id="page-groups" class="page-content hidden">
+                <div class="page-header">
+                    <h1>📁 模型组管理</h1>
+                    <button class="btn btn-primary" onclick="showAddGroupModal()">+ 添加模型组</button>
+                </div>
+                
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th>名称</th>
+                            <th>描述</th>
+                            <th>账号数量</th>
+                            <th>创建时间</th>
+                            <th>操作</th>
+                        </tr>
+                    </thead>
+                    <tbody id="groups-table-body">
+                        <tr><td colspan="5" class="text-center">加载中...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <!-- API Key 管理页面 -->
+            <div id="page-apikeys" class="page-content hidden">
+                <div class="page-header">
+                    <h1>🔑 API Key 管理</h1>
+                    <button class="btn btn-primary" onclick="showAddApiKeyModal()">+ 生成 API Key</button>
+                </div>
+                
+                <div class="filter-bar">
+                    <input type="text" id="apikey-search" placeholder="搜索 Key 名称..." onkeyup="filterApiKeys()">
+                    <select id="apikey-status-filter" onchange="filterApiKeys()">
+                        <option value="">所有状态</option>
+                        <option value="active">有效</option>
+                        <option value="revoked">已撤销</option>
+                    </select>
+                </div>
+                
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th>名称</th>
+                            <th>Key</th>
+                            <th>模型组</th>
+                            <th>请求数 / 限制</th>
+                            <th>Token 使用</th>
+                            <th>状态</th>
+                            <th>操作</th>
+                        </tr>
+                    </thead>
+                    <tbody id="apikeys-table-body">
+                        <tr><td colspan="8" class="text-center">加载中...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+        </main>
+    </div>
+
+    <!-- 添加账号模态框 -->
+    <div id="account-modal" class="modal-overlay">
+        <div class="modal">
+            <div class="modal-header">
+                <h2 id="account-modal-title">添加账号</h2>
+                <button class="modal-close" onclick="closeModal('account-modal')">&times;</button>
+            </div>
+            <form id="account-form">
+                <input type="hidden" id="account-id">
+                <div class="param-tip">
+                    <div class="param-tip-header">💡 参数获取方法</div>
+                    <div class="param-tip-content">
+                        在后端工作流页面点击 <strong>Export → API</strong>，从 Python 示例中获取：
+                        <div class="param-tip-url">
+                            <code>API_URL = "https://api.xxx.com/.../run/<span class="hl">org_id</span>/<span class="hl">flow_id</span>"</code>
+                        </div>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label for="account-name">账号名称 *</label>
+                    <input type="text" id="account-name" required placeholder="例如：我的后端账号">
+                </div>
+                <div class="form-group">
+                    <label for="account-org-id">Organization ID *</label>
+                    <input type="text" id="account-org-id" required placeholder="URL 中第一个 ID（如 3b0c67e9-...）">
+                </div>
+                <div class="form-group">
+                    <label for="account-flow-id">Flow ID *</label>
+                    <input type="text" id="account-flow-id" required placeholder="URL 中第二个 ID（如 691af087...）">
+                </div>
+                <div class="form-group">
+                    <label for="account-api-key">Bearer Token *</label>
+                    <input type="password" id="account-api-key" required placeholder="Authorization 头中 Bearer 后的值">
+                    <small class="text-muted">即 headers['Authorization'] = 'Bearer <strong>这里的值</strong>'</small>
+                </div>
+                <div class="form-group">
+                    <label for="account-model-group">模型组 *</label>
+                    <select id="account-model-group" required>
+                        <option value="">选择模型组</option>
+                    </select>
+                    <small class="text-muted">将此账号关联到哪个模型组，调用该模型时会使用此账号</small>
+                </div>
+                <div class="form-group">
+                    <label for="account-daily-quota">每日配额 (Token)</label>
+                    <input type="number" id="account-daily-quota" value="1000000" min="0">
+                    <small class="text-muted">免费账号每日限额 1,000,000 Token</small>
+                </div>
+                <div class="form-group">
+                    <label for="account-private-key">Private API Key（可选）</label>
+                    <input type="password" id="account-private-key" placeholder="用于同步使用量统计">
+                    <small class="text-muted">从后端设置页面获取，配置后可在仪表板查看真实使用量</small>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" onclick="closeModal('account-modal')">取消</button>
+                    <button type="submit" class="btn btn-primary">保存</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- 添加模型组模态框 -->
+    <div id="group-modal" class="modal-overlay">
+        <div class="modal">
+            <div class="modal-header">
+                <h2 id="group-modal-title">添加模型组</h2>
+                <button class="modal-close" onclick="closeModal('group-modal')">&times;</button>
+            </div>
+            <form id="group-form">
+                <input type="hidden" id="group-id">
+                <div class="form-group">
+                    <label for="group-name">模型组名称 *</label>
+                    <input type="text" id="group-name" required placeholder="例如：gpt-5.1">
+                </div>
+                <div class="form-group">
+                    <label for="group-description">描述</label>
+                    <textarea id="group-description" placeholder="模型组描述（可选）"></textarea>
+                </div>
+                <div class="form-group">
+                    <label for="group-input-mapping">输入字段映射 (JSON)</label>
+                    <textarea id="group-input-mapping" placeholder='{"user_input": "in-0", "system_prompt": "in-1"}'></textarea>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" onclick="closeModal('group-modal')">取消</button>
+                    <button type="submit" class="btn btn-primary">保存</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- 生成 API Key 模态框 -->
+    <div id="apikey-modal" class="modal-overlay">
+        <div class="modal">
+            <div class="modal-header">
+                <h2>生成 API Key</h2>
+                <button class="modal-close" onclick="closeModal('apikey-modal')">&times;</button>
+            </div>
+            <form id="apikey-form">
+                <div class="form-group">
+                    <label for="apikey-name">Key 名称</label>
+                    <input type="text" id="apikey-name" placeholder="例如：开发测试用">
+                </div>
+                <div class="form-group">
+                    <label for="apikey-groups">授权模型组 *</label>
+                    <select id="apikey-groups" multiple required style="height: 120px;">
+                    </select>
+                    <small class="text-muted">按住 Ctrl 可多选</small>
+                </div>
+                <div class="form-group">
+                    <label for="apikey-request-quota">请求数限制</label>
+                    <input type="number" id="apikey-request-quota" min="1" placeholder="留空表示无限制">
+                    <small class="text-muted">达到限制后 Key 将自动禁用</small>
+                </div>
+                <div class="form-group">
+                    <label for="apikey-expires">过期时间</label>
+                    <input type="datetime-local" id="apikey-expires">
+                    <small class="text-muted">留空表示永不过期</small>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" onclick="closeModal('apikey-modal')">取消</button>
+                    <button type="submit" class="btn btn-primary">生成</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- 编辑 API Key 模态框 -->
+    <div id="apikey-edit-modal" class="modal-overlay">
+        <div class="modal">
+            <div class="modal-header">
+                <h2>编辑 API Key</h2>
+                <button class="modal-close" onclick="closeModal('apikey-edit-modal')">&times;</button>
+            </div>
+            <form id="apikey-edit-form">
+                <input type="hidden" id="apikey-edit-id">
+                <div class="form-group">
+                    <label for="apikey-edit-name">Key 名称</label>
+                    <input type="text" id="apikey-edit-name" placeholder="例如：开发测试用">
+                </div>
+                <div class="form-group">
+                    <label for="apikey-edit-groups">授权模型组 *</label>
+                    <select id="apikey-edit-groups" multiple required style="height: 120px;">
+                    </select>
+                    <small class="text-muted">按住 Ctrl 可多选</small>
+                </div>
+                <div class="form-group">
+                    <label for="apikey-edit-request-quota">请求数限制</label>
+                    <input type="number" id="apikey-edit-request-quota" min="-1" placeholder="留空或 -1 表示无限制">
+                    <small class="text-muted">-1 表示清除限制，达到限制后 Key 将自动禁用</small>
+                </div>
+                <div class="form-group">
+                    <label for="apikey-edit-expires">过期时间</label>
+                    <input type="datetime-local" id="apikey-edit-expires">
+                    <small class="text-muted">留空表示永不过期</small>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" onclick="closeModal('apikey-edit-modal')">取消</button>
+                    <button type="submit" class="btn btn-primary">保存</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- 显示新生成的 API Key 模态框 -->
+    <div id="new-apikey-modal" class="modal-overlay">
+        <div class="modal">
+            <div class="modal-header">
+                <h2>✅ API Key 已生成</h2>
+                <button class="modal-close" onclick="closeModal('new-apikey-modal')">&times;</button>
+            </div>
+            <div class="tip">
+                <strong>⚠️ 重要：</strong>请立即复制此 Key，关闭后将无法再次查看完整内容！
+            </div>
+            <div class="api-key-display mt-20">
+                <span class="key-value" id="new-apikey-value"></span>
+                <button class="copy-btn" onclick="copyNewApiKey()">📋 复制</button>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-primary" onclick="closeModal('new-apikey-modal')">我已复制</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 确认操作模态框 -->
+    <div id="confirm-modal" class="modal-overlay">
+        <div class="modal">
+            <div class="modal-header">
+                <h2 id="confirm-title">⚠️ 确认操作</h2>
+                <button class="modal-close" onclick="closeModal('confirm-modal')">&times;</button>
+            </div>
+            <p id="confirm-message">确定要执行此操作吗？</p>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" onclick="closeModal('confirm-modal')">取消</button>
+                <button type="button" class="btn btn-danger" id="confirm-btn">确认</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 测试结果模态框 -->
+    <div id="test-result-modal" class="modal-overlay">
+        <div class="modal modal-lg">
+            <div class="modal-header">
+                <h2 id="test-result-title">🧪 测试结果</h2>
+                <button class="modal-close" onclick="closeModal('test-result-modal')">&times;</button>
+            </div>
+            <div id="test-result-content" class="test-result-content">
+                <!-- 测试结果将在这里显示 -->
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-primary" onclick="closeModal('test-result-modal')">关闭</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Toast 提示 -->
+    <div id="toast" class="toast"></div>
+
+    <script src="/static/admin.js"></script>
+</body>
+</html>

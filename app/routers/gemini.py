@@ -1,0 +1,731 @@
+"""
+Gemini Compatible Router
+实现 Gemini API 兼容的路由端?
+
+Requirements: 1.3
+"""
+
+import json
+import uuid
+import time
+import logging
+from typing import Optional, List, Dict, Any
+
+from fastapi import APIRouter, Request, Depends, Header, HTTPException
+from fastapi.responses import JSONResponse, StreamingResponse
+from pydantic import BaseModel, Field
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.models.database import get_session, ModelGroup
+from app.services.transformer import (
+    GeminiRequest, GeminiContent, GeminiPart, GeminiGenerationConfig,
+    RequestTransformer, get_transformer
+)
+from app.services.api_key import APIKeyService, get_api_key_service
+from app.services.account_pool import AccountPoolService, get_account_pool_service
+from app.services.backend_client import (
+    BackendClient, get_backend_client,
+    BackendClientError, BackendAPIError, BackendConnectionError, BackendTimeoutError
+)
+from app.services.response_transformer import ResponseTransformer, get_response_transformer
+from app.services.error_handler import ErrorHandler, get_error_handler, APIError, ErrorType
+from app.services.logger import LoggerService, get_logger_service
+from app.services.stats import StatsService, get_stats_service
+from sqlalchemy import select
+
+logger = logging.getLogger(__name__)
+
+# 创建路由?
+router = APIRouter(prefix="/v1beta", tags=["Gemini Compatible"])
+
+
+# ============================================================================
+# Request/Response Models
+# ============================================================================
+
+class GenerateContentRequest(BaseModel):
+    """Gemini generateContent 请求模型"""
+    contents: List[GeminiContent] = Field(..., description="内容列表")
+    generationConfig: Optional[GeminiGenerationConfig] = Field(default=None, description="生成配置")
+    safetySettings: Optional[List[Dict[str, Any]]] = Field(default=None, description="安全设置")
+
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+def extract_api_key(
+    x_goog_api_key: Optional[str],
+    authorization: Optional[str]
+) -> Optional[str]:
+    """
+    从请求头提取 API Key
+    
+    Gemini 支持两种方式:
+    - x-goog-api-key: sk-xxx
+    - Authorization: Bearer sk-xxx
+    """
+    # 优先使用 x-goog-api-key
+    if x_goog_api_key:
+        return x_goog_api_key.strip()
+    
+    # 其次使用 Authorization header
+    if authorization:
+        auth = authorization.strip()
+        if auth.lower().startswith("bearer "):
+            return auth[7:].strip()
+        return auth
+    
+    return None
+
+
+async def validate_api_key_and_model(
+    session: AsyncSession,
+    raw_key: str,
+    model: str,
+    api_key_service: APIKeyService,
+    error_handler: ErrorHandler
+) -> tuple:
+    """
+    验证 API Key 和模型权?
+    
+    Returns:
+        (api_key_obj, error_response) - 如果验证失败，error_response 不为 None
+    """
+    is_valid, error_msg, api_key_obj = await api_key_service.validate_key(
+        session, raw_key, model
+    )
+    
+    if not is_valid:
+        if "not authorized" in (error_msg or "").lower():
+            error = error_handler.create_permission_error(error_msg)
+        elif "quota" in (error_msg or "").lower():
+            error = error_handler.create_quota_exceeded_error(error_msg)
+        elif "expired" in (error_msg or "").lower():
+            error = error_handler.create_authentication_error(error_msg)
+        else:
+            error = error_handler.create_authentication_error(error_msg or "Invalid API key")
+        
+        return None, JSONResponse(
+            status_code=error.status_code,
+            content=error_handler.to_gemini_error(error)
+        )
+    
+    return api_key_obj, None
+
+
+def extract_model_name(model_path: str) -> str:
+    """
+    从路径中提取模型名称
+    
+    例如: "models/gemini-pro" -> "gemini-pro"
+    """
+    if model_path.startswith("models/"):
+        return model_path[7:]
+    return model_path
+
+
+# ============================================================================
+# generateContent Endpoint (Requirement 1.3)
+# ============================================================================
+
+@router.post("/models/{model}:generateContent")
+async def generate_content(
+    model: str,
+    request: GenerateContentRequest,
+    http_request: Request,
+    x_goog_api_key: Optional[str] = Header(None, alias="x-goog-api-key"),
+    authorization: Optional[str] = Header(None),
+    session: AsyncSession = Depends(get_session)
+):
+    """
+    Gemini 兼容?generateContent 端点
+    
+    - 支持同步响应
+    - 验证 API Key 和模型权?
+    - 将请求转换为后端格式并执?
+    - 将响应转换为 Gemini 格式返回
+    """
+    request_id = uuid.uuid4().hex[:24]
+    start_time = time.time()
+    
+    # 提取模型名称
+    model_name = extract_model_name(model)
+    
+    # 获取服务实例
+    api_key_service = get_api_key_service()
+    account_pool = get_account_pool_service()
+    backend_client = get_backend_client()
+    transformer = get_transformer()
+    response_transformer = get_response_transformer()
+    error_handler = get_error_handler()
+    
+    # 1. 提取并验?API Key
+    raw_key = extract_api_key(x_goog_api_key, authorization)
+    if not raw_key:
+        error = error_handler.create_authentication_error(
+            "Missing API key. Please include 'x-goog-api-key' header or 'Authorization: Bearer YOUR_API_KEY' header."
+        )
+        return JSONResponse(
+            status_code=error.status_code,
+            content=error_handler.to_gemini_error(error)
+        )
+    
+    # 2. 验证 API Key 和模型权?
+    api_key_obj, error_response = await validate_api_key_and_model(
+        session, raw_key, model_name, api_key_service, error_handler
+    )
+    if error_response:
+        return error_response
+    
+    # 3. 获取可用账号
+    account = await account_pool.get_available_account(session, model_name)
+    if not account:
+        error = error_handler.create_service_unavailable_error(
+            f"No available accounts for model '{model_name}'"
+        )
+        return JSONResponse(
+            status_code=error.status_code,
+            content=error_handler.to_gemini_error(error)
+        )
+    
+    # 4. 转换请求格式
+    gemini_request = GeminiRequest(
+        contents=request.contents,
+        generationConfig=request.generationConfig
+    )
+    unified_request = transformer.parse_gemini_request(gemini_request, model_name, stream=False)
+    
+    # 5. 获取模型组的输入映射配置
+    input_mapping = None
+    result = await session.execute(
+        select(ModelGroup).where(ModelGroup.name == model_name)
+    )
+    model_group = result.scalar_one_or_none()
+    if model_group and model_group.input_mapping:
+        try:
+            input_mapping = json.loads(model_group.input_mapping)
+        except json.JSONDecodeError:
+            pass
+    
+    # 6. 转换?StackAI 格式
+    backend_payload = transformer.to_stackai_dict(
+        unified_request,
+        input_mapping=input_mapping,
+        user_id="anonymous"
+    )
+    
+    logger.info(f"Request {request_id}: model={model_name}, stream=False")
+    
+    try:
+        # 7. 执行同步请求
+        backend_response = await backend_client.run_with_account(
+            account=account,
+            payload=backend_payload,
+            account_pool=account_pool
+        )
+        
+        # 转换响应格式
+        gemini_response = response_transformer.to_gemini_response(
+            backend_response, model_name
+        )
+        
+        # 更新 token 使用?
+        usage = gemini_response.get("usageMetadata", {})
+        prompt_tokens = usage.get("promptTokenCount", 0)
+        completion_tokens = usage.get("candidatesTokenCount", 0)
+        total_tokens = usage.get("totalTokenCount", 0)
+        
+        if total_tokens > 0:
+            await account_pool.update_token_usage(
+                session, account.id,
+                prompt_tokens,
+                completion_tokens
+            )
+        
+        elapsed_ms = int((time.time() - start_time) * 1000)
+        
+        # 记录请求日志
+        logger_service = get_logger_service()
+        client_ip = http_request.client.host if http_request.client else None
+        await logger_service.log_success(
+            session=session,
+            request_id=request_id,
+            api_key_prefix=api_key_obj.key_prefix if api_key_obj else None,
+            client_ip=client_ip,
+            model=model_name,
+            account_id=account.id,
+            input_tokens=prompt_tokens,
+            output_tokens=completion_tokens,
+            response_time_ms=elapsed_ms
+        )
+        
+        # 更新 API Key 累计统计
+        if api_key_obj:
+            await api_key_service.update_key_stats(
+                session, api_key_obj.id, prompt_tokens, completion_tokens
+            )
+        
+        # 更新系统累计统计
+        stats_service = get_stats_service()
+        await stats_service.update_system_stats(session, prompt_tokens, completion_tokens)
+        
+        await session.commit()
+        logger.info(f"Request {request_id}: completed in {elapsed_ms}ms")
+        
+        return JSONResponse(
+            content=gemini_response,
+            headers={"X-Request-ID": request_id}
+        )
+        
+    except BackendAPIError as e:
+        logger.error(f"Request {request_id}: Backend API error - {e.message}")
+        error = error_handler.parse_backend_error(
+            e.response_data or {}, e.status_code or 502
+        )
+        return JSONResponse(
+            status_code=error.status_code,
+            content=error_handler.to_gemini_error(error)
+        )
+    except BackendConnectionError as e:
+        logger.error(f"Request {request_id}: Connection error - {e.message}")
+        error = error_handler.create_backend_error(
+            "Failed to connect to Backend backend"
+        )
+        return JSONResponse(
+            status_code=error.status_code,
+            content=error_handler.to_gemini_error(error)
+        )
+    except BackendTimeoutError as e:
+        logger.error(f"Request {request_id}: Timeout - {e.message}")
+        error = error_handler.create_backend_error(
+            "Request to Backend backend timed out"
+        )
+        return JSONResponse(
+            status_code=error.status_code,
+            content=error_handler.to_gemini_error(error)
+        )
+    except Exception as e:
+        logger.exception(f"Request {request_id}: Unexpected error")
+        error = error_handler.create_server_error(str(e))
+        return JSONResponse(
+            status_code=error.status_code,
+            content=error_handler.to_gemini_error(error)
+        )
+
+
+# ============================================================================
+# streamGenerateContent Endpoint (Requirement 1.3)
+# ============================================================================
+
+@router.post("/models/{model}:streamGenerateContent")
+async def stream_generate_content(
+    model: str,
+    request: GenerateContentRequest,
+    http_request: Request,
+    x_goog_api_key: Optional[str] = Header(None, alias="x-goog-api-key"),
+    authorization: Optional[str] = Header(None),
+    session: AsyncSession = Depends(get_session)
+):
+    """
+    Gemini 兼容?streamGenerateContent 端点
+    
+    - 支持流式响应
+    - 验证 API Key 和模型权?
+    - 将请求转换为后端格式并执?
+    - 将响应转换为 Gemini SSE 格式返回
+    """
+    request_id = uuid.uuid4().hex[:24]
+    start_time = time.time()
+    
+    # 提取模型名称
+    model_name = extract_model_name(model)
+    
+    # 获取服务实例
+    api_key_service = get_api_key_service()
+    account_pool = get_account_pool_service()
+    backend_client = get_backend_client()
+    transformer = get_transformer()
+    response_transformer = get_response_transformer()
+    error_handler = get_error_handler()
+    
+    # 1. 提取并验?API Key
+    raw_key = extract_api_key(x_goog_api_key, authorization)
+    if not raw_key:
+        error = error_handler.create_authentication_error(
+            "Missing API key. Please include 'x-goog-api-key' header or 'Authorization: Bearer YOUR_API_KEY' header."
+        )
+        return JSONResponse(
+            status_code=error.status_code,
+            content=error_handler.to_gemini_error(error)
+        )
+    
+    # 2. 验证 API Key 和模型权?
+    api_key_obj, error_response = await validate_api_key_and_model(
+        session, raw_key, model_name, api_key_service, error_handler
+    )
+    if error_response:
+        return error_response
+    
+    # 3. 获取可用账号
+    account = await account_pool.get_available_account(session, model_name)
+    if not account:
+        error = error_handler.create_service_unavailable_error(
+            f"No available accounts for model '{model_name}'"
+        )
+        return JSONResponse(
+            status_code=error.status_code,
+            content=error_handler.to_gemini_error(error)
+        )
+    
+    # 4. 转换请求格式
+    gemini_request = GeminiRequest(
+        contents=request.contents,
+        generationConfig=request.generationConfig
+    )
+    unified_request = transformer.parse_gemini_request(gemini_request, model_name, stream=True)
+    
+    # 5. 获取模型组的输入映射配置
+    input_mapping = None
+    result = await session.execute(
+        select(ModelGroup).where(ModelGroup.name == model_name)
+    )
+    model_group = result.scalar_one_or_none()
+    if model_group and model_group.input_mapping:
+        try:
+            input_mapping = json.loads(model_group.input_mapping)
+        except json.JSONDecodeError:
+            pass
+    
+    # 6. 转换?StackAI 格式
+    backend_payload = transformer.to_stackai_dict(
+        unified_request,
+        input_mapping=input_mapping,
+        user_id="anonymous"
+    )
+    
+    logger.info(f"Request {request_id}: model={model_name}, stream=True")
+    
+    # 流式响应 - 累积内容并在结束后更新统?
+    logger_service = get_logger_service()
+    client_ip = http_request.client.host if http_request.client else None
+    
+    # 获取账号?Private API Key（用于从 Backend Analytics 获取真实 token?
+    private_api_key = account_pool.decrypt_private_api_key(account)
+    
+    # 保存上下文信息用于流结束后更新统?
+    stream_context = {
+        "request_id": request_id,
+        "api_key_id": api_key_obj.id if api_key_obj else None,
+        "api_key_prefix": api_key_obj.key_prefix if api_key_obj else None,
+        "client_ip": client_ip,
+        "model": model_name,
+        "account_id": account.id,
+        "account_org_id": account.org_id,
+        "account_flow_id": account.flow_id,
+        "private_api_key": private_api_key,
+        "start_time": start_time,
+        "accumulated_content": [],
+        "pre_request_tokens": account.daily_used
+    }
+    
+    # 7. 流式响应
+    async def generate_stream():
+        try:
+            stream_gen = await backend_client.execute_with_account(
+                account=account,
+                payload=backend_payload,
+                stream=True,
+                account_pool=account_pool
+            )
+            
+            async for chunk in response_transformer.transform_backend_sse_to_gemini(
+                stream_gen, model_name
+            ):
+                # 尝试?chunk 中提取内容用?token 估算
+                if chunk.startswith("data: "):
+                    try:
+                        chunk_data = json.loads(chunk[6:])
+                        candidates = chunk_data.get("candidates", [])
+                        if candidates:
+                            content = candidates[0].get("content", {})
+                            parts = content.get("parts", [])
+                            for part in parts:
+                                text = part.get("text", "")
+                                if text:
+                                    stream_context["accumulated_content"].append(text)
+                    except (json.JSONDecodeError, IndexError, KeyError):
+                        pass
+                yield chunk
+            
+            # 流结束后，异步更新统?
+            import asyncio
+            asyncio.create_task(update_gemini_stream_stats(stream_context))
+                
+        except BackendClientError as e:
+            logger.error(f"Request {request_id}: Backend error - {e.message}")
+            # 在流式响应中发送错?
+            error_data = {
+                "error": {
+                    "code": 502,
+                    "message": e.message,
+                    "status": "UNAVAILABLE"
+                }
+            }
+            yield f"data: {json.dumps(error_data)}\n\n"
+        except Exception as e:
+            logger.exception(f"Request {request_id}: Unexpected error")
+            error_data = {
+                "error": {
+                    "code": 500,
+                    "message": str(e),
+                    "status": "INTERNAL"
+                }
+            }
+            yield f"data: {json.dumps(error_data)}\n\n"
+    
+    return StreamingResponse(
+        generate_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Request-ID": request_id
+        }
+    )
+
+
+# ============================================================================
+# Models Endpoint (Requirement 1.3)
+# ============================================================================
+
+@router.get("/models")
+async def list_models(
+    x_goog_api_key: Optional[str] = Header(None, alias="x-goog-api-key"),
+    authorization: Optional[str] = Header(None),
+    session: AsyncSession = Depends(get_session)
+):
+    """
+    列出可用的模?
+    
+    必须提供有效?API Key 才能访问
+    """
+    api_key_service = get_api_key_service()
+    error_handler = get_error_handler()
+    
+    # 必须提供有效?API Key
+    raw_key = extract_api_key(x_goog_api_key, authorization)
+    if not raw_key:
+        error = error_handler.create_authentication_error()
+        return JSONResponse(
+            status_code=error.status_code,
+            content=error_handler.to_gemini_error(error)
+        )
+    
+    is_valid, error_msg, api_key_obj = await api_key_service.validate_key(
+        session, raw_key
+    )
+    if not is_valid:
+        error = error_handler.create_authentication_error()
+        return JSONResponse(
+            status_code=error.status_code,
+            content=error_handler.to_gemini_error(error)
+        )
+    
+    # 获取?Key 授权的模型列?
+    allowed_models = api_key_service.get_model_groups(api_key_obj)
+    
+    # 获取所有模型组
+    result = await session.execute(select(ModelGroup))
+    model_groups = list(result.scalars().all())
+    
+    # 构建模型列表（Gemini 格式?
+    models = []
+    
+    for group in model_groups:
+        # 只返回授权的模型
+        if allowed_models is not None and group.name not in allowed_models:
+            continue
+        
+        models.append({
+            "name": f"models/{group.name}",
+            "version": "001",
+            "displayName": group.name,
+            "description": group.description or f"Model: {group.name}",
+            "inputTokenLimit": 32768,
+            "outputTokenLimit": 8192,
+            "supportedGenerationMethods": [
+                "generateContent",
+                "streamGenerateContent"
+            ],
+            "temperature": 1.0,
+            "topP": 0.95,
+            "topK": 64
+        })
+    
+    return {"models": models}
+
+
+@router.get("/models/{model}")
+async def get_model(
+    model: str,
+    x_goog_api_key: Optional[str] = Header(None, alias="x-goog-api-key"),
+    authorization: Optional[str] = Header(None),
+    session: AsyncSession = Depends(get_session)
+):
+    """
+    获取单个模型的详细信?
+    
+    必须提供有效?API Key 才能访问
+    """
+    api_key_service = get_api_key_service()
+    error_handler = get_error_handler()
+    
+    # 必须提供有效?API Key
+    raw_key = extract_api_key(x_goog_api_key, authorization)
+    if not raw_key:
+        error = error_handler.create_authentication_error()
+        return JSONResponse(
+            status_code=error.status_code,
+            content=error_handler.to_gemini_error(error)
+        )
+    
+    is_valid, error_msg, api_key_obj = await api_key_service.validate_key(
+        session, raw_key
+    )
+    if not is_valid:
+        error = error_handler.create_authentication_error()
+        return JSONResponse(
+            status_code=error.status_code,
+            content=error_handler.to_gemini_error(error)
+        )
+    
+    # 提取模型名称
+    model_name = extract_model_name(model)
+    
+    # 查找模型?
+    result = await session.execute(
+        select(ModelGroup).where(ModelGroup.name == model_name)
+    )
+    model_group = result.scalar_one_or_none()
+    
+    if not model_group:
+        # 不暴露模型是否存在，统一返回 401
+        error = error_handler.create_authentication_error(
+        )
+        return JSONResponse(
+            status_code=error.status_code,
+            content=error_handler.to_gemini_error(error)
+        )
+    
+    return {
+        "name": f"models/{model_group.name}",
+        "version": "001",
+        "displayName": model_group.name,
+        "description": model_group.description or f"Model: {model_group.name}",
+        "inputTokenLimit": 32768,
+        "outputTokenLimit": 8192,
+        "supportedGenerationMethods": [
+            "generateContent",
+            "streamGenerateContent"
+        ],
+        "temperature": 1.0,
+        "topP": 0.95,
+        "topK": 64
+    }
+
+
+# ============================================================================
+# Stream Stats Update Helper
+# ============================================================================
+
+async def update_gemini_stream_stats(context: dict):
+    """
+    流式响应结束后更新统?
+    
+    优先?Backend Analytics 获取真实?token 数据?
+    如果无法获取则使?tiktoken 估算?
+    
+    Args:
+        context: 包含请求上下文信息的字典
+    """
+    from app.models.database import get_session_factory
+    from app.services.token_counter import get_token_counter
+    from app.services.analytics import get_analytics_service
+    
+    try:
+        elapsed_ms = int((time.time() - context["start_time"]) * 1000)
+        input_tokens = 0
+        output_tokens = 0
+        total_tokens = 0
+        
+        # 尝试?Backend Analytics 获取真实?token 数据
+        private_api_key = context.get("private_api_key")
+        if private_api_key:
+            try:
+                analytics_service = get_analytics_service()
+                import asyncio
+                await asyncio.sleep(1)
+                
+                stats = await analytics_service.get_recent_stats(
+                    org_id=context["account_org_id"],
+                    flow_id=context["account_flow_id"],
+                    private_api_key=private_api_key,
+                    days=1
+                )
+                
+                if stats:
+                    pre_tokens = context.get("pre_request_tokens", 0)
+                    current_tokens = stats.today_tokens
+                    total_tokens = max(0, current_tokens - pre_tokens)
+                    input_tokens = total_tokens // 3
+                    output_tokens = total_tokens - input_tokens
+                    logger.debug(f"Got real token data from Backend: delta={total_tokens}")
+            except Exception as e:
+                logger.warning(f"Failed to get token data from Backend Analytics: {e}")
+        
+        # 如果无法?StackAI 获取，使?tiktoken 估算
+        if total_tokens == 0:
+            accumulated_content = "".join(context.get("accumulated_content", []))
+            if accumulated_content:
+                token_counter = get_token_counter()
+                output_tokens = token_counter.count(accumulated_content)
+                total_tokens = output_tokens
+        
+        # 创建新的数据库会?
+        session_factory = get_session_factory()
+        async with session_factory() as session:
+            # 记录请求日志
+            logger_service = get_logger_service()
+            await logger_service.log_success(
+                session=session,
+                request_id=context["request_id"],
+                api_key_prefix=context["api_key_prefix"],
+                client_ip=context["client_ip"],
+                model=context["model"],
+                account_id=context["account_id"],
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                response_time_ms=elapsed_ms
+            )
+            
+            # 更新 API Key 累计统计
+            if context["api_key_id"]:
+                api_key_service = get_api_key_service()
+                await api_key_service.update_key_stats(
+                    session, context["api_key_id"], input_tokens, output_tokens
+                )
+            
+            # 更新系统累计统计
+            stats_service = get_stats_service()
+            await stats_service.update_system_stats(session, input_tokens, output_tokens)
+            
+            await session.commit()
+            
+        logger.debug(
+            f"Gemini stream stats updated for request {context['request_id']}: "
+            f"tokens={total_tokens}, elapsed={elapsed_ms}ms"
+        )
+    except Exception as e:
+        logger.error(f"Failed to update Gemini stream stats: {e}")
+

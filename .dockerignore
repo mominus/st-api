@@ -1,0 +1,43 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+.venv/
+ENV/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# 环境变量（敏感信息）
+.env
+.env.local
+.env.*.local
+
+# 数据库和日志
+*.db
+*.sqlite
+*.log
+data/
+
+# 测试
+.pytest_cache/
+.hypothesis/
+.coverage
+htmlcov/
+
+# 部署配置（其他平台）
+railway.toml
+nixpacks.toml
+
+# 文档
+*.md
+!README.md

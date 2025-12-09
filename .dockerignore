@@ -26,18 +26,13 @@ ENV/
 *.db
 *.sqlite
 *.log
-data/
 
 # 测试
 .pytest_cache/
 .hypothesis/
 .coverage
 htmlcov/
-
-# 部署配置（其他平台）
-railway.toml
-nixpacks.toml
+tests/
 
 # 文档
 *.md
-!README.md

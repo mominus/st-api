@@ -2,18 +2,24 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
+# 创建非 root 用户（HF Spaces 要求）
+RUN useradd -m -u 1000 user
+
 # 安装依赖
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # 复制代码
-COPY . .
+COPY --chown=user:user . .
 
-# 创建数据目录
-RUN mkdir -p /data
+# 创建数据目录并设置权限
+RUN mkdir -p /app/data && chown -R user:user /app/data
 
-# 暴露端口
-EXPOSE 8080
+# 切换到非 root 用户
+USER user
+
+# 暴露端口（HF Spaces 使用 7860）
+EXPOSE 7860
 
 # 启动命令
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "7860"]

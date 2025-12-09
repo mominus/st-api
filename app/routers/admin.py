@@ -1587,7 +1587,9 @@ async def test_account(
             pass
     
     # 构建后端请求
-    backend_url = f"https://api.stack-ai.com/inference/v0/run/{account.org_id}/{account.flow_id}"
+    import os
+    backend_base = os.getenv("BACKEND_API_URL", "https://api.stack-ai.com")
+    backend_url = f"{backend_base}/inference/v0/run/{account.org_id}/{account.flow_id}"
     
     # 构建输入字段
     input_fields = {}

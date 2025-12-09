@@ -252,48 +252,35 @@
             </div>
             <form id="account-form">
                 <input type="hidden" id="account-id">
-                <div class="param-tip">
-                    <div class="param-tip-header">💡 参数获取方法</div>
-                    <div class="param-tip-content">
-                        在后端工作流页面点击 <strong>Export → API</strong>，从 Python 示例中获取：
-                        <div class="param-tip-url">
-                            <code>API_URL = "https://api.xxx.com/.../run/<span class="hl">org_id</span>/<span class="hl">flow_id</span>"</code>
-                        </div>
-                    </div>
-                </div>
                 <div class="form-group">
                     <label for="account-name">账号名称 *</label>
-                    <input type="text" id="account-name" required placeholder="例如：我的后端账号">
+                    <input type="text" id="account-name" required placeholder="自定义名称">
                 </div>
                 <div class="form-group">
                     <label for="account-org-id">Organization ID *</label>
-                    <input type="text" id="account-org-id" required placeholder="URL 中第一个 ID（如 3b0c67e9-...）">
+                    <input type="text" id="account-org-id" required placeholder="组织 ID">
                 </div>
                 <div class="form-group">
                     <label for="account-flow-id">Flow ID *</label>
-                    <input type="text" id="account-flow-id" required placeholder="URL 中第二个 ID（如 691af087...）">
+                    <input type="text" id="account-flow-id" required placeholder="工作流 ID">
                 </div>
                 <div class="form-group">
-                    <label for="account-api-key">Bearer Token *</label>
-                    <input type="password" id="account-api-key" required placeholder="Authorization 头中 Bearer 后的值">
-                    <small class="text-muted">即 headers['Authorization'] = 'Bearer <strong>这里的值</strong>'</small>
+                    <label for="account-api-key">API Key *</label>
+                    <input type="password" id="account-api-key" required placeholder="API 密钥">
                 </div>
                 <div class="form-group">
                     <label for="account-model-group">模型组 *</label>
                     <select id="account-model-group" required>
                         <option value="">选择模型组</option>
                     </select>
-                    <small class="text-muted">将此账号关联到哪个模型组，调用该模型时会使用此账号</small>
                 </div>
                 <div class="form-group">
                     <label for="account-daily-quota">每日配额 (Token)</label>
                     <input type="number" id="account-daily-quota" value="1000000" min="0">
-                    <small class="text-muted">免费账号每日限额 1,000,000 Token</small>
                 </div>
                 <div class="form-group">
                     <label for="account-private-key">Private API Key（可选）</label>
-                    <input type="password" id="account-private-key" placeholder="用于同步使用量统计">
-                    <small class="text-muted">从后端设置页面获取，配置后可在仪表板查看真实使用量</small>
+                    <input type="password" id="account-private-key" placeholder="用于同步使用量">
                 </div>
                 <div class="modal-footer">
                     <button type="button" class="btn btn-secondary" onclick="closeModal('account-modal')">取消</button>

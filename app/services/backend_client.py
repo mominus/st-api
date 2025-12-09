@@ -3,6 +3,7 @@ Backend Client Service
 与后端 API 通信的客户端，支持同步和流式请求
 """
 
+import os
 import logging
 from typing import Optional, Dict, Any, AsyncGenerator
 
@@ -12,8 +13,8 @@ from app.services.account_pool import AccountPoolService, get_account_pool_servi
 
 logger = logging.getLogger(__name__)
 
-# 后端 API 基础 URL
-BACKEND_BASE_URL = "https://api.stack-ai.com"
+# 后端 API 基础 URL（从环境变量读取）
+BACKEND_BASE_URL = os.getenv("BACKEND_API_URL", "https://api.stack-ai.com")
 
 # 默认超时设置（秒）
 DEFAULT_TIMEOUT = 120.0

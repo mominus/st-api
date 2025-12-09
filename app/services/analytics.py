@@ -5,6 +5,7 @@ Analytics Service
 用于监控账号配额和使用量
 """
 
+import os
 import logging
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, List
@@ -14,7 +15,7 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-BACKEND_BASE_URL = "https://api.stack-ai.com"
+BACKEND_BASE_URL = os.getenv("BACKEND_API_URL", "https://api.stack-ai.com")
 
 
 @dataclass

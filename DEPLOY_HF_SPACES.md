@@ -95,21 +95,42 @@ git push hf main
 - API 直接访问：`https://你的用户名-st-api.hf.space`
 - 管理后台：`https://你的用户名-st-api.hf.space/你的ADMIN_PATH`
 
-## 六、持久化说明
+## 六、使用云数据库（推荐）
 
-⚠️ **重要**：HF Spaces 的免费版不支持持久化存储！
+⚠️ HF Spaces 免费版不支持持久化，建议使用免费云数据库。
 
-每次重启/重新部署，SQLite 数据会丢失。
+### 方案：Supabase（免费 PostgreSQL）
 
-### 解决方案：
+#### 1. 创建数据库
+1. 访问 [supabase.com](https://supabase.com) 注册
+2. 创建新项目，选择区域（建议新加坡 `ap-southeast-1`）
+3. 设置并记录数据库密码
 
-1. **接受数据丢失**：适合测试或无状态使用
-2. **使用外部数据库**：
-   - [Supabase](https://supabase.com)（免费 PostgreSQL）
-   - [PlanetScale](https://planetscale.com)（免费 MySQL）
-   - [Turso](https://turso.tech)（免费 SQLite 云端）
+#### 2. 获取连接字符串
+项目 Settings → Database → Connection string → URI（选择 `Mode: Session`）
 
-如需改用外部数据库，修改 `DATABASE_URL` 环境变量即可。
+格式：
+```
+postgresql://postgres.xxxx:[密码]@aws-0-ap-southeast-1.pooler.supabase.com:5432/postgres
+```
+
+#### 3. 转换为异步格式
+将 `postgresql://` 改为 `postgresql+asyncpg://`：
+```
+postgresql+asyncpg://postgres.xxxx:[密码]@aws-0-ap-southeast-1.pooler.supabase.com:5432/postgres
+```
+
+#### 4. 添加到 Secrets
+在 HF Space Settings → Repository secrets 添加：
+```
+DATABASE_URL=postgresql+asyncpg://postgres.xxxx:[密码]@aws-0-ap-southeast-1.pooler.supabase.com:5432/postgres
+```
+
+### Supabase 免费额度
+- 500MB 数据库存储
+- 无限 API 请求
+- 2 个项目
+- 7 天无活动暂停（访问即恢复）
 
 ## 七、常用操作
 

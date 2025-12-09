@@ -1,0 +1,23 @@
+# Render Blueprint 配置
+services:
+  - type: web
+    name: st-api
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.12.0"
+      - key: DATABASE_URL
+        sync: false  # 从 Render Dashboard 设置
+      - key: JWT_SECRET_KEY
+        sync: false
+      - key: ENCRYPTION_KEY
+        sync: false
+      - key: ADMIN_USERNAME
+        sync: false
+      - key: ADMIN_PASSWORD
+        sync: false
+      - key: ADMIN_PATH
+        sync: false
+    healthCheckPath: /health

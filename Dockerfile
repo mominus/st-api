@@ -20,8 +20,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY app/ ./app/
 COPY run.py .
 
-# 创建数据目录（会被 Persistent Storage 覆盖）
-RUN mkdir -p /data
+# 创建数据目录
+RUN mkdir -p /app/data && chmod 777 /app/data
 
 # 设置权限
 RUN chmod -R 755 /app

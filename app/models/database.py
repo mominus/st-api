@@ -20,8 +20,6 @@ from sqlalchemy.orm import declarative_base
 Base = declarative_base()
 
 # 数据库 URL，默认使用 SQLite
-# 本地开发: sqlite+aiosqlite:///./data/api_service.db
-# Turso: sqlite+libsql://your-db.turso.io?authToken=xxx&secure=true
 DATABASE_URL = os.getenv(
     "DATABASE_URL", 
     "sqlite+aiosqlite:///./data/api_service.db"
@@ -210,7 +208,7 @@ async def init_database() -> None:
     pool_timeout = int(os.getenv("DB_POOL_TIMEOUT", "30"))
     pool_recycle = int(os.getenv("DB_POOL_RECYCLE", "3600"))
     
-    # 数据库连接参数
+    # SQLite 连接参数：增加超时时间和启用 WAL 模式以支持更好的并发
     connect_args = {}
     engine_kwargs = {
         "echo": os.getenv("DEBUG", "false").lower() == "true",
@@ -218,15 +216,12 @@ async def init_database() -> None:
         "pool_pre_ping": True
     }
     
-    # 判断数据库类型
-    is_sqlite = "sqlite" in db_url
-    
-    if is_sqlite:
-        # SQLite
+    if "sqlite" in db_url:
         connect_args = {
-            "timeout": 60,
+            "timeout": 60,  # 增加锁等待超时时间
             "check_same_thread": False
         }
+        # SQLite 使用 NullPool 或 StaticPool 更适合
         engine_kwargs["pool_size"] = 5
         engine_kwargs["max_overflow"] = 10
     else:
@@ -236,8 +231,7 @@ async def init_database() -> None:
         engine_kwargs["pool_timeout"] = pool_timeout
         engine_kwargs["pool_recycle"] = pool_recycle
     
-    if connect_args:
-        engine_kwargs["connect_args"] = connect_args
+    engine_kwargs["connect_args"] = connect_args
     
     # 创建异步引擎
     _engine = create_async_engine(db_url, **engine_kwargs)
@@ -249,13 +243,14 @@ async def init_database() -> None:
         expire_on_commit=False
     )
     
-    # 创建所有表
+    # 创建所有表，并为 SQLite 启用 WAL 模式
     async with _engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-        # SQLite 启用 WAL 模式
-        if is_sqlite:
+        # 启用 WAL 模式以支持更好的并发读写
+        if "sqlite" in db_url:
             await conn.execute(text("PRAGMA journal_mode=WAL"))
             await conn.execute(text("PRAGMA busy_timeout=30000"))
+            # 执行 SQLite 迁移（添加新列）
             await _migrate_sqlite_columns(conn)
 
 

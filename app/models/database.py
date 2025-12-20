@@ -20,6 +20,8 @@ from sqlalchemy.orm import declarative_base
 Base = declarative_base()
 
 # 数据库 URL，默认使用 SQLite
+# 本地开发: sqlite+aiosqlite:///./data/api_service.db
+# Turso: libsql+https://your-db.turso.io?authToken=xxx
 DATABASE_URL = os.getenv(
     "DATABASE_URL", 
     "sqlite+aiosqlite:///./data/api_service.db"
@@ -67,9 +69,11 @@ class APIKey(Base):
     key_suffix = Column(String(10), nullable=True)  # 用于显示，如 xxxx（后4位）
     name = Column(String(255), nullable=True)
     model_groups = Column(Text, nullable=False)  # JSON: 授权的模型组列表
-    quota = Column(Integer, nullable=True)  # Token 配额，NULL 表示无限制
+    quota = Column(Integer, nullable=True)  # Token 配额，NULL 表示无限制（已弃用）
     used = Column(Integer, default=0)
     request_quota = Column(Integer, nullable=True)  # 请求数配额，NULL 表示无限制
+    token_quota = Column(Integer, nullable=True)  # Token 额度限制，NULL 表示无限制
+    cost_limit = Column(String(20), nullable=True)  # 费用限制（美元），NULL 表示无限制
     expires_at = Column(DateTime, nullable=True)
     status = Column(String(20), default="active")  # active, revoked, exhausted
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -77,6 +81,7 @@ class APIKey(Base):
     # 累计统计（从创建日期开始）
     total_requests = Column(Integer, default=0)  # 总请求数
     total_tokens = Column(Integer, default=0)  # 总 Token 使用量
+    total_cost = Column(String(20), default="0")  # 总费用（美元）
 
 
 class TokenUsageHistory(Base):
@@ -104,6 +109,49 @@ class RequestLog(Base):
     account_id = Column(String(36), nullable=True)
     input_tokens = Column(Integer, nullable=True)
     output_tokens = Column(Integer, nullable=True)
+    response_time_ms = Column(Integer, nullable=True)
+    status = Column(String(20), nullable=True)  # success, error
+    error_message = Column(Text, nullable=True)
+
+
+class CallLog(Base):
+    """详细调用日志表"""
+    __tablename__ = "call_logs"
+    
+    id = Column(String(36), primary_key=True)
+    timestamp = Column(DateTime, default=datetime.utcnow, index=True)
+    
+    # 调用方信息
+    api_key_id = Column(String(36), nullable=True)
+    api_key_name = Column(String(255), nullable=True)
+    api_key_prefix = Column(String(20), nullable=True)
+    client_ip = Column(String(45), nullable=True)
+    
+    # 账号信息
+    account_id = Column(String(36), nullable=True)
+    account_name = Column(String(255), nullable=True)
+    model_group = Column(String(255), nullable=True)
+    
+    # 请求信息
+    model = Column(String(255), nullable=True)
+    api_type = Column(String(20), nullable=True)  # openai, anthropic, gemini
+    is_stream = Column(Boolean, default=False)
+    
+    # 输入输出（截断存储）
+    input_preview = Column(Text, nullable=True)  # 输入预览（前500字符）
+    output_preview = Column(Text, nullable=True)  # 输出预览（前10行或500字符）
+    
+    # Token 统计
+    input_tokens = Column(Integer, default=0)
+    output_tokens = Column(Integer, default=0)
+    total_tokens = Column(Integer, default=0)
+    
+    # 费用计算（美元，精确到小数点后6位）
+    input_cost = Column(String(20), nullable=True)
+    output_cost = Column(String(20), nullable=True)
+    total_cost = Column(String(20), nullable=True)
+    
+    # 响应信息
     response_time_ms = Column(Integer, nullable=True)
     status = Column(String(20), nullable=True)  # success, error
     error_message = Column(Text, nullable=True)
@@ -156,22 +204,48 @@ async def init_database() -> None:
     
     db_url = get_database_url()
     
-    # SQLite 连接参数：增加超时时间和启用 WAL 模式以支持更好的并发
+    # 连接池配置
+    pool_size = int(os.getenv("DB_POOL_SIZE", "20"))
+    max_overflow = int(os.getenv("DB_MAX_OVERFLOW", "30"))
+    pool_timeout = int(os.getenv("DB_POOL_TIMEOUT", "30"))
+    pool_recycle = int(os.getenv("DB_POOL_RECYCLE", "3600"))
+    
+    # 数据库连接参数
     connect_args = {}
-    if "sqlite" in db_url:
+    engine_kwargs = {
+        "echo": os.getenv("DEBUG", "false").lower() == "true",
+        "future": True,
+        "pool_pre_ping": True
+    }
+    
+    # 判断数据库类型
+    is_sqlite = "sqlite" in db_url and "libsql" not in db_url
+    is_turso = "libsql" in db_url or "turso" in db_url
+    
+    if is_sqlite:
+        # 本地 SQLite
         connect_args = {
-            "timeout": 30,  # 增加锁等待超时时间
+            "timeout": 60,
             "check_same_thread": False
         }
+        engine_kwargs["pool_size"] = 5
+        engine_kwargs["max_overflow"] = 10
+    elif is_turso:
+        # Turso/LibSQL - 使用 HTTP，不需要传统连接池
+        engine_kwargs["pool_size"] = 5
+        engine_kwargs["max_overflow"] = 10
+    else:
+        # PostgreSQL 等数据库使用完整连接池配置
+        engine_kwargs["pool_size"] = pool_size
+        engine_kwargs["max_overflow"] = max_overflow
+        engine_kwargs["pool_timeout"] = pool_timeout
+        engine_kwargs["pool_recycle"] = pool_recycle
+    
+    if connect_args:
+        engine_kwargs["connect_args"] = connect_args
     
     # 创建异步引擎
-    _engine = create_async_engine(
-        db_url,
-        echo=os.getenv("DEBUG", "false").lower() == "true",
-        future=True,
-        connect_args=connect_args,
-        pool_pre_ping=True
-    )
+    _engine = create_async_engine(db_url, **engine_kwargs)
     
     # 创建会话工厂
     _async_session_factory = async_sessionmaker(
@@ -180,13 +254,44 @@ async def init_database() -> None:
         expire_on_commit=False
     )
     
-    # 创建所有表，并为 SQLite 启用 WAL 模式
+    # 创建所有表
     async with _engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-        # 启用 WAL 模式以支持更好的并发读写
-        if "sqlite" in db_url:
+        # 仅本地 SQLite 启用 WAL 模式
+        if is_sqlite:
             await conn.execute(text("PRAGMA journal_mode=WAL"))
             await conn.execute(text("PRAGMA busy_timeout=30000"))
+            await _migrate_sqlite_columns(conn)
+
+
+async def _migrate_sqlite_columns(conn) -> None:
+    """
+    SQLite 迁移：为现有表添加新列
+    SQLite 不支持通过 create_all 添加新列，需要手动 ALTER TABLE
+    """
+    # 需要添加的列：(表名, 列名, 列定义)
+    migrations = [
+        ("api_keys", "token_quota", "INTEGER"),
+        ("api_keys", "cost_limit", "VARCHAR(20)"),
+        ("api_keys", "total_cost", "VARCHAR(20) DEFAULT '0'"),
+    ]
+    
+    for table_name, column_name, column_def in migrations:
+        try:
+            # 检查列是否存在
+            result = await conn.execute(
+                text(f"SELECT {column_name} FROM {table_name} LIMIT 1")
+            )
+            result.close()
+        except Exception:
+            # 列不存在，添加它
+            try:
+                await conn.execute(
+                    text(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_def}")
+                )
+                print(f"[Migration] Added column {table_name}.{column_name}")
+            except Exception as e:
+                print(f"[Migration] Failed to add column {table_name}.{column_name}: {e}")
 
 
 async def close_database() -> None:

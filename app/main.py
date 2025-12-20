@@ -23,6 +23,11 @@ import secrets
 from app.routers import openai_router, anthropic_router, gemini_router, admin_router
 from app.models.database import init_database, close_database
 from app.services.auth import get_auth_service
+import logging
+
+# 配置日志
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 
 # 从环境变量获取隐藏的后台路径，默认生成随机路径
@@ -77,6 +82,42 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# 请求日志中间件（带性能统计）
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    """记录所有请求的路径和方法，并统计性能数据"""
+    import time
+    from app.services.connection_pool import get_concurrency_limiter
+    
+    path = request.url.path
+    logger.info(f"[REQUEST] {request.method} {path}")
+    
+    # 只统计 API 请求（排除静态文件和管理后台）
+    should_track = (
+        path.startswith("/v1/") or 
+        path.startswith("/anthropic/") or 
+        path.startswith("/gemini/")
+    )
+    
+    if should_track:
+        limiter = get_concurrency_limiter()
+        start_time = time.time()
+        try:
+            async with limiter.acquire_request():
+                response = await call_next(request)
+                # 记录响应时间
+                elapsed = (time.time() - start_time) * 1000  # 毫秒
+                limiter.record_response_time(elapsed)
+                return response
+        except Exception as e:
+            # 请求被拒绝或出错
+            logger.warning(f"Request rejected or failed: {e}")
+            raise
+    else:
+        response = await call_next(request)
+        return response
 
 # 注册 OpenAI 兼容路由
 app.include_router(openai_router)

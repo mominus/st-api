@@ -208,12 +208,40 @@ async def generate_content(
         except json.JSONDecodeError:
             pass
     
-    # 6. 转换?StackAI 格式
-    backend_payload = transformer.to_stackai_dict(
-        unified_request,
-        input_mapping=input_mapping,
-        user_id="anonymous"
-    )
+    # 6. 转换为 StackAI 格式
+    # 将 Gemini 消息格式化为上下文字符串
+    context_parts = []
+    for content in request.contents:
+        role = content.role or "user"
+        # 处理 parts
+        text_parts = []
+        for part in content.parts:
+            if hasattr(part, 'text') and part.text:
+                text_parts.append(part.text)
+            elif isinstance(part, dict) and 'text' in part:
+                text_parts.append(part['text'])
+        text_content = "\n".join(text_parts)
+        
+        if role == "user":
+            context_parts.append(f"User: {text_content}")
+        elif role == "model":
+            context_parts.append(f"Assistant: {text_content}")
+    
+    messages_context = "\n".join(context_parts)
+    
+    # 构建 payload
+    backend_payload = {
+        "user_id": "anonymous",
+        "in-0": messages_context,
+        "conversation_id": str(uuid.uuid4())
+    }
+    
+    # 如果有自定义输入映射，应用它
+    if input_mapping and "user_input" in input_mapping:
+        field_name = input_mapping["user_input"]
+        if field_name != "in-0":
+            backend_payload[field_name] = messages_context
+            del backend_payload["in-0"]
     
     logger.info(f"Request {request_id}: model={model_name}, stream=False")
     
@@ -260,15 +288,59 @@ async def generate_content(
             response_time_ms=elapsed_ms
         )
         
-        # 更新 API Key 累计统计
+        # 计算费用
+        from app.services.pricing import get_pricing_service
+        pricing_service = get_pricing_service()
+        _, _, total_cost = pricing_service.calculate(model_name, prompt_tokens, completion_tokens)
+        
+        # 更新 API Key 累计统计（包含费用）
         if api_key_obj:
             await api_key_service.update_key_stats(
-                session, api_key_obj.id, prompt_tokens, completion_tokens
+                session, api_key_obj.id, prompt_tokens, completion_tokens, cost=total_cost
             )
         
         # 更新系统累计统计
         stats_service = get_stats_service()
         await stats_service.update_system_stats(session, prompt_tokens, completion_tokens)
+        
+        # 记录详细调用日志
+        from app.services.call_logger import get_call_logger_service, extract_input_preview
+        call_logger = get_call_logger_service()
+        
+        # 提取输入预览
+        input_preview = extract_input_preview(
+            [c.model_dump() if hasattr(c, 'model_dump') else c for c in request.contents],
+            api_type="gemini"
+        )
+        
+        # 提取输出预览
+        output_preview = ""
+        candidates = gemini_response.get("candidates", [])
+        if candidates:
+            content = candidates[0].get("content", {})
+            parts = content.get("parts", [])
+            if parts:
+                output_preview = parts[0].get("text", "")[:500]
+        
+        await call_logger.log_call(
+            session,
+            api_key_id=api_key_obj.id if api_key_obj else None,
+            api_key_name=api_key_obj.name if api_key_obj else None,
+            api_key_prefix=api_key_obj.key_prefix if api_key_obj else None,
+            client_ip=client_ip,
+            account_id=account.id,
+            account_name=account.name,
+            model_group=account.model_group,
+            model=model_name,
+            api_type="gemini",
+            is_stream=False,
+            input_preview=input_preview,
+            output_preview=output_preview,
+            input_tokens=prompt_tokens,
+            output_tokens=completion_tokens,
+            response_time_ms=elapsed_ms,
+            status="success",
+        )
         
         await session.commit()
         logger.info(f"Request {request_id}: completed in {elapsed_ms}ms")
@@ -397,12 +469,40 @@ async def stream_generate_content(
         except json.JSONDecodeError:
             pass
     
-    # 6. 转换?StackAI 格式
-    backend_payload = transformer.to_stackai_dict(
-        unified_request,
-        input_mapping=input_mapping,
-        user_id="anonymous"
-    )
+    # 6. 转换为 StackAI 格式
+    # 将 Gemini 消息格式化为上下文字符串
+    context_parts = []
+    for content in request.contents:
+        role = content.role or "user"
+        # 处理 parts
+        text_parts = []
+        for part in content.parts:
+            if hasattr(part, 'text') and part.text:
+                text_parts.append(part.text)
+            elif isinstance(part, dict) and 'text' in part:
+                text_parts.append(part['text'])
+        text_content = "\n".join(text_parts)
+        
+        if role == "user":
+            context_parts.append(f"User: {text_content}")
+        elif role == "model":
+            context_parts.append(f"Assistant: {text_content}")
+    
+    messages_context = "\n".join(context_parts)
+    
+    # 构建 payload
+    backend_payload = {
+        "user_id": "anonymous",
+        "in-0": messages_context,
+        "conversation_id": str(uuid.uuid4())
+    }
+    
+    # 如果有自定义输入映射，应用它
+    if input_mapping and "user_input" in input_mapping:
+        field_name = input_mapping["user_input"]
+        if field_name != "in-0":
+            backend_payload[field_name] = messages_context
+            del backend_payload["in-0"]
     
     logger.info(f"Request {request_id}: model={model_name}, stream=True")
     
@@ -410,23 +510,53 @@ async def stream_generate_content(
     logger_service = get_logger_service()
     client_ip = http_request.client.host if http_request.client else None
     
-    # 获取账号?Private API Key（用于从 Backend Analytics 获取真实 token?
+    # 获取账号的 Private API Key（用于从 Backend Analytics 获取真实 token）
     private_api_key = account_pool.decrypt_private_api_key(account)
     
-    # 保存上下文信息用于流结束后更新统?
+    # 从 Stack AI Analytics 获取请求前的 today_tokens（用于计算差值）
+    pre_request_tokens = 0
+    if private_api_key:
+        try:
+            from app.services.analytics import get_analytics_service
+            analytics_service = get_analytics_service()
+            stats = await analytics_service.get_recent_stats(
+                org_id=account.org_id,
+                flow_id=account.flow_id,
+                private_api_key=private_api_key,
+                days=1
+            )
+            if stats:
+                pre_request_tokens = stats.today_tokens
+                logger.debug(f"Request {request_id}: Pre-request today_tokens from Analytics: {pre_request_tokens}")
+        except Exception as e:
+            logger.debug(f"Request {request_id}: Failed to get pre-request tokens: {e}")
+            pre_request_tokens = 0
+    
+    # 提取输入预览
+    from app.services.call_logger import extract_input_preview
+    input_preview = extract_input_preview(
+        [c.model_dump() if hasattr(c, 'model_dump') else c for c in request.contents],
+        api_type="gemini"
+    )
+    
+    # 保存上下文信息用于流结束后更新统计
     stream_context = {
         "request_id": request_id,
         "api_key_id": api_key_obj.id if api_key_obj else None,
+        "api_key_name": api_key_obj.name if api_key_obj else None,
         "api_key_prefix": api_key_obj.key_prefix if api_key_obj else None,
         "client_ip": client_ip,
         "model": model_name,
         "account_id": account.id,
+        "account_name": account.name,
+        "model_group": account.model_group,
         "account_org_id": account.org_id,
         "account_flow_id": account.flow_id,
         "private_api_key": private_api_key,
         "start_time": start_time,
         "accumulated_content": [],
-        "pre_request_tokens": account.daily_used
+        "input_preview": input_preview,
+        "pre_request_tokens": pre_request_tokens  # 使用从 Stack AI Analytics 获取的真实值
     }
     
     # 7. 流式响应
@@ -641,10 +771,10 @@ async def get_model(
 
 async def update_gemini_stream_stats(context: dict):
     """
-    流式响应结束后更新统?
+    流式响应结束后更新统计
     
-    优先?Backend Analytics 获取真实?token 数据?
-    如果无法获取则使?tiktoken 估算?
+    优先从 Backend Analytics 获取真实的 token 数据，
+    如果无法获取则使用 tiktoken 估算。
     
     Args:
         context: 包含请求上下文信息的字典
@@ -652,6 +782,7 @@ async def update_gemini_stream_stats(context: dict):
     from app.models.database import get_session_factory
     from app.services.token_counter import get_token_counter
     from app.services.analytics import get_analytics_service
+    from app.services.call_logger import get_call_logger_service
     
     try:
         elapsed_ms = int((time.time() - context["start_time"]) * 1000)
@@ -659,7 +790,7 @@ async def update_gemini_stream_stats(context: dict):
         output_tokens = 0
         total_tokens = 0
         
-        # 尝试?Backend Analytics 获取真实?token 数据
+        # 尝试从 Backend Analytics 获取真实的 token 数据
         private_api_key = context.get("private_api_key")
         if private_api_key:
             try:
@@ -684,15 +815,17 @@ async def update_gemini_stream_stats(context: dict):
             except Exception as e:
                 logger.warning(f"Failed to get token data from Backend Analytics: {e}")
         
-        # 如果无法?StackAI 获取，使?tiktoken 估算
+        # 累积的输出内容
+        accumulated_content = "".join(context.get("accumulated_content", []))
+        
+        # 如果无法从 StackAI 获取，使用 tiktoken 估算
         if total_tokens == 0:
-            accumulated_content = "".join(context.get("accumulated_content", []))
             if accumulated_content:
                 token_counter = get_token_counter()
                 output_tokens = token_counter.count(accumulated_content)
                 total_tokens = output_tokens
         
-        # 创建新的数据库会?
+        # 创建新的数据库会话
         session_factory = get_session_factory()
         async with session_factory() as session:
             # 记录请求日志
@@ -709,16 +842,43 @@ async def update_gemini_stream_stats(context: dict):
                 response_time_ms=elapsed_ms
             )
             
-            # 更新 API Key 累计统计
+            # 计算费用
+            from app.services.pricing import get_pricing_service
+            pricing_service = get_pricing_service()
+            _, _, total_cost = pricing_service.calculate(context["model"], input_tokens, output_tokens)
+            
+            # 更新 API Key 累计统计（包含费用）
             if context["api_key_id"]:
                 api_key_service = get_api_key_service()
                 await api_key_service.update_key_stats(
-                    session, context["api_key_id"], input_tokens, output_tokens
+                    session, context["api_key_id"], input_tokens, output_tokens, cost=total_cost
                 )
             
             # 更新系统累计统计
             stats_service = get_stats_service()
             await stats_service.update_system_stats(session, input_tokens, output_tokens)
+            
+            # 记录详细调用日志
+            call_logger = get_call_logger_service()
+            await call_logger.log_call(
+                session,
+                api_key_id=context.get("api_key_id"),
+                api_key_name=context.get("api_key_name"),
+                api_key_prefix=context.get("api_key_prefix"),
+                client_ip=context.get("client_ip"),
+                account_id=context.get("account_id"),
+                account_name=context.get("account_name"),
+                model_group=context.get("model_group"),
+                model=context.get("model"),
+                api_type="gemini",
+                is_stream=True,
+                input_preview=context.get("input_preview"),
+                output_preview=accumulated_content[:500] if accumulated_content else None,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                response_time_ms=elapsed_ms,
+                status="success",
+            )
             
             await session.commit()
             

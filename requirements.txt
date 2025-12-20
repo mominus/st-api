@@ -9,7 +9,7 @@ httpx>=0.26.0
 # Database
 sqlalchemy>=2.0.25
 aiosqlite>=0.19.0
-asyncpg>=0.29.0  # PostgreSQL 异步驱动
+sqlalchemy-libsql>=0.1.0  # Turso/LibSQL 支持
 
 # Authentication
 pyjwt>=2.8.0
@@ -23,12 +23,6 @@ sse-starlette>=2.0.0
 
 # Environment Variables
 python-dotenv>=1.0.0
-
-# Testing
-hypothesis>=6.92.0
-pytest>=7.4.0
-pytest-asyncio>=0.23.0
-pytest-cov>=4.1.0
 
 # Utilities
 pydantic>=2.5.0

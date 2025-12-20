@@ -4,6 +4,7 @@ Request Transformer Service
 """
 
 import json
+import uuid
 from typing import Optional, List, Dict, Any, Literal, Union
 from dataclasses import dataclass, field
 from pydantic import BaseModel
@@ -364,7 +365,8 @@ class RequestTransformer:
         self, 
         unified: UnifiedRequest,
         input_mapping: Optional[Dict[str, str]] = None,
-        user_id: str = "anonymous"
+        user_id: str = "anonymous",
+        merge_context: bool = True
     ) -> BackendPayload:
         """
         将统一格式转换为后端输入格式
@@ -373,6 +375,9 @@ class RequestTransformer:
             unified: 统一格式的请求对象
             input_mapping: 输入字段映射配置，如 {"user_input": "in-0", "system_prompt": "in-1"}
             user_id: 用户 ID
+            merge_context: 是否将完整上下文合并到单一输入字段
+                          True: 将系统提示、历史对话、当前输入合并为一个字符串
+                          False: 分开发送到不同字段
             
         Returns:
             后端格式的请求对象
@@ -387,19 +392,27 @@ class RequestTransformer:
         
         input_fields: Dict[str, Any] = {}
         
-        # 映射用户输入
-        if "user_input" in input_mapping:
-            input_fields[input_mapping["user_input"]] = unified.user_input
-        
-        # 映射系统提示词
-        if "system_prompt" in input_mapping and unified.system_prompt:
-            input_fields[input_mapping["system_prompt"]] = unified.system_prompt
-        
-        # 映射聊天历史
-        if "chat_history" in input_mapping and unified.chat_history:
-            # 将聊天历史转换为字符串格式
-            history_str = self._format_chat_history(unified.chat_history)
-            input_fields[input_mapping["chat_history"]] = history_str
+        if merge_context:
+            # 合并模式：将完整上下文发送到 user_input 字段
+            # 这样 Stack AI 工作流只需要一个输入节点即可获得完整对话历史
+            full_context = self._format_full_context(unified)
+            if "user_input" in input_mapping:
+                input_fields[input_mapping["user_input"]] = full_context
+        else:
+            # 分离模式：分别发送到不同字段
+            # 映射用户输入
+            if "user_input" in input_mapping:
+                input_fields[input_mapping["user_input"]] = unified.user_input
+            
+            # 映射系统提示词
+            if "system_prompt" in input_mapping and unified.system_prompt:
+                input_fields[input_mapping["system_prompt"]] = unified.system_prompt
+            
+            # 映射聊天历史
+            if "chat_history" in input_mapping and unified.chat_history:
+                # 将聊天历史转换为字符串格式
+                history_str = self._format_chat_history(unified.chat_history)
+                input_fields[input_mapping["chat_history"]] = history_str
         
         return BackendPayload(
             user_id=user_id,
@@ -422,11 +435,70 @@ class RequestTransformer:
             formatted_messages.append(f"{role_label}: {msg.content}")
         return "\n".join(formatted_messages)
     
+    def _format_full_context(self, unified: UnifiedRequest) -> str:
+        """
+        将完整对话上下文格式化为单一字符串
+        
+        包括系统提示、历史对话和当前用户输入，
+        适用于 Stack AI 工作流只使用单一输入字段的情况。
+        
+        Args:
+            unified: 统一格式的请求对象
+            
+        Returns:
+            格式化的完整上下文字符串
+        """
+        # 使用 get_all_messages 获取正确顺序的所有消息
+        all_messages = self.get_all_messages(unified)
+        
+        parts = []
+        for msg in all_messages:
+            if msg.role == "system":
+                parts.append(f"System: {msg.content}")
+            elif msg.role == "user":
+                parts.append(f"User: {msg.content}")
+            elif msg.role == "assistant":
+                parts.append(f"Assistant: {msg.content}")
+        
+        return "\n".join(parts)
+    
+    def format_messages_to_context(self, messages: List) -> str:
+        """
+        将 OpenAI 格式的 messages 数组直接格式化为上下文字符串
+        
+        保持原始消息顺序，不进行任何重排。
+        
+        Args:
+            messages: OpenAI 格式的消息列表
+            
+        Returns:
+            格式化的上下文字符串
+        """
+        parts = []
+        for msg in messages:
+            # 支持 OpenAIMessage 对象和字典
+            if hasattr(msg, 'role'):
+                role = msg.role
+                content = msg.content
+            else:
+                role = msg.get('role', 'user')
+                content = msg.get('content', '')
+            
+            if role == "system":
+                parts.append(f"System: {content}")
+            elif role == "user":
+                parts.append(f"User: {content}")
+            elif role == "assistant":
+                parts.append(f"Assistant: {content}")
+        
+        return "\n".join(parts)
+    
     def to_stackai_dict(
         self, 
         unified: UnifiedRequest,
         input_mapping: Optional[Dict[str, str]] = None,
-        user_id: str = "anonymous"
+        user_id: str = "anonymous",
+        stateless: bool = True
     ) -> Dict[str, Any]:
         """
         将统一格式转换为后端请求字典
@@ -435,16 +507,24 @@ class RequestTransformer:
             unified: 统一格式的请求对象
             input_mapping: 输入字段映射配置
             user_id: 用户 ID
+            stateless: 是否无状态模式（每次生成新的 conversation_id）
             
         Returns:
             后端请求字典，可直接用于 HTTP 请求
         """
         payload = self.to_stackai_payload(unified, input_mapping, user_id)
         
-        return {
+        result = {
             "user_id": payload.user_id,
             **payload.input_fields
         }
+        
+        # 无状态模式：每次请求使用新的 conversation_id
+        # 这样 Stack AI 就不会累积历史，每次都是全新对话
+        if stateless:
+            result["conversation_id"] = str(uuid.uuid4())
+        
+        return result
     
     # ========================================================================
     # Utility Methods

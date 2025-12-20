@@ -1,4 +1,4 @@
-/**
+﻿/**
  * API Service 管理后台脚本
  */
 
@@ -11,6 +11,7 @@ let currentPage = 'dashboard';
 let accountsData = [];
 let groupsData = [];
 let apiKeysData = [];
+let callLogsData = [];
 
 // ==================== 初始化 ====================
 
@@ -34,11 +35,30 @@ function bindEvents() {
     // 退出登录
     document.getElementById('logout-btn').addEventListener('click', handleLogout);
     
+    // 移动端菜单
+    const mobileMenuBtn = document.getElementById('mobile-menu-btn');
+    const sidebar = document.getElementById('sidebar');
+    const sidebarOverlay = document.getElementById('sidebar-overlay');
+    
+    if (mobileMenuBtn) {
+        mobileMenuBtn.addEventListener('click', () => {
+            mobileMenuBtn.classList.toggle('active');
+            sidebar.classList.toggle('active');
+            sidebarOverlay.classList.toggle('active');
+            document.body.style.overflow = sidebar.classList.contains('active') ? 'hidden' : '';
+        });
+    }
+    
+    if (sidebarOverlay) {
+        sidebarOverlay.addEventListener('click', closeMobileMenu);
+    }
+    
     // 侧边栏导航
     document.querySelectorAll('.sidebar-nav a[data-page]').forEach(link => {
         link.addEventListener('click', (e) => {
             e.preventDefault();
             switchPage(link.dataset.page);
+            closeMobileMenu();
         });
     });
     
@@ -47,6 +67,26 @@ function bindEvents() {
     document.getElementById('group-form').addEventListener('submit', handleGroupSubmit);
     document.getElementById('apikey-form').addEventListener('submit', handleApiKeySubmit);
     document.getElementById('apikey-edit-form').addEventListener('submit', handleApiKeyEditSubmit);
+    document.getElementById('delete-logs-form').addEventListener('submit', handleDeleteLogs);
+    
+    // 窗口大小变化时关闭移动菜单
+    window.addEventListener('resize', () => {
+        if (window.innerWidth > 768) {
+            closeMobileMenu();
+        }
+    });
+}
+
+// 关闭移动端菜单
+function closeMobileMenu() {
+    const mobileMenuBtn = document.getElementById('mobile-menu-btn');
+    const sidebar = document.getElementById('sidebar');
+    const sidebarOverlay = document.getElementById('sidebar-overlay');
+    
+    if (mobileMenuBtn) mobileMenuBtn.classList.remove('active');
+    if (sidebar) sidebar.classList.remove('active');
+    if (sidebarOverlay) sidebarOverlay.classList.remove('active');
+    document.body.style.overflow = '';
 }
 
 // ==================== API 调用封装 ====================
@@ -159,10 +199,19 @@ function switchPage(page) {
         stopMonitorAutoSync();
     }
     
+    // 停止性能监控自动刷新（如果离开性能页面）
+    if (page !== 'performance') {
+        stopPerformanceAutoRefresh();
+    }
+    
     // 加载页面数据（使用缓存避免重复加载）
     switch (page) {
         case 'dashboard':
             loadDashboard();
+            break;
+        case 'performance':
+            loadPerformanceStats();
+            startPerformanceAutoRefresh();
             break;
         case 'accounts':
             // 如果已有数据，直接渲染
@@ -186,6 +235,9 @@ function switchPage(page) {
             } else {
                 loadApiKeys();
             }
+            break;
+        case 'logs':
+            loadCallLogs();
             break;
     }
 }
@@ -386,12 +438,34 @@ async function updateDashboardStats(activeAccounts, todayTokens) {
         const overview = response.overview || {};
         document.getElementById('stat-today-requests').textContent = formatNumber(overview.today?.requests || 0);
         
+        // 今日费用
+        const todayCost = overview.today?.cost || {};
+        const todayCostEl = document.getElementById('stat-today-tokens-cost');
+        if (todayCostEl) {
+            todayCostEl.innerHTML = `<span class="cost-value">$${parseFloat(todayCost.total || 0).toFixed(3)}</span>`;
+        }
+        
         // 更新历史累计统计
         const allTime = overview.all_time || {};
         document.getElementById('stat-all-time-requests').textContent = formatNumber(allTime.requests || 0);
         document.getElementById('stat-all-time-tokens').textContent = formatNumber(allTime.total_tokens || 0);
         document.getElementById('stat-all-time-input').textContent = formatNumber(allTime.input_tokens || 0);
         document.getElementById('stat-all-time-output').textContent = formatNumber(allTime.output_tokens || 0);
+        
+        // 历史费用
+        const allTimeCost = allTime.cost || {};
+        const allTimeCostEl = document.getElementById('stat-all-time-tokens-cost');
+        if (allTimeCostEl) {
+            allTimeCostEl.innerHTML = `<span class="cost-value">$${parseFloat(allTimeCost.total || 0).toFixed(3)}</span>`;
+        }
+        const inputCostEl = document.getElementById('stat-all-time-input-cost');
+        if (inputCostEl) {
+            inputCostEl.innerHTML = `<span class="cost-value">$${parseFloat(allTimeCost.input || 0).toFixed(3)}</span>`;
+        }
+        const outputCostEl = document.getElementById('stat-all-time-output-cost');
+        if (outputCostEl) {
+            outputCostEl.innerHTML = `<span class="cost-value">$${parseFloat(allTimeCost.output || 0).toFixed(3)}</span>`;
+        }
     } catch (e) {
         document.getElementById('stat-today-requests').textContent = '0';
         document.getElementById('stat-all-time-requests').textContent = '0';
@@ -658,6 +732,320 @@ function getTestStatusHtml(accountId) {
 
 function filterAccounts() {
     renderAccountsTable();
+}
+
+// ==================== 批量导入账号 ====================
+
+let importData = []; // 存储待导入的数据
+
+function showImportAccountsModal() {
+    // 重置表单
+    document.getElementById('import-accounts-form').reset();
+    document.getElementById('import-json-text').value = '';
+    document.getElementById('import-preview').classList.add('hidden');
+    document.getElementById('import-submit-btn').disabled = true;
+    importData = [];
+    
+    // 重置文件上传
+    clearImportFile();
+    
+    // 重置标签页
+    document.querySelectorAll('.import-tab').forEach(tab => {
+        tab.classList.remove('active');
+    });
+    document.querySelector('.import-tab[data-tab="json"]').classList.add('active');
+    document.getElementById('import-tab-json').classList.remove('hidden');
+    document.getElementById('import-tab-file').classList.add('hidden');
+    
+    // 加载模型组选项
+    loadGroupsForImportSelect();
+    
+    // 绑定标签页切换
+    document.querySelectorAll('.import-tab').forEach(tab => {
+        tab.onclick = () => switchImportTab(tab.dataset.tab);
+    });
+    
+    // 绑定文件上传
+    setupFileUpload();
+    
+    // 绑定表单提交
+    document.getElementById('import-accounts-form').onsubmit = handleImportSubmit;
+    
+    openModal('import-accounts-modal');
+}
+
+function switchImportTab(tab) {
+    document.querySelectorAll('.import-tab').forEach(t => {
+        t.classList.toggle('active', t.dataset.tab === tab);
+    });
+    document.getElementById('import-tab-json').classList.toggle('hidden', tab !== 'json');
+    document.getElementById('import-tab-file').classList.toggle('hidden', tab !== 'file');
+    
+    // 切换时清除预览
+    document.getElementById('import-preview').classList.add('hidden');
+    document.getElementById('import-submit-btn').disabled = true;
+    importData = [];
+}
+
+async function loadGroupsForImportSelect() {
+    try {
+        if (groupsData.length === 0) {
+            const data = await apiCall('/groups');
+            groupsData = data.groups || [];
+        }
+        
+        const select = document.getElementById('import-model-group');
+        select.innerHTML = '<option value="">选择模型组</option>';
+        groupsData.forEach(group => {
+            select.innerHTML += `<option value="${group.name}">${group.name}</option>`;
+        });
+    } catch (error) {
+        console.error('加载模型组失败:', error);
+    }
+}
+
+function setupFileUpload() {
+    const fileInput = document.getElementById('import-file');
+    const uploadArea = document.getElementById('file-upload-area');
+    
+    // 点击上传
+    uploadArea.onclick = (e) => {
+        if (e.target.tagName !== 'BUTTON') {
+            fileInput.click();
+        }
+    };
+    
+    // 文件选择
+    fileInput.onchange = (e) => {
+        if (e.target.files.length > 0) {
+            handleFileSelect(e.target.files[0]);
+        }
+    };
+    
+    // 拖拽上传
+    uploadArea.ondragover = (e) => {
+        e.preventDefault();
+        uploadArea.classList.add('dragover');
+    };
+    
+    uploadArea.ondragleave = () => {
+        uploadArea.classList.remove('dragover');
+    };
+    
+    uploadArea.ondrop = (e) => {
+        e.preventDefault();
+        uploadArea.classList.remove('dragover');
+        if (e.dataTransfer.files.length > 0) {
+            handleFileSelect(e.dataTransfer.files[0]);
+        }
+    };
+}
+
+function handleFileSelect(file) {
+    const uploadArea = document.getElementById('file-upload-area');
+    const placeholder = uploadArea.querySelector('.file-upload-placeholder');
+    const selected = uploadArea.querySelector('.file-selected');
+    
+    document.getElementById('selected-file-name').textContent = file.name;
+    placeholder.classList.add('hidden');
+    selected.classList.remove('hidden');
+    
+    // 读取文件内容
+    const reader = new FileReader();
+    reader.onload = (e) => {
+        document.getElementById('import-json-text').value = e.target.result;
+    };
+    reader.readAsText(file);
+}
+
+function clearImportFile() {
+    const fileInput = document.getElementById('import-file');
+    const uploadArea = document.getElementById('file-upload-area');
+    
+    if (fileInput) fileInput.value = '';
+    
+    if (uploadArea) {
+        const placeholder = uploadArea.querySelector('.file-upload-placeholder');
+        const selected = uploadArea.querySelector('.file-selected');
+        if (placeholder) placeholder.classList.remove('hidden');
+        if (selected) selected.classList.add('hidden');
+    }
+}
+
+function previewImport() {
+    const jsonText = document.getElementById('import-json-text').value.trim();
+    const modelGroup = document.getElementById('import-model-group').value;
+    
+    if (!modelGroup) {
+        showToast('请先选择目标模型组', 'warning');
+        return;
+    }
+    
+    if (!jsonText) {
+        showToast('请输入或上传 JSON 数据', 'warning');
+        return;
+    }
+    
+    try {
+        // 解析 JSON
+        let parsed = JSON.parse(jsonText);
+        
+        // 支持单个对象或数组
+        if (!Array.isArray(parsed)) {
+            parsed = [parsed];
+        }
+        
+        if (parsed.length === 0) {
+            showToast('JSON 数据为空', 'warning');
+            return;
+        }
+        
+        // 验证并转换数据
+        importData = parsed.map((item, index) => {
+            // 验证必要字段
+            if (!item.org_id) {
+                throw new Error(`第 ${index + 1} 条记录缺少 org_id`);
+            }
+            if (!item.flow_id) {
+                throw new Error(`第 ${index + 1} 条记录缺少 flow_id`);
+            }
+            if (!item.public_api_key && !item.api_key) {
+                throw new Error(`第 ${index + 1} 条记录缺少 public_api_key 或 api_key`);
+            }
+            
+            // 生成账号名称
+            const name = item.email || item.name || `账号_${item.org_id.substring(0, 8)}`;
+            
+            // 检查是否重复（基于 org_id + flow_id）
+            const isDuplicate = accountsData.some(
+                a => a.org_id === item.org_id && a.flow_id === item.flow_id
+            );
+            
+            return {
+                name: name,
+                org_id: item.org_id,
+                flow_id: item.flow_id,
+                // public_api_key -> API Key (Bearer token，必填)
+                api_key: item.public_api_key || item.api_key,
+                // private_api_key -> Private API Key (可选，用于同步使用量)
+                private_api_key: item.private_api_key || null,
+                email: item.email,
+                isDuplicate: isDuplicate,
+                status: isDuplicate ? 'duplicate' : 'pending'
+            };
+        });
+        
+        // 渲染预览
+        renderImportPreview();
+        
+    } catch (error) {
+        showToast('JSON 解析失败: ' + error.message, 'error');
+        importData = [];
+    }
+}
+
+function renderImportPreview() {
+    const previewEl = document.getElementById('import-preview');
+    const listEl = document.getElementById('import-preview-list');
+    const countEl = document.getElementById('import-count');
+    const submitBtn = document.getElementById('import-submit-btn');
+    
+    const validCount = importData.filter(d => !d.isDuplicate).length;
+    const duplicateCount = importData.filter(d => d.isDuplicate).length;
+    
+    countEl.textContent = `${validCount} 条有效`;
+    if (duplicateCount > 0) {
+        countEl.textContent += `，${duplicateCount} 条重复`;
+    }
+    
+    listEl.innerHTML = importData.map((item, index) => `
+        <div class="import-preview-item ${item.isDuplicate ? 'duplicate' : ''}">
+            <div class="item-info">
+                <span class="item-name">${escapeHtml(item.name)}</span>
+                <span class="item-detail">org: ${item.org_id.substring(0, 8)}... | flow: ${item.flow_id.substring(0, 8)}...</span>
+            </div>
+            <span class="item-status ${item.status}" id="import-status-${index}">
+                ${item.isDuplicate ? '⚠️ 已存在' : '⏳ 待导入'}
+            </span>
+        </div>
+    `).join('');
+    
+    previewEl.classList.remove('hidden');
+    submitBtn.disabled = validCount === 0;
+}
+
+async function handleImportSubmit(e) {
+    e.preventDefault();
+    
+    const modelGroup = document.getElementById('import-model-group').value;
+    const dailyQuota = parseInt(document.getElementById('import-daily-quota').value) || 1000000;
+    const submitBtn = document.getElementById('import-submit-btn');
+    
+    // 过滤掉重复的
+    const toImport = importData.filter(d => !d.isDuplicate);
+    
+    if (toImport.length === 0) {
+        showToast('没有可导入的数据', 'warning');
+        return;
+    }
+    
+    submitBtn.disabled = true;
+    submitBtn.innerHTML = '<span class="spinner-sm"></span> 导入中...';
+    
+    let successCount = 0;
+    let failCount = 0;
+    
+    for (let i = 0; i < toImport.length; i++) {
+        const item = toImport[i];
+        const index = importData.indexOf(item);
+        const statusEl = document.getElementById(`import-status-${index}`);
+        
+        try {
+            await apiCall('/accounts', {
+                method: 'POST',
+                body: JSON.stringify({
+                    name: item.name,
+                    org_id: item.org_id,
+                    flow_id: item.flow_id,
+                    api_key: item.api_key,
+                    private_api_key: item.private_api_key,
+                    model_group: modelGroup,
+                    daily_quota: dailyQuota
+                })
+            });
+            
+            item.status = 'success';
+            if (statusEl) statusEl.innerHTML = '✅ 成功';
+            statusEl.className = 'item-status success';
+            successCount++;
+        } catch (error) {
+            item.status = 'error';
+            if (statusEl) statusEl.innerHTML = '❌ 失败';
+            statusEl.className = 'item-status error';
+            failCount++;
+            console.error(`导入失败 [${item.name}]:`, error);
+        }
+    }
+    
+    submitBtn.innerHTML = '导入';
+    submitBtn.disabled = false;
+    
+    // 显示结果
+    if (failCount === 0) {
+        showToast(`成功导入 ${successCount} 个账号`, 'success');
+        closeModal('import-accounts-modal');
+        loadAccounts();
+    } else {
+        showToast(`导入完成: ${successCount} 成功, ${failCount} 失败`, 'warning');
+        loadAccounts();
+    }
+}
+
+// HTML 转义
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
 }
 
 function showAddAccountModal() {
@@ -980,22 +1368,46 @@ function renderGroupsTable() {
     const tbody = document.getElementById('groups-table-body');
     
     if (groupsData.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted">暂无数据</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted">暂无数据</td></tr>';
         return;
     }
     
-    tbody.innerHTML = groupsData.map(group => `
+    tbody.innerHTML = groupsData.map(group => {
+        // 计价显示
+        const inputPrice = group.pricing?.input || 0;
+        const outputPrice = group.pricing?.output || 0;
+        const pricingDisplay = `<span class="pricing-input">入: $${inputPrice}</span> / <span class="pricing-output">出: $${outputPrice}</span>`;
+        
+        // 可用额度显示
+        const available = group.quota?.available || 0;
+        const total = group.quota?.total || 0;
+        const used = group.quota?.used || 0;
+        const usagePercent = total > 0 ? Math.round((used / total) * 100) : 0;
+        
+        // 计算可用额度对应的费用（按输出价格估算）
+        const availableCost = (available / 1000000) * outputPrice;
+        
+        return `
         <tr>
             <td><strong>${escapeHtml(group.name)}</strong></td>
             <td>${escapeHtml(group.description || '-')}</td>
-            <td>${group.account_count || 0}</td>
-            <td>${formatDate(group.created_at)}</td>
+            <td class="pricing-cell">${pricingDisplay}</td>
+            <td>
+                <div class="quota-display">
+                    <span class="quota-tokens">${formatNumber(available)} Token</span>
+                    <span class="quota-cost">≈ $${availableCost.toFixed(3)}</span>
+                    <div class="usage-bar-mini" style="margin-top: 4px;">
+                        <div class="usage-fill ${usagePercent >= 80 ? 'text-warning' : 'text-success'}" style="width: ${Math.min(usagePercent, 100)}%"></div>
+                    </div>
+                </div>
+            </td>
+            <td>${group.active_account_count || 0} / ${group.account_count || 0}</td>
             <td class="actions">
                 <button class="btn btn-sm btn-secondary" onclick="editGroup('${group.id}')">编辑</button>
                 <button class="btn btn-sm btn-danger" onclick="deleteGroup('${group.id}')">删除</button>
             </td>
         </tr>
-    `).join('');
+    `}).join('');
 }
 
 function showAddGroupModal() {
@@ -1106,7 +1518,7 @@ function renderApiKeysTable() {
     });
     
     if (filtered.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="8" class="text-center text-muted">暂无数据</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted">暂无数据</td></tr>';
         return;
     }
     
@@ -1117,10 +1529,8 @@ function renderApiKeysTable() {
                           (key.status === 'exhausted' ? '已耗尽' : '已禁用');
         const groups = Array.isArray(key.model_groups) ? key.model_groups : [key.model_groups];
         
-        // 请求限制显示
-        const quotaDisplay = key.request_quota 
-            ? `${formatNumber(key.total_requests || 0)} / ${formatNumber(key.request_quota)}`
-            : `${formatNumber(key.total_requests || 0)} / ∞`;
+        // 限制类型和显示
+        const limitInfo = getKeyLimitInfo(key);
         
         return `
             <tr>
@@ -1137,10 +1547,15 @@ function renderApiKeysTable() {
                 <td>
                     ${groups.map(g => `<span class="model-group-tag" style="margin-right: 6px; margin-bottom: 4px;">${escapeHtml(g)}</span>`).join('')}
                 </td>
-                <td><span class="usage-inline">${quotaDisplay}</span></td>
-                <td><span class="usage-inline">${formatNumber(key.total_tokens || 0)}</span></td>
+                <td>
+                    <div class="limit-info">
+                        <span class="limit-type-badge ${limitInfo.class}">${limitInfo.type}</span>
+                        <span class="usage-inline">${limitInfo.display}</span>
+                    </div>
+                </td>
                 <td><span class="status-badge ${statusClass}">${statusText}</span></td>
                 <td class="actions">
+                    <button class="btn btn-sm btn-info" onclick="showApiKeyDetail('${key.id}')">详情</button>
                     <button class="btn btn-sm btn-secondary" onclick="editApiKey('${key.id}')">编辑</button>
                     ${key.status === 'active' 
                         ? `<button class="btn btn-sm btn-warning" onclick="revokeApiKey('${key.id}')">禁用</button>` 
@@ -1150,6 +1565,175 @@ function renderApiKeysTable() {
             </tr>
         `;
     }).join('');
+}
+
+// 获取 API Key 限制信息
+function getKeyLimitInfo(key) {
+    // 优先级：费用限制 > Token限制 > 请求数限制
+    if (key.cost_limit) {
+        const used = parseFloat(key.total_cost || 0);
+        const limit = parseFloat(key.cost_limit);
+        const percent = limit > 0 ? Math.round((used / limit) * 100) : 0;
+        return {
+            type: '费用',
+            class: 'limit-cost',
+            display: `$${used.toFixed(2)} / $${limit.toFixed(2)} (${percent}%)`
+        };
+    } else if (key.token_quota) {
+        const used = key.total_tokens || 0;
+        const limit = key.token_quota;
+        const percent = limit > 0 ? Math.round((used / limit) * 100) : 0;
+        return {
+            type: 'Token',
+            class: 'limit-token',
+            display: `${formatNumber(used)} / ${formatNumber(limit)} (${percent}%)`
+        };
+    } else if (key.request_quota) {
+        const used = key.total_requests || 0;
+        const limit = key.request_quota;
+        const percent = limit > 0 ? Math.round((used / limit) * 100) : 0;
+        return {
+            type: '请求',
+            class: 'limit-request',
+            display: `${formatNumber(used)} / ${formatNumber(limit)} (${percent}%)`
+        };
+    } else {
+        return {
+            type: '无限制',
+            class: 'limit-none',
+            display: `${formatNumber(key.total_requests || 0)} 次请求`
+        };
+    }
+}
+
+// 显示 API Key 详情
+async function showApiKeyDetail(id) {
+    const key = apiKeysData.find(k => k.id === id);
+    if (!key) return;
+    
+    const content = document.getElementById('apikey-detail-content');
+    const groups = Array.isArray(key.model_groups) ? key.model_groups : [key.model_groups];
+    
+    // 格式化创建时间和过期时间
+    const createdAt = key.created_at ? new Date(key.created_at).toLocaleString('zh-CN') : '-';
+    const expiresAt = key.expires_at ? new Date(key.expires_at).toLocaleString('zh-CN') : '永不过期';
+    const lastUsedAt = key.last_used_at ? new Date(key.last_used_at).toLocaleString('zh-CN') : '从未使用';
+    
+    content.innerHTML = `
+        <div class="detail-section">
+            <h4>📌 基本信息</h4>
+            <div class="detail-grid">
+                <div class="detail-item">
+                    <span class="detail-label">名称</span>
+                    <span class="detail-value">${escapeHtml(key.name || '未命名')}</span>
+                </div>
+                <div class="detail-item">
+                    <span class="detail-label">Key 前缀</span>
+                    <span class="detail-value">${escapeHtml(key.key_prefix)}...</span>
+                </div>
+                <div class="detail-item">
+                    <span class="detail-label">状态</span>
+                    <span class="detail-value">
+                        <span class="status-badge ${key.status === 'active' ? 'status-active' : 'status-revoked'}">
+                            ${key.status === 'active' ? '有效' : (key.status === 'exhausted' ? '已耗尽' : '已禁用')}
+                        </span>
+                    </span>
+                </div>
+                <div class="detail-item">
+                    <span class="detail-label">创建时间</span>
+                    <span class="detail-value">${createdAt}</span>
+                </div>
+                <div class="detail-item">
+                    <span class="detail-label">过期时间</span>
+                    <span class="detail-value">${expiresAt}</span>
+                </div>
+                <div class="detail-item">
+                    <span class="detail-label">最后使用</span>
+                    <span class="detail-value">${lastUsedAt}</span>
+                </div>
+            </div>
+        </div>
+        
+        <div class="detail-section">
+            <h4>📁 授权模型组</h4>
+            <div class="model-groups-list">
+                ${groups.map(g => `<span class="model-group-tag">${escapeHtml(g)}</span>`).join(' ')}
+            </div>
+        </div>
+        
+        <div class="detail-section">
+            <h4>📊 使用统计</h4>
+            <div class="stats-grid stats-grid-3" style="margin: 0;">
+                <div class="stat-card mini">
+                    <div class="stat-label">总请求数</div>
+                    <div class="stat-value">${formatNumber(key.total_requests || 0)}</div>
+                    ${key.request_quota ? `<div class="stat-sub">限制: ${formatNumber(key.request_quota)}</div>` : ''}
+                </div>
+                <div class="stat-card mini">
+                    <div class="stat-label">总 Token</div>
+                    <div class="stat-value">${formatNumber(key.total_tokens || 0)}</div>
+                    ${key.token_quota ? `<div class="stat-sub">限制: ${formatNumber(key.token_quota)}</div>` : ''}
+                </div>
+                <div class="stat-card mini">
+                    <div class="stat-label">总费用</div>
+                    <div class="stat-value">$${parseFloat(key.total_cost || 0).toFixed(4)}</div>
+                    ${key.cost_limit ? `<div class="stat-sub">限制: $${parseFloat(key.cost_limit).toFixed(2)}</div>` : ''}
+                </div>
+            </div>
+        </div>
+    `;
+    
+    // 设置查看日志按钮
+    const viewLogsBtn = document.getElementById('apikey-view-logs-btn');
+    viewLogsBtn.onclick = () => {
+        closeModal('apikey-detail-modal');
+        viewApiKeyLogs(id);
+    };
+    
+    // 设置重算费用按钮
+    const recalcBtn = document.getElementById('apikey-recalc-btn');
+    recalcBtn.onclick = () => recalculateApiKeyCost(id);
+    
+    openModal('apikey-detail-modal');
+}
+
+// 重新计算 API Key 费用
+async function recalculateApiKeyCost(keyId) {
+    if (!confirm('确定要重新计算该 API Key 的费用吗？\n\n这将根据调用日志重新计算从创建日期开始的所有费用。')) {
+        return;
+    }
+    
+    try {
+        const response = await apiCall(`/keys/${keyId}/recalculate-cost`, {
+            method: 'POST'
+        });
+        
+        showToast(`费用重算完成：处理 ${response.logs_processed} 条日志，总费用 $${parseFloat(response.total_cost).toFixed(4)}`, 'success');
+        
+        // 刷新 API Key 列表
+        apiKeysData = [];
+        await loadApiKeys();
+        
+        // 关闭详情模态框
+        closeModal('apikey-detail-modal');
+    } catch (error) {
+        showToast('费用重算失败: ' + error.message, 'error');
+    }
+}
+
+// 查看 API Key 的调用日志
+function viewApiKeyLogs(keyId) {
+    // 切换到日志页面
+    switchPage('logs');
+    
+    // 设置 API Key 过滤器
+    const keyFilter = document.getElementById('log-apikey-filter');
+    if (keyFilter) {
+        keyFilter.value = keyId;
+    }
+    
+    // 重新加载日志
+    setTimeout(() => loadCallLogs(), 100);
 }
 
 function filterApiKeys() {
@@ -1180,12 +1764,16 @@ async function handleApiKeySubmit(e) {
     }
     
     const requestQuota = document.getElementById('apikey-request-quota').value;
+    const tokenQuota = document.getElementById('apikey-token-quota').value;
+    const costLimit = document.getElementById('apikey-cost-limit').value;
     
     const data = {
         name: document.getElementById('apikey-name').value || null,
         model_groups: selectedGroups,
         expires_at: document.getElementById('apikey-expires').value || null,
-        request_quota: requestQuota ? parseInt(requestQuota) : null
+        request_quota: requestQuota ? parseInt(requestQuota) : null,
+        token_quota: tokenQuota ? parseInt(tokenQuota) : null,
+        cost_limit: costLimit ? parseFloat(costLimit) : null
     };
     
     try {
@@ -1225,8 +1813,10 @@ async function editApiKey(id) {
         opt.selected = groups.includes(opt.value);
     });
     
-    // 设置请求限制
+    // 设置限制
     document.getElementById('apikey-edit-request-quota').value = key.request_quota || '';
+    document.getElementById('apikey-edit-token-quota').value = key.token_quota || '';
+    document.getElementById('apikey-edit-cost-limit').value = key.cost_limit || '';
     
     // 设置过期时间
     if (key.expires_at) {
@@ -1251,21 +1841,22 @@ async function handleApiKeyEditSubmit(e) {
         return;
     }
     
-    const requestQuotaValue = document.getElementById('apikey-edit-request-quota').value;
-    let requestQuota = null;
-    if (requestQuotaValue !== '') {
-        requestQuota = parseInt(requestQuotaValue);
-        // -1 表示清除限制
-        if (requestQuota === -1) {
-            requestQuota = null;
-        }
-    }
+    const requestQuotaValue = document.getElementById('apikey-edit-request-quota').value.trim();
+    const tokenQuotaValue = document.getElementById('apikey-edit-token-quota').value.trim();
+    const costLimitValue = document.getElementById('apikey-edit-cost-limit').value.trim();
+    
+    // 留空表示清除限制（发送 -1），有值则使用该值
+    let requestQuota = requestQuotaValue === '' ? -1 : parseInt(requestQuotaValue);
+    let tokenQuota = tokenQuotaValue === '' ? -1 : parseInt(tokenQuotaValue);
+    let costLimit = costLimitValue === '' ? -1 : parseFloat(costLimitValue);
     
     const data = {
         name: document.getElementById('apikey-edit-name').value || null,
         model_groups: selectedGroups,
         expires_at: document.getElementById('apikey-edit-expires').value || null,
-        request_quota: requestQuota
+        request_quota: requestQuota,
+        token_quota: tokenQuota,
+        cost_limit: costLimit
     };
     
     try {
@@ -1536,3 +2127,500 @@ document.querySelectorAll('.modal-overlay').forEach(overlay => {
         }
     });
 });
+
+// ==================== 调用日志 ====================
+
+async function loadCallLogs() {
+    const tbody = document.getElementById('logs-table-body');
+    tbody.innerHTML = '<tr><td colspan="9" class="text-center">加载中...</td></tr>';
+    
+    try {
+        // 加载统计数据
+        const statsResponse = await apiCall('/logs/stats?hours=24');
+        if (statsResponse.success) {
+            const stats = statsResponse.stats;
+            document.getElementById('log-stat-calls').textContent = formatNumber(stats.total_calls);
+            document.getElementById('log-stat-success-rate').textContent = stats.success_rate + '%';
+            document.getElementById('log-stat-tokens').textContent = formatNumber(stats.tokens.total);
+            document.getElementById('log-stat-cost').textContent = stats.cost.display;
+        }
+        
+        // 加载日志列表
+        const limit = document.getElementById('log-limit')?.value || 50;
+        const statusFilter = document.getElementById('log-status-filter')?.value || '';
+        const modelFilter = document.getElementById('log-model-filter')?.value || '';
+        const apiKeyFilter = document.getElementById('log-apikey-filter')?.value || '';
+        
+        let url = `/logs/calls?limit=${limit}`;
+        if (statusFilter) url += `&status=${statusFilter}`;
+        if (modelFilter) url += `&model_group=${modelFilter}`;
+        if (apiKeyFilter) url += `&api_key_id=${apiKeyFilter}`;
+        
+        const response = await apiCall(url);
+        callLogsData = response.logs || [];
+        
+        // 更新过滤器选项
+        await updateLogFilters();
+        
+        renderCallLogsTable();
+    } catch (error) {
+        tbody.innerHTML = '<tr><td colspan="9" class="text-center text-danger">加载失败</td></tr>';
+        showToast('加载调用日志失败: ' + error.message, 'error');
+    }
+}
+
+// 更新日志页面的过滤器选项
+async function updateLogFilters() {
+    // 更新模型组过滤器
+    await updateLogModelFilter();
+    
+    // 更新 API Key 过滤器
+    await updateLogApiKeyFilter();
+}
+
+// 更新 API Key 过滤器
+async function updateLogApiKeyFilter() {
+    const select = document.getElementById('log-apikey-filter');
+    if (!select) return;
+    
+    const currentValue = select.value;
+    
+    // 确保有 API Key 数据
+    if (apiKeysData.length === 0) {
+        try {
+            const response = await apiCall('/keys?include_revoked=true');
+            apiKeysData = response.keys || [];
+        } catch (e) {
+            console.error('加载 API Key 失败:', e);
+        }
+    }
+    
+    select.innerHTML = '<option value="">所有 API Key</option>' + 
+        apiKeysData.map(k => `<option value="${k.id}">${escapeHtml(k.name || k.key_prefix + '...')}</option>`).join('');
+    
+    if (currentValue) select.value = currentValue;
+}
+
+// 显示删除日志模态框
+function showDeleteLogsModal() {
+    // 设置默认日期为7天前
+    const defaultDate = new Date();
+    defaultDate.setDate(defaultDate.getDate() - 7);
+    document.getElementById('delete-logs-date').value = defaultDate.toISOString().split('T')[0];
+    
+    openModal('delete-logs-modal');
+}
+
+// 处理删除日志
+async function handleDeleteLogs(e) {
+    e.preventDefault();
+    
+    const dateStr = document.getElementById('delete-logs-date').value;
+    if (!dateStr) {
+        showToast('请选择日期', 'error');
+        return;
+    }
+    
+    showConfirmModal(
+        `确定要删除 ${dateStr} 及之前的所有调用日志吗？\n\n⚠️ 此操作不可恢复！`,
+        async () => {
+            try {
+                const response = await apiCall('/logs/calls', {
+                    method: 'DELETE',
+                    body: JSON.stringify({ before_date: dateStr })
+                });
+                
+                closeModal('delete-logs-modal');
+                showToast(`已删除 ${response.deleted_count || 0} 条日志`, 'success');
+                
+                // 重新加载日志
+                loadCallLogs();
+            } catch (error) {
+                showToast('删除失败: ' + error.message, 'error');
+            }
+        },
+        { title: '⚠️ 确认删除日志', btnText: '确认删除', btnClass: 'btn-danger' }
+    );
+}
+
+async function updateLogModelFilter() {
+    const select = document.getElementById('log-model-filter');
+    if (!select) return;
+    
+    // 保存当前选择
+    const currentValue = select.value;
+    
+    // 确保有模型组数据
+    if (groupsData.length === 0) {
+        try {
+            const response = await apiCall('/groups');
+            groupsData = response.groups || [];
+        } catch (e) {
+            console.error('加载模型组失败:', e);
+        }
+    }
+    
+    select.innerHTML = '<option value="">所有模型组</option>' + 
+        groupsData.map(g => `<option value="${escapeHtml(g.name)}">${escapeHtml(g.name)}</option>`).join('');
+    
+    if (currentValue) select.value = currentValue;
+}
+
+function filterCallLogs() {
+    loadCallLogs();
+}
+
+function renderCallLogsTable() {
+    const tbody = document.getElementById('logs-table-body');
+    
+    if (callLogsData.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="9" class="text-center text-muted">暂无调用记录</td></tr>';
+        return;
+    }
+    
+    tbody.innerHTML = callLogsData.map((log, index) => {
+        const statusClass = log.status === 'success' ? 'status-active' : 'status-exhausted';
+        const statusText = log.status === 'success' ? '成功' : '失败';
+        
+        // 格式化时间
+        const timestamp = log.timestamp ? new Date(log.timestamp) : null;
+        const timeStr = timestamp ? timestamp.toLocaleString('zh-CN', {
+            month: '2-digit',
+            day: '2-digit',
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit'
+        }) : '-';
+        
+        // API Key 显示
+        const keyDisplay = log.api_key?.name || log.api_key?.prefix || '-';
+        
+        // 账号显示
+        const accountDisplay = log.account?.name || '-';
+        const modelGroup = log.account?.model_group || '-';
+        
+        // Token 显示
+        const tokenDisplay = `${formatNumber(log.tokens?.input || 0)} / ${formatNumber(log.tokens?.output || 0)}`;
+        
+        // 费用显示
+        const costDisplay = formatCost(log.cost?.total);
+        
+        // 耗时显示
+        const timeMs = log.response_time_ms ? `${log.response_time_ms}ms` : '-';
+        
+        return `
+            <tr class="${log.status === 'error' ? 'row-error' : ''}">
+                <td><span class="log-time">${timeStr}</span></td>
+                <td>
+                    <span class="key-name" title="${escapeHtml(log.api_key?.prefix || '')}">${escapeHtml(keyDisplay)}</span>
+                </td>
+                <td>
+                    <span class="account-name">${escapeHtml(accountDisplay)}</span>
+                </td>
+                <td><span class="model-name">${escapeHtml(log.request?.model || '-')}</span></td>
+                <td><span class="token-display">${tokenDisplay}</span></td>
+                <td><span class="cost-display">${costDisplay}</span></td>
+                <td><span class="time-display">${timeMs}</span></td>
+                <td><span class="status-badge ${statusClass}">${statusText}</span></td>
+                <td>
+                    <button class="btn btn-sm btn-secondary" onclick="showLogDetail(${index})">查看</button>
+                </td>
+            </tr>
+        `;
+    }).join('');
+}
+
+function formatCost(costStr) {
+    if (!costStr || costStr === '0' || costStr === '0.000000') {
+        return '$0';
+    }
+    
+    const cost = parseFloat(costStr);
+    if (cost < 0.000001) {
+        return '< $0.000001';
+    } else if (cost < 0.01) {
+        return '$' + cost.toFixed(6);
+    } else if (cost < 1) {
+        return '$' + cost.toFixed(4);
+    } else {
+        return '$' + cost.toFixed(2);
+    }
+}
+
+function showLogDetail(index) {
+    const log = callLogsData[index];
+    if (!log) return;
+    
+    const content = document.getElementById('log-detail-content');
+    
+    // 格式化时间
+    const timestamp = log.timestamp ? new Date(log.timestamp).toLocaleString('zh-CN') : '-';
+    
+    content.innerHTML = `
+        <div class="log-detail-section">
+            <h4>📌 基本信息</h4>
+            <div class="detail-grid">
+                <div class="detail-item">
+                    <span class="detail-label">时间</span>
+                    <span class="detail-value">${timestamp}</span>
+                </div>
+                <div class="detail-item">
+                    <span class="detail-label">状态</span>
+                    <span class="detail-value">
+                        <span class="status-badge ${log.status === 'success' ? 'status-active' : 'status-exhausted'}">
+                            ${log.status === 'success' ? '成功' : '失败'}
+                        </span>
+                    </span>
+                </div>
+                <div class="detail-item">
+                    <span class="detail-label">响应时间</span>
+                    <span class="detail-value">${log.response_time_ms ? log.response_time_ms + 'ms' : '-'}</span>
+                </div>
+                <div class="detail-item">
+                    <span class="detail-label">流式</span>
+                    <span class="detail-value">${log.request?.is_stream ? '是' : '否'}</span>
+                </div>
+            </div>
+        </div>
+        
+        <div class="log-detail-section">
+            <h4>🔑 调用方</h4>
+            <div class="detail-grid">
+                <div class="detail-item">
+                    <span class="detail-label">API Key</span>
+                    <span class="detail-value">${escapeHtml(log.api_key?.name || log.api_key?.prefix || '-')}</span>
+                </div>
+                <div class="detail-item">
+                    <span class="detail-label">Key 前缀</span>
+                    <span class="detail-value">${escapeHtml(log.api_key?.prefix || '-')}</span>
+                </div>
+                <div class="detail-item">
+                    <span class="detail-label">客户端 IP</span>
+                    <span class="detail-value">${escapeHtml(log.client_ip || '-')}</span>
+                </div>
+            </div>
+        </div>
+        
+        <div class="log-detail-section">
+            <h4>👤 账号信息</h4>
+            <div class="detail-grid">
+                <div class="detail-item">
+                    <span class="detail-label">账号名称</span>
+                    <span class="detail-value">${escapeHtml(log.account?.name || '-')}</span>
+                </div>
+                <div class="detail-item">
+                    <span class="detail-label">模型组</span>
+                    <span class="detail-value">${escapeHtml(log.account?.model_group || '-')}</span>
+                </div>
+                <div class="detail-item">
+                    <span class="detail-label">请求模型</span>
+                    <span class="detail-value">${escapeHtml(log.request?.model || '-')}</span>
+                </div>
+                <div class="detail-item">
+                    <span class="detail-label">API 类型</span>
+                    <span class="detail-value">${escapeHtml(log.request?.api_type || '-')}</span>
+                </div>
+            </div>
+        </div>
+        
+        <div class="log-detail-section">
+            <h4>💎 Token 与费用</h4>
+            <div class="detail-grid">
+                <div class="detail-item">
+                    <span class="detail-label">输入 Token</span>
+                    <span class="detail-value">${formatNumber(log.tokens?.input || 0)}</span>
+                </div>
+                <div class="detail-item">
+                    <span class="detail-label">输出 Token</span>
+                    <span class="detail-value">${formatNumber(log.tokens?.output || 0)}</span>
+                </div>
+                <div class="detail-item">
+                    <span class="detail-label">总 Token</span>
+                    <span class="detail-value">${formatNumber(log.tokens?.total || 0)}</span>
+                </div>
+                <div class="detail-item">
+                    <span class="detail-label">输入费用</span>
+                    <span class="detail-value">${formatCost(log.cost?.input)}</span>
+                </div>
+                <div class="detail-item">
+                    <span class="detail-label">输出费用</span>
+                    <span class="detail-value">${formatCost(log.cost?.output)}</span>
+                </div>
+                <div class="detail-item">
+                    <span class="detail-label">总费用</span>
+                    <span class="detail-value highlight">${formatCost(log.cost?.total)}</span>
+                </div>
+            </div>
+        </div>
+        
+        ${log.input_preview ? `
+        <div class="log-detail-section">
+            <h4>📥 输入预览</h4>
+            <pre class="preview-box">${escapeHtml(log.input_preview)}</pre>
+        </div>
+        ` : ''}
+        
+        ${log.output_preview ? `
+        <div class="log-detail-section">
+            <h4>📤 输出预览 (前10行)</h4>
+            <pre class="preview-box">${escapeHtml(log.output_preview)}</pre>
+        </div>
+        ` : ''}
+        
+        ${log.error_message ? `
+        <div class="log-detail-section">
+            <h4>❌ 错误信息</h4>
+            <pre class="preview-box error">${escapeHtml(log.error_message)}</pre>
+        </div>
+        ` : ''}
+    `;
+    
+    openModal('log-detail-modal');
+}
+
+
+// ==================== 性能监控 ====================
+
+let performanceInterval = null;
+
+async function loadPerformanceStats() {
+    try {
+        const response = await apiCall('/performance/stats');
+        if (response.success) {
+            updatePerformanceDisplay(response);
+        }
+    } catch (error) {
+        console.error('加载性能统计失败:', error);
+        showToast('加载性能统计失败: ' + error.message, 'error');
+    }
+}
+
+function updatePerformanceDisplay(data) {
+    const stats = data.stats || {};
+    const config = data.config || {};
+    const system = data.system || {};
+    const responseTimes = data.response_times || {};
+    
+    // 更新实时指标
+    document.getElementById('perf-active-requests').textContent = stats.active_requests || 0;
+    document.getElementById('perf-max-concurrent').textContent = `/ ${stats.max_concurrent_requests || 100}`;
+    document.getElementById('perf-current-qps').textContent = stats.current_qps || 0;
+    document.getElementById('perf-avg-response').textContent = responseTimes.avg || 0;
+    document.getElementById('perf-success-rate').textContent = `${stats.success_rate || 100}%`;
+    document.getElementById('perf-rejected').textContent = `拒绝: ${stats.rejected_requests || 0}`;
+    
+    // 更新限流配置显示
+    const rpmLimit = config.rpm_limit || 0;
+    document.getElementById('config-rpm-value').textContent = rpmLimit > 0 ? rpmLimit : '无限制';
+    document.getElementById('config-rpm-max').textContent = config.max_rpm || 6000;
+    document.getElementById('config-concurrent-value').textContent = config.max_concurrent_requests || 100;
+    document.getElementById('config-db-concurrent-value').textContent = config.max_concurrent_db_ops || 50;
+    document.getElementById('config-http-pool-value').textContent = config.http_max_connections || 100;
+    
+    // 更新性能统计
+    document.getElementById('perf-total-requests').textContent = formatNumber(stats.total_requests || 0);
+    document.getElementById('perf-total-rejected').textContent = formatNumber(stats.rejected_requests || 0);
+    document.getElementById('perf-p95-response').textContent = `${responseTimes.p95 || 0} ms`;
+    document.getElementById('perf-p99-response').textContent = `${responseTimes.p99 || 0} ms`;
+    
+    // 更新系统配置
+    document.getElementById('sys-db-pool').textContent = system.db_pool || '-';
+    document.getElementById('sys-db-type').textContent = system.db_type || '-';
+    document.getElementById('sys-http-timeout').textContent = system.http_timeout || '-';
+    document.getElementById('sys-uptime').textContent = system.uptime || '-';
+    
+    // 更新最后更新时间
+    document.getElementById('perf-last-update').textContent = `最后更新: ${new Date().toLocaleTimeString('zh-CN')}`;
+}
+
+function startPerformanceAutoRefresh() {
+    // 清除旧的定时器
+    if (performanceInterval) {
+        clearInterval(performanceInterval);
+    }
+    // 每 5 秒自动刷新
+    performanceInterval = setInterval(() => {
+        if (currentPage === 'performance') {
+            loadPerformanceStats();
+        }
+    }, 5000);
+}
+
+function stopPerformanceAutoRefresh() {
+    if (performanceInterval) {
+        clearInterval(performanceInterval);
+        performanceInterval = null;
+    }
+}
+
+function refreshPerformanceStats() {
+    loadPerformanceStats();
+    showToast('已刷新', 'success');
+}
+
+function showPerformanceSettingsModal() {
+    // 先加载当前配置
+    apiCall('/performance/stats').then(response => {
+        if (response.success) {
+            const config = response.config || {};
+            document.getElementById('setting-rpm').value = config.rpm_limit || '';
+            document.getElementById('setting-max-concurrent').value = config.max_concurrent_requests || 100;
+            document.getElementById('setting-db-concurrent').value = config.max_concurrent_db_ops || 50;
+            document.getElementById('setting-http-connections').value = config.http_max_connections || 100;
+            document.getElementById('setting-http-timeout').value = config.http_timeout || 60;
+        }
+        openModal('performance-settings-modal');
+    }).catch(error => {
+        console.error('加载配置失败:', error);
+        openModal('performance-settings-modal');
+    });
+}
+
+// 绑定性能配置表单提交
+document.addEventListener('DOMContentLoaded', () => {
+    const perfForm = document.getElementById('performance-settings-form');
+    if (perfForm) {
+        perfForm.addEventListener('submit', handlePerformanceSettingsSubmit);
+    }
+});
+
+async function handlePerformanceSettingsSubmit(e) {
+    e.preventDefault();
+    
+    const data = {
+        rpm_limit: parseInt(document.getElementById('setting-rpm').value) || 0,
+        max_concurrent_requests: parseInt(document.getElementById('setting-max-concurrent').value) || 100,
+        max_concurrent_db_ops: parseInt(document.getElementById('setting-db-concurrent').value) || 50,
+        http_max_connections: parseInt(document.getElementById('setting-http-connections').value) || 100,
+        http_timeout: parseFloat(document.getElementById('setting-http-timeout').value) || 60
+    };
+    
+    try {
+        const response = await apiCall('/performance/config', {
+            method: 'POST',
+            body: JSON.stringify(data)
+        });
+        
+        if (response.success) {
+            closeModal('performance-settings-modal');
+            showToast(response.message || '配置已保存', 'success');
+            loadPerformanceStats();
+        } else {
+            showToast(response.message || '保存失败', 'error');
+        }
+    } catch (error) {
+        showToast('保存失败: ' + error.message, 'error');
+    }
+}
+
+async function resetPerformanceStats() {
+    try {
+        const response = await apiCall('/performance/reset-stats', { method: 'POST' });
+        if (response.success) {
+            showToast('统计已重置', 'success');
+            loadPerformanceStats();
+        }
+    } catch (error) {
+        showToast('重置失败: ' + error.message, 'error');
+    }
+}

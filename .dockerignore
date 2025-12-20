@@ -1,0 +1,41 @@
+# Git
+.git/
+.gitignore
+
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+
+# Environment
+.env
+.env.local
+
+# Data (will use Persistent Storage)
+data/
+*.db
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+tests/
+
+# Documentation
+*.md
+!README.md
+
+# Misc
+*.bak
+*.tmp

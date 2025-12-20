@@ -37,7 +37,9 @@ class APIKeyService:
         name: Optional[str] = None,
         quota: Optional[int] = None,
         expires_at: Optional[datetime] = None,
-        request_quota: Optional[int] = None
+        request_quota: Optional[int] = None,
+        token_quota: Optional[int] = None,
+        cost_limit: Optional[str] = None
     ) -> Tuple[str, APIKey]:
         """
         生成新的 API Key
@@ -46,9 +48,11 @@ class APIKeyService:
             session: 数据库会话
             model_groups: 授权的模型组列表
             name: Key 名称（可选）
-            quota: Token 使用额度限制（可选，None 表示无限制）
+            quota: Token 使用额度限制（可选，None 表示无限制）- 已弃用
             expires_at: 过期时间（可选）
             request_quota: 请求数配额（可选，None 表示无限制）
+            token_quota: Token 额度限制（可选，None 表示无限制）
+            cost_limit: 费用限制（美元，可选，None 表示无限制）
             
         Returns:
             (原始 Key 值, APIKey 对象) - 原始 Key 只在创建时返回一次
@@ -74,6 +78,9 @@ class APIKeyService:
             quota=quota,
             used=0,
             request_quota=request_quota,
+            token_quota=token_quota,
+            cost_limit=cost_limit,
+            total_cost="0",
             expires_at=expires_at,
             status="active",
             created_at=datetime.utcnow()
@@ -369,22 +376,27 @@ class APIKeyService:
         session: AsyncSession,
         key_id: str,
         input_tokens: int,
-        output_tokens: int
+        output_tokens: int,
+        cost: Optional[str] = None
     ) -> Optional[APIKey]:
         """
-        更新 API Key 的累计统计（请求数和 Token 使用量）
+        更新 API Key 的累计统计（请求数、Token 使用量和费用）
         
         Args:
             session: 数据库会话
             key_id: Key ID
             input_tokens: 输入 Token 数量
             output_tokens: 输出 Token 数量
+            cost: 本次调用费用（美元字符串）
             
         Returns:
             更新后的 APIKey 对象，如果不存在则返回 None
         """
+        from decimal import Decimal
+        
         api_key = await self.get_key_by_id(session, key_id)
         if api_key is None:
+            logger.warning(f"update_key_stats: API Key not found: {key_id}")
             return None
         
         total_tokens = input_tokens + output_tokens
@@ -394,16 +406,42 @@ class APIKeyService:
         api_key.total_tokens = (api_key.total_tokens or 0) + total_tokens
         api_key.last_used_at = datetime.utcnow()
         
+        # 更新费用
+        if cost:
+            try:
+                current_cost = Decimal(api_key.total_cost or "0")
+                new_cost = current_cost + Decimal(cost)
+                api_key.total_cost = str(new_cost)
+                logger.info(f"update_key_stats: Key {key_id} cost updated: {current_cost} + {cost} = {new_cost}")
+            except Exception as e:
+                logger.error(f"update_key_stats: Failed to update cost for key {key_id}: {e}")
+        
         # 检查是否达到请求数限制
         if api_key.request_quota is not None and api_key.total_requests >= api_key.request_quota:
             api_key.status = "exhausted"
             logger.info(f"API Key {key_id} reached request quota limit ({api_key.request_quota})")
         
+        # 检查是否达到 Token 限制
+        if api_key.token_quota is not None and api_key.total_tokens >= api_key.token_quota:
+            api_key.status = "exhausted"
+            logger.info(f"API Key {key_id} reached token quota limit ({api_key.token_quota})")
+        
+        # 检查是否达到费用限制
+        if api_key.cost_limit is not None and api_key.total_cost:
+            try:
+                limit = Decimal(api_key.cost_limit)
+                current = Decimal(api_key.total_cost)
+                if current >= limit:
+                    api_key.status = "exhausted"
+                    logger.info(f"API Key {key_id} reached cost limit ({api_key.cost_limit})")
+            except Exception:
+                pass
+        
         await session.flush()
         
         logger.debug(
             f"Updated stats for API Key {key_id}: "
-            f"requests={api_key.total_requests}, tokens={api_key.total_tokens}"
+            f"requests={api_key.total_requests}, tokens={api_key.total_tokens}, cost={api_key.total_cost}"
         )
         return api_key
     
@@ -516,6 +554,8 @@ class APIKeyService:
         name: Optional[str] = None,
         model_groups: Optional[List[str]] = None,
         request_quota: Optional[int] = None,
+        token_quota: Optional[int] = None,
+        cost_limit: Optional[str] = None,
         expires_at: Optional[datetime] = None,
         status: Optional[str] = None
     ) -> Optional[APIKey]:
@@ -528,6 +568,8 @@ class APIKeyService:
             name: 新名称（可选）
             model_groups: 新的模型组列表（可选）
             request_quota: 请求数配额（可选，-1 表示清除限制）
+            token_quota: Token 额度限制（可选，-1 表示清除限制）
+            cost_limit: 费用限制（美元，可选，None 表示不更新）
             expires_at: 过期时间（可选）
             status: 状态（可选）
             
@@ -551,6 +593,32 @@ class APIKeyService:
             if api_key.status == "exhausted" and (api_key.request_quota is None or 
                 (api_key.total_requests or 0) < api_key.request_quota):
                 api_key.status = "active"
+        
+        if token_quota is not None:
+            # -1 表示清除限制
+            api_key.token_quota = None if token_quota == -1 else token_quota
+            # 检查是否可以恢复状态
+            if api_key.status == "exhausted" and (api_key.token_quota is None or 
+                (api_key.total_tokens or 0) < api_key.token_quota):
+                api_key.status = "active"
+        
+        if cost_limit is not None:
+            # 空字符串表示清除限制
+            if cost_limit == "":
+                api_key.cost_limit = None
+                if api_key.status == "exhausted":
+                    api_key.status = "active"
+            else:
+                api_key.cost_limit = cost_limit
+                # 检查是否可以恢复状态
+                if api_key.status == "exhausted":
+                    try:
+                        limit = float(cost_limit)
+                        current = float(api_key.total_cost or "0")
+                        if current < limit:
+                            api_key.status = "active"
+                    except ValueError:
+                        pass
         
         if expires_at is not None:
             api_key.expires_at = expires_at

@@ -42,6 +42,15 @@ router = APIRouter(prefix="/v1", tags=["Anthropic Compatible"])
 # Request/Response Models
 # ============================================================================
 
+class ThinkingConfig(BaseModel):
+    """思维链配置"""
+    type: str = Field(default="enabled", description="思维链类型: enabled/disabled")
+    budget_tokens: Optional[int] = Field(default=10000, description="思维链 token 预算")
+    
+    class Config:
+        extra = "allow"
+
+
 class MessagesRequest(BaseModel):
     """Anthropic Messages 请求模型"""
     model: str = Field(..., description="模型名称")
@@ -54,9 +63,45 @@ class MessagesRequest(BaseModel):
     top_k: Optional[int] = Field(default=None, description="Top-k 采样")
     stop_sequences: Optional[List[str]] = Field(default=None, description="停止序列")
     metadata: Optional[Dict[str, Any]] = Field(default=None, description="元数据")
+    thinking: Optional[ThinkingConfig] = Field(default=None, description="思维链配置")
     
     class Config:
         extra = "allow"  # 允许额外字段
+    
+    def is_thinking_enabled(self) -> bool:
+        """
+        检查是否启用思维链
+        
+        触发条件（满足任一即可）：
+        1. 请求中明确设置 thinking.type = "enabled"
+        2. 模型名包含 thinking/think/reason 等关键词
+        3. 默认启用（可通过环境变量 DEFAULT_THINKING_ENABLED 控制）
+        """
+        import os
+        
+        # 条件1：请求中明确启用
+        if self.thinking is not None and self.thinking.type == "enabled":
+            return True
+        
+        # 条件2：模型名包含思维链关键词（自动启用）
+        model_lower = self.model.lower()
+        thinking_keywords = ['thinking', 'think', 'reason', 'reasoning', 'cot', 'deep']
+        for keyword in thinking_keywords:
+            if keyword in model_lower:
+                return True
+        
+        # 条件3：检查环境变量是否默认启用
+        default_enabled = os.getenv("DEFAULT_THINKING_ENABLED", "false").lower() == "true"
+        if default_enabled:
+            return True
+        
+        return False
+    
+    def get_thinking_budget(self) -> int:
+        """获取思维链 token 预算"""
+        if self.thinking is None:
+            return 0
+        return self.thinking.budget_tokens or 10000
     
     def get_system_text(self) -> Optional[str]:
         """提取系统提示词文本"""
@@ -189,7 +234,11 @@ async def create_message(
     try:
         body = await http_request.body()
         body_json = json.loads(body)
+        
+        # 详细日志：打印思维链相关参数
         logger.info(f"Request {request_id}: Anthropic raw body: {json.dumps(body_json, ensure_ascii=False)[:500]}")
+        logger.info(f"Request {request_id}: [THINKING DEBUG] model={body_json.get('model')}, thinking={body_json.get('thinking')}, stream={body_json.get('stream')}")
+        
         request = MessagesRequest(**body_json)
     except json.JSONDecodeError as e:
         logger.error(f"Request {request_id}: JSON decode error: {e}")
@@ -272,11 +321,70 @@ async def create_message(
     if request.metadata and "user_id" in request.metadata:
         user_id = str(request.metadata["user_id"])
     
-    backend_payload = transformer.to_stackai_dict(
-        unified_request,
-        input_mapping=input_mapping,
-        user_id=user_id
-    )
+    # 检查是否启用思维链
+    thinking_enabled = request.is_thinking_enabled()
+    thinking_budget = request.get_thinking_budget() if thinking_enabled else 0
+    
+    # 日志：打印思维链检测结果
+    logger.info(f"Request {request_id}: [THINKING DEBUG] thinking_enabled={thinking_enabled}, thinking_budget={thinking_budget}, request.thinking={request.thinking}")
+    
+    # 将 Anthropic 消息格式化为上下文字符串，包括 system prompt
+    # Anthropic 的 system 是独立的字段，需要先添加到上下文
+    context_parts = []
+    
+    # 如果启用思维链，添加思维链指令到系统提示词
+    if thinking_enabled:
+        thinking_instruction = """在回答问题之前，请先进行深入思考。将你的思考过程放在 <thinking> 标签中，然后再给出最终回答。
+
+格式示例：
+<thinking>
+这里是你的思考过程...
+分析问题的各个方面...
+考虑可能的解决方案...
+</thinking>
+
+这里是你的最终回答..."""
+        if system_text:
+            context_parts.append(f"System: {thinking_instruction}\n\n{system_text}")
+        else:
+            context_parts.append(f"System: {thinking_instruction}")
+    elif system_text:
+        context_parts.append(f"System: {system_text}")
+    
+    # 添加对话历史
+    for msg in request.messages:
+        role = msg.role
+        # Anthropic messages 可以有 content 为列表的情况
+        if isinstance(msg.content, list):
+            content = ""
+            for block in msg.content:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    content += block.get("text", "")
+                elif isinstance(block, str):
+                    content += block
+        else:
+            content = msg.content
+        
+        if role == "user":
+            context_parts.append(f"User: {content}")
+        elif role == "assistant":
+            context_parts.append(f"Assistant: {content}")
+    
+    messages_context = "\n".join(context_parts)
+    
+    # 构建 payload
+    backend_payload = {
+        "user_id": user_id,
+        "in-0": messages_context,  # 完整对话上下文
+        "conversation_id": str(uuid.uuid4())  # 每次请求使用新的会话ID
+    }
+    
+    # 如果有自定义输入映射，应用它
+    if input_mapping and "user_input" in input_mapping:
+        field_name = input_mapping["user_input"]
+        if field_name != "in-0":
+            backend_payload[field_name] = messages_context
+            del backend_payload["in-0"]
     
     logger.info(f"Request {request_id}: model={request.model}, stream={request.stream}")
     
@@ -290,23 +398,53 @@ async def create_message(
             # 获取账号的 Private API Key（用于从 Backend Analytics 获取真实 token）
             private_api_key = account_pool.decrypt_private_api_key(account)
             
+            # 从 Stack AI Analytics 获取请求前的 today_tokens（用于计算差值）
+            pre_request_tokens = 0
+            if private_api_key:
+                try:
+                    from app.services.analytics import get_analytics_service
+                    analytics_service = get_analytics_service()
+                    stats = await analytics_service.get_recent_stats(
+                        org_id=account.org_id,
+                        flow_id=account.flow_id,
+                        private_api_key=private_api_key,
+                        days=1
+                    )
+                    if stats:
+                        pre_request_tokens = stats.today_tokens
+                        logger.debug(f"Request {request_id}: Pre-request today_tokens from Analytics: {pre_request_tokens}")
+                except Exception as e:
+                    logger.debug(f"Request {request_id}: Failed to get pre-request tokens: {e}")
+                    pre_request_tokens = 0
+            
+            # 提取输入预览
+            from app.services.call_logger import extract_input_preview
+            input_preview = extract_input_preview(
+                [m.model_dump() if hasattr(m, 'model_dump') else m for m in request.messages],
+                api_type="anthropic"
+            )
+            
             # 保存上下文信息用于流结束后更新统计
             stream_context = {
                 "request_id": request_id,
                 "api_key_id": api_key_obj.id if api_key_obj else None,
+                "api_key_name": api_key_obj.name if api_key_obj else None,
                 "api_key_prefix": api_key_obj.key_prefix if api_key_obj else None,
                 "client_ip": client_ip,
                 "model": request.model,
                 "account_id": account.id,
+                "account_name": account.name,
+                "model_group": account.model_group,
                 "account_org_id": account.org_id,
                 "account_flow_id": account.flow_id,
                 "private_api_key": private_api_key,
                 "start_time": start_time,
                 "accumulated_content": [],
-                "pre_request_tokens": account.daily_used
+                "input_preview": input_preview,
+                "pre_request_tokens": pre_request_tokens  # 使用从 Stack AI Analytics 获取的真实值
             }
             
-            # 流式响应 - 真正的实时流式输出
+            # 流式响应
             async def generate_stream():
                 try:
                     stream_gen = await backend_client.execute_with_account(
@@ -316,18 +454,29 @@ async def create_message(
                         account_pool=account_pool
                     )
                     
+                    # 根据是否启用思维链选择不同的转换方法
+                    if thinking_enabled:
+                        # 使用带思维链的实时流式转换
+                        transform_gen = response_transformer.transform_backend_sse_to_anthropic_with_thinking(
+                            stream_gen, request.model, request_id, thinking_budget
+                        )
+                    else:
+                        # 使用普通的流式转换
+                        transform_gen = response_transformer.transform_backend_sse_to_anthropic(
+                            stream_gen, request.model, request_id
+                        )
+                    
                     # 直接转换并输出，同时累积内容
-                    async for chunk in response_transformer.transform_backend_sse_to_anthropic(
-                        stream_gen, request.model, request_id
-                    ):
+                    async for chunk in transform_gen:
                         # 尝试从 chunk 中提取内容用于 token 估算
                         if "content_block_delta" in chunk:
                             try:
-                                # Anthropic 格式: event: content_block_delta\ndata: {...}
                                 for line in chunk.split("\n"):
                                     if line.startswith("data: "):
                                         chunk_data = json.loads(line[6:])
-                                        text = chunk_data.get("delta", {}).get("text", "")
+                                        delta = chunk_data.get("delta", {})
+                                        # 提取 text 或 thinking 内容
+                                        text = delta.get("text", "") or delta.get("thinking", "")
                                         if text:
                                             stream_context["accumulated_content"].append(text)
                             except (json.JSONDecodeError, KeyError):
@@ -340,7 +489,6 @@ async def create_message(
                         
                 except BackendClientError as e:
                     logger.error(f"Request {request_id}: Backend error - {e.message}")
-                    # 在流式响应中发送错误事件
                     error_event = response_transformer.to_anthropic_stream_event("error", {
                         "type": "error",
                         "error": {
@@ -377,9 +525,9 @@ async def create_message(
                 account_pool=account_pool
             )
             
-            # 转换响应格式
+            # 转换响应格式（传入 thinking_enabled 参数）
             anthropic_response = response_transformer.to_anthropic_response(
-                backend_response, request.model, request_id
+                backend_response, request.model, request_id, thinking_enabled=thinking_enabled
             )
             
             # 更新 token 使用量
@@ -412,15 +560,59 @@ async def create_message(
                 response_time_ms=elapsed_ms
             )
             
-            # 更新 API Key 累计统计
+            # 计算费用
+            from app.services.pricing import get_pricing_service
+            pricing_service = get_pricing_service()
+            _, _, total_cost = pricing_service.calculate(request.model, input_tokens, output_tokens)
+            
+            # 更新 API Key 累计统计（包含费用）
             if api_key_obj:
                 await api_key_service.update_key_stats(
-                    session, api_key_obj.id, input_tokens, output_tokens
+                    session, api_key_obj.id, input_tokens, output_tokens, cost=total_cost
                 )
             
             # 更新系统累计统计
             stats_service = get_stats_service()
             await stats_service.update_system_stats(session, input_tokens, output_tokens)
+            
+            # 记录详细调用日志
+            from app.services.call_logger import get_call_logger_service, extract_input_preview
+            call_logger = get_call_logger_service()
+            
+            # 提取输入预览
+            input_preview = extract_input_preview(
+                [m.model_dump() if hasattr(m, 'model_dump') else m for m in request.messages],
+                api_type="anthropic"
+            )
+            
+            # 提取输出预览
+            output_preview = ""
+            content = anthropic_response.get("content", [])
+            if content:
+                for block in content:
+                    if block.get("type") == "text":
+                        output_preview = block.get("text", "")[:500]
+                        break
+            
+            await call_logger.log_call(
+                session,
+                api_key_id=api_key_obj.id if api_key_obj else None,
+                api_key_name=api_key_obj.name if api_key_obj else None,
+                api_key_prefix=api_key_obj.key_prefix if api_key_obj else None,
+                client_ip=client_ip,
+                account_id=account.id,
+                account_name=account.name,
+                model_group=account.model_group,
+                model=request.model,
+                api_type="anthropic",
+                is_stream=False,
+                input_preview=input_preview,
+                output_preview=output_preview,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                response_time_ms=elapsed_ms,
+                status="success",
+            )
             
             await session.commit()
             logger.info(f"Request {request_id}: completed in {elapsed_ms}ms")
@@ -483,6 +675,7 @@ async def update_anthropic_stream_stats(context: dict):
     from app.models.database import get_session_factory
     from app.services.token_counter import get_token_counter
     from app.services.analytics import get_analytics_service
+    from app.services.call_logger import get_call_logger_service
     
     try:
         elapsed_ms = int((time.time() - context["start_time"]) * 1000)
@@ -515,9 +708,11 @@ async def update_anthropic_stream_stats(context: dict):
             except Exception as e:
                 logger.warning(f"Failed to get token data from Backend Analytics: {e}")
         
+        # 累积的输出内容
+        accumulated_content = "".join(context.get("accumulated_content", []))
+        
         # 如果无法从 StackAI 获取，使用 tiktoken 估算
         if total_tokens == 0:
-            accumulated_content = "".join(context.get("accumulated_content", []))
             if accumulated_content:
                 token_counter = get_token_counter()
                 output_tokens = token_counter.count(accumulated_content)
@@ -540,16 +735,43 @@ async def update_anthropic_stream_stats(context: dict):
                 response_time_ms=elapsed_ms
             )
             
-            # 更新 API Key 累计统计
+            # 计算费用
+            from app.services.pricing import get_pricing_service
+            pricing_service = get_pricing_service()
+            _, _, total_cost = pricing_service.calculate(context["model"], input_tokens, output_tokens)
+            
+            # 更新 API Key 累计统计（包含费用）
             if context["api_key_id"]:
                 api_key_service = get_api_key_service()
                 await api_key_service.update_key_stats(
-                    session, context["api_key_id"], input_tokens, output_tokens
+                    session, context["api_key_id"], input_tokens, output_tokens, cost=total_cost
                 )
             
             # 更新系统累计统计
             stats_service = get_stats_service()
             await stats_service.update_system_stats(session, input_tokens, output_tokens)
+            
+            # 记录详细调用日志
+            call_logger = get_call_logger_service()
+            await call_logger.log_call(
+                session,
+                api_key_id=context.get("api_key_id"),
+                api_key_name=context.get("api_key_name"),
+                api_key_prefix=context.get("api_key_prefix"),
+                client_ip=context.get("client_ip"),
+                account_id=context.get("account_id"),
+                account_name=context.get("account_name"),
+                model_group=context.get("model_group"),
+                model=context.get("model"),
+                api_type="anthropic",
+                is_stream=True,
+                input_preview=context.get("input_preview"),
+                output_preview=accumulated_content[:500] if accumulated_content else None,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                response_time_ms=elapsed_ms,
+                status="success",
+            )
             
             await session.commit()
             

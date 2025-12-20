@@ -161,6 +161,9 @@ async def chat_completions(
     request_id = uuid.uuid4().hex[:24]
     start_time = time.time()
     
+    # 调试日志
+    logger.info(f"Request {request_id}: [OPENAI DEBUG] model={request.model}, stream={request.stream}")
+    
     # 获取服务实例
     api_key_service = get_api_key_service()
     account_pool = get_account_pool_service()
@@ -221,11 +224,22 @@ async def chat_completions(
             pass
     
     # 6. 转换为后端格式
-    backend_payload = transformer.to_stackai_dict(
-        unified_request,
-        input_mapping=input_mapping,
-        user_id=request.user or "anonymous"
-    )
+    # 使用 format_messages_to_context 直接格式化原始消息，保持正确顺序
+    messages_context = transformer.format_messages_to_context(request.messages)
+    
+    # 构建 payload
+    backend_payload = {
+        "user_id": request.user or "anonymous",
+        "in-0": messages_context,  # 完整对话上下文
+        "conversation_id": str(uuid.uuid4())  # 每次请求使用新的会话ID
+    }
+    
+    # 如果有自定义输入映射，应用它（但 merge_context 模式下只使用 user_input 映射）
+    if input_mapping and "user_input" in input_mapping:
+        field_name = input_mapping["user_input"]
+        if field_name != "in-0":
+            backend_payload[field_name] = messages_context
+            del backend_payload["in-0"]
     
     logger.info(f"Request {request_id}: model={request.model}, stream={request.stream}")
     
@@ -240,20 +254,61 @@ async def chat_completions(
             # 获取账号的 Private API Key（用于从 Backend Analytics 获取真实 token）
             private_api_key = account_pool.decrypt_private_api_key(account)
             
+            # 提取输入预览
+            from app.services.call_logger import extract_input_preview
+            input_preview = extract_input_preview(
+                [m.model_dump() if hasattr(m, 'model_dump') else m for m in request.messages],
+                api_type="openai"
+            )
+            
+            # 提取最后一条用户消息（用于 token 计算）
+            last_user_msg = ""
+            for msg in reversed(request.messages):
+                if msg.role == "user":
+                    last_user_msg = msg.content if isinstance(msg.content, str) else str(msg.content)
+                    break
+            
+            # 从 Stack AI Analytics 获取请求前的 today_tokens（用于计算差值）
+            pre_request_tokens = 0
+            if private_api_key:
+                try:
+                    from app.services.analytics import get_analytics_service
+                    analytics_service = get_analytics_service()
+                    stats = await analytics_service.get_recent_stats(
+                        org_id=account.org_id,
+                        flow_id=account.flow_id,
+                        private_api_key=private_api_key,
+                        days=1
+                    )
+                    if stats:
+                        pre_request_tokens = stats.today_tokens
+                        print(f"[DEBUG] Pre-request today_tokens from Analytics: {pre_request_tokens}")
+                except Exception as e:
+                    print(f"[DEBUG] Failed to get pre-request tokens: {e}")
+                    pre_request_tokens = 0
+            
             stream_context = {
                 "request_id": request_id,
                 "api_key_id": api_key_obj.id if api_key_obj else None,
+                "api_key_name": api_key_obj.name if api_key_obj else None,
                 "api_key_prefix": api_key_obj.key_prefix if api_key_obj else None,
                 "client_ip": client_ip,
                 "model": request.model,
                 "account_id": account.id,
+                "account_name": account.name,
+                "model_group": account.model_group,
                 "account_org_id": account.org_id,
                 "account_flow_id": account.flow_id,
                 "private_api_key": private_api_key,
                 "start_time": start_time,
                 "accumulated_content": [],
-                "pre_request_tokens": account.daily_used  # 请求前的 token 使用量
+                "input_preview": input_preview,
+                "last_user_msg": last_user_msg,  # 只用当前消息计算输入 token
+                "pre_request_tokens": pre_request_tokens  # 从 Stack AI Analytics 获取的请求前 token
             }
+            
+            # [DEBUG] 流式请求调试输出
+            print(f"[DEBUG STREAM] last_user_msg='{last_user_msg[:80] if len(last_user_msg) > 80 else last_user_msg}', len={len(last_user_msg)}")
             
             # 流式响应 - 真正的实时流式输出
             async def generate_stream():
@@ -326,8 +381,16 @@ async def chat_completions(
             )
             
             # 转换响应格式
+            # 只用最后一条用户消息计算输入 token（匹配 Stack AI 的计费方式）
+            last_user_msg = ""
+            for msg in reversed(request.messages):
+                if msg.role == "user":
+                    last_user_msg = msg.content if isinstance(msg.content, str) else str(msg.content)
+                    break
+            
             openai_response = response_transformer.to_openai_response(
-                backend_response, request.model, request_id
+                backend_response, request.model, request_id,
+                input_text=last_user_msg  # 只用当前用户消息计算 prompt_tokens
             )
             
             # 更新 token 使用量
@@ -335,6 +398,9 @@ async def chat_completions(
             prompt_tokens = usage.get("prompt_tokens", 0)
             completion_tokens = usage.get("completion_tokens", 0)
             total_tokens = usage.get("total_tokens", 0)
+            
+            # 调试日志：显示 token 计算来源
+            print(f"[DEBUG] Token calculation - last_user_msg='{last_user_msg[:50]}...', input_text_len={len(last_user_msg)}, prompt_tokens={prompt_tokens}, completion_tokens={completion_tokens}")
             if total_tokens > 0:
                 await account_pool.update_token_usage(
                     session, account.id,
@@ -359,16 +425,58 @@ async def chat_completions(
                 response_time_ms=elapsed_ms
             )
             
-            # 更新 API Key 累计统计
+            # 计算费用
+            from app.services.pricing import get_pricing_service
+            pricing_service = get_pricing_service()
+            _, _, total_cost = pricing_service.calculate(request.model, prompt_tokens, completion_tokens)
+            
+            # 更新 API Key 累计统计（包含费用）
             if api_key_obj:
                 await api_key_service.update_key_stats(
-                    session, api_key_obj.id, prompt_tokens, completion_tokens
+                    session, api_key_obj.id, prompt_tokens, completion_tokens, cost=total_cost
                 )
             
             # 更新系统累计统计
             stats_service = get_stats_service()
             await stats_service.update_system_stats(
                 session, prompt_tokens, completion_tokens
+            )
+            
+            # 记录详细调用日志
+            from app.services.call_logger import get_call_logger_service, extract_input_preview
+            call_logger = get_call_logger_service()
+            
+            # 提取输入预览
+            input_preview = extract_input_preview(
+                [m.model_dump() if hasattr(m, 'model_dump') else m for m in request.messages],
+                api_type="openai"
+            )
+            
+            # 提取输出预览
+            output_preview = ""
+            choices = openai_response.get("choices", [])
+            if choices:
+                message = choices[0].get("message", {})
+                output_preview = message.get("content", "")[:500]
+            
+            await call_logger.log_call(
+                session,
+                api_key_id=api_key_obj.id if api_key_obj else None,
+                api_key_name=api_key_obj.name if api_key_obj else None,
+                api_key_prefix=api_key_obj.key_prefix if api_key_obj else None,
+                client_ip=client_ip,
+                account_id=account.id,
+                account_name=account.name,
+                model_group=account.model_group,
+                model=request.model,
+                api_type="openai",
+                is_stream=False,
+                input_preview=input_preview,
+                output_preview=output_preview,
+                input_tokens=prompt_tokens,
+                output_tokens=completion_tokens,
+                response_time_ms=elapsed_ms,
+                status="success",
             )
             
             await session.commit()
@@ -871,6 +979,7 @@ async def update_stream_stats(context: dict):
     from app.models.database import get_session_factory
     from app.services.token_counter import get_token_counter
     from app.services.analytics import get_analytics_service
+    from app.services.call_logger import get_call_logger_service
     
     try:
         elapsed_ms = int((time.time() - context["start_time"]) * 1000)
@@ -878,15 +987,22 @@ async def update_stream_stats(context: dict):
         output_tokens = 0
         total_tokens = 0
         
-        # 尝试从 Backend Analytics 获取真实的 token 数据
+        # 方法 1：从 Stack AI Analytics 获取真实 token（使用调用前后差值）
+        # pre_request_tokens 是调用前从 Stack AI 获取的 today_tokens
+        # 现在请求完成后再次获取 today_tokens，差值就是本次请求的 token
         private_api_key = context.get("private_api_key")
+        analytics_success = False
+        
         if private_api_key:
             try:
+                from app.services.analytics import get_analytics_service
                 analytics_service = get_analytics_service()
-                # 等待一小段时间让 StackAI 更新统计
-                import asyncio
-                await asyncio.sleep(1)
                 
+                # 等待一小段时间让 Stack AI 更新统计
+                import asyncio
+                await asyncio.sleep(0.5)
+                
+                # 获取请求后的 today_tokens
                 stats = await analytics_service.get_recent_stats(
                     org_id=context["account_org_id"],
                     flow_id=context["account_flow_id"],
@@ -894,28 +1010,41 @@ async def update_stream_stats(context: dict):
                     days=1
                 )
                 
-                if stats:
-                    # 计算本次请求的 token 增量
+                if stats and stats.today_tokens > 0:
+                    # pre_request_tokens 是真正的调用前 today_tokens
                     pre_tokens = context.get("pre_request_tokens", 0)
                     current_tokens = stats.today_tokens
-                    total_tokens = max(0, current_tokens - pre_tokens)
-                    # 假设输入输出各占一半（无法精确区分）
-                    input_tokens = total_tokens // 3
-                    output_tokens = total_tokens - input_tokens
-                    logger.debug(
-                        f"Got real token data from Backend: "
-                        f"pre={pre_tokens}, current={current_tokens}, delta={total_tokens}"
-                    )
+                    
+                    # 只有当 current > pre 时才使用差值
+                    if current_tokens > pre_tokens:
+                        total_tokens = current_tokens - pre_tokens
+                        # 假设输入:输出比例约 1:2
+                        input_tokens = total_tokens // 3
+                        output_tokens = total_tokens - input_tokens
+                        analytics_success = True
+                        print(f"[DEBUG] Analytics: pre={pre_tokens}, current={current_tokens}, delta={total_tokens}")
             except Exception as e:
-                logger.warning(f"Failed to get token data from Backend Analytics: {e}")
+                print(f"[DEBUG] Analytics failed: {e}")
         
-        # 如果无法从 StackAI 获取，使用 tiktoken 估算
-        if total_tokens == 0:
-            accumulated_content = "".join(context.get("accumulated_content", []))
+        # 获取累积的输出内容（用于 output_preview 和 tiktoken 估算）
+        accumulated_content = "".join(context.get("accumulated_content", []))
+        
+        # 方法 2：如果 Analytics 失败，使用 tiktoken 估算
+        if not analytics_success:
+            
+            token_counter = get_token_counter()
+            
+            # 计算输入 token（只用最后一条用户消息）
+            last_user_msg = context.get("last_user_msg", "")
+            if last_user_msg:
+                input_tokens = token_counter.count(last_user_msg)
+            
+            # 计算输出 token
             if accumulated_content:
-                token_counter = get_token_counter()
                 output_tokens = token_counter.count(accumulated_content)
-                total_tokens = output_tokens
+            
+            total_tokens = input_tokens + output_tokens
+            print(f"[DEBUG] Tiktoken fallback: input={input_tokens}, output={output_tokens}, total={total_tokens}")
         
         # 创建新的数据库会话
         session_factory = get_session_factory()
@@ -934,16 +1063,43 @@ async def update_stream_stats(context: dict):
                 response_time_ms=elapsed_ms
             )
             
-            # 更新 API Key 累计统计
+            # 计算费用
+            from app.services.pricing import get_pricing_service
+            pricing_service = get_pricing_service()
+            _, _, total_cost = pricing_service.calculate(context["model"], input_tokens, output_tokens)
+            
+            # 更新 API Key 累计统计（包含费用）
             if context["api_key_id"]:
                 api_key_service = get_api_key_service()
                 await api_key_service.update_key_stats(
-                    session, context["api_key_id"], input_tokens, output_tokens
+                    session, context["api_key_id"], input_tokens, output_tokens, cost=total_cost
                 )
             
             # 更新系统累计统计
             stats_service = get_stats_service()
             await stats_service.update_system_stats(session, input_tokens, output_tokens)
+            
+            # 记录详细调用日志
+            call_logger = get_call_logger_service()
+            await call_logger.log_call(
+                session,
+                api_key_id=context.get("api_key_id"),
+                api_key_name=context.get("api_key_name"),
+                api_key_prefix=context.get("api_key_prefix"),
+                client_ip=context.get("client_ip"),
+                account_id=context.get("account_id"),
+                account_name=context.get("account_name"),
+                model_group=context.get("model_group"),
+                model=context.get("model"),
+                api_type="openai",
+                is_stream=True,
+                input_preview=context.get("input_preview"),
+                output_preview=accumulated_content[:500] if accumulated_content else None,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                response_time_ms=elapsed_ms,
+                status="success",
+            )
             
             await session.commit()
             

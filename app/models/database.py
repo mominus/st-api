@@ -231,9 +231,9 @@ async def init_database() -> None:
         engine_kwargs["pool_size"] = 5
         engine_kwargs["max_overflow"] = 10
     elif is_turso:
-        # Turso/LibSQL - 使用 HTTP，不需要传统连接池
-        engine_kwargs["pool_size"] = 5
-        engine_kwargs["max_overflow"] = 10
+        # Turso/LibSQL - 使用 SingletonThreadPool，不支持连接池参数
+        # 移除 pool_pre_ping，Turso 不需要
+        engine_kwargs.pop("pool_pre_ping", None)
     else:
         # PostgreSQL 等数据库使用完整连接池配置
         engine_kwargs["pool_size"] = pool_size

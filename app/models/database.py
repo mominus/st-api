@@ -21,7 +21,7 @@ Base = declarative_base()
 
 # 数据库 URL，默认使用 SQLite
 # 本地开发: sqlite+aiosqlite:///./data/api_service.db
-# Turso: libsql+https://your-db.turso.io?authToken=xxx
+# Turso: sqlite+libsql://your-db.turso.io?authToken=xxx&secure=true
 DATABASE_URL = os.getenv(
     "DATABASE_URL", 
     "sqlite+aiosqlite:///./data/api_service.db"
@@ -220,7 +220,7 @@ async def init_database() -> None:
     
     # 判断数据库类型
     is_sqlite = "sqlite" in db_url and "libsql" not in db_url
-    is_turso = "libsql" in db_url or "turso" in db_url
+    is_turso = "libsql" in db_url
     
     if is_sqlite:
         # 本地 SQLite

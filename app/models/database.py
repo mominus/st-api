@@ -219,21 +219,16 @@ async def init_database() -> None:
     }
     
     # 判断数据库类型
-    is_sqlite = "sqlite" in db_url and "libsql" not in db_url
-    is_turso = "libsql" in db_url
+    is_sqlite = "sqlite" in db_url
     
     if is_sqlite:
-        # 本地 SQLite
+        # SQLite
         connect_args = {
             "timeout": 60,
             "check_same_thread": False
         }
         engine_kwargs["pool_size"] = 5
         engine_kwargs["max_overflow"] = 10
-    elif is_turso:
-        # Turso/LibSQL - 使用 SingletonThreadPool，不支持连接池参数
-        # 移除 pool_pre_ping，Turso 不需要
-        engine_kwargs.pop("pool_pre_ping", None)
     else:
         # PostgreSQL 等数据库使用完整连接池配置
         engine_kwargs["pool_size"] = pool_size
@@ -257,7 +252,7 @@ async def init_database() -> None:
     # 创建所有表
     async with _engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-        # 仅本地 SQLite 启用 WAL 模式
+        # SQLite 启用 WAL 模式
         if is_sqlite:
             await conn.execute(text("PRAGMA journal_mode=WAL"))
             await conn.execute(text("PRAGMA busy_timeout=30000"))

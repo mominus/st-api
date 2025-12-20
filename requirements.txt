@@ -9,7 +9,6 @@ httpx>=0.26.0
 # Database
 sqlalchemy>=2.0.25
 aiosqlite>=0.19.0
-sqlalchemy-libsql>=0.1.0  # Turso/LibSQL 支持
 
 # Authentication
 pyjwt>=2.8.0

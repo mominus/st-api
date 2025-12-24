@@ -82,6 +82,27 @@ from app.services.stats import (
     init_stats_service,
 )
 
+from app.services.tool_registry import (
+    ToolSchema,
+    ToolRegistry,
+    READ_TOOL,
+    WRITE_TOOL,
+    EDIT_TOOL,
+    BASH_TOOL,
+    GREP_TOOL,
+    GLOB_TOOL,
+    DIFF_TOOL,
+    LS_TOOL,
+    DEFAULT_TOOLS,
+    create_default_registry,
+    get_tool_registry,
+    init_tool_registry,
+)
+
+from app.services.tool_serializer import (
+    ToolSerializer,
+)
+
 __all__ = [
     # Crypto Service
     "CryptoService",
@@ -146,4 +167,21 @@ __all__ = [
     "SystemOverview",
     "get_stats_service",
     "init_stats_service",
+    # Tool Registry
+    "ToolSchema",
+    "ToolRegistry",
+    "READ_TOOL",
+    "WRITE_TOOL",
+    "EDIT_TOOL",
+    "BASH_TOOL",
+    "GREP_TOOL",
+    "GLOB_TOOL",
+    "DIFF_TOOL",
+    "LS_TOOL",
+    "DEFAULT_TOOLS",
+    "create_default_registry",
+    "get_tool_registry",
+    "init_tool_registry",
+    # Tool Serializer
+    "ToolSerializer",
 ]

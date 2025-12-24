@@ -1,13 +1,20 @@
 """
 Response Transformer Service
 将后端响应转换为标准 API 格式（OpenAI、Anthropic、Gemini）
+
+支持 Tool Use 功能：
+- to_anthropic_response_with_tools(): 将后端响应转换为带 tool_use 支持的 Anthropic 格式
+- create_tool_use_block(): 创建 Anthropic tool_use 内容块
 """
 
 import json
 import time
 import uuid
-from typing import Optional, Dict, Any, AsyncGenerator, Literal
+from typing import Optional, Dict, Any, AsyncGenerator, Literal, List, TYPE_CHECKING
 from dataclasses import dataclass
+
+if TYPE_CHECKING:
+    from .tool_parser import ToolParser, ParsedToolCall
 
 
 # ============================================================================
@@ -730,6 +737,573 @@ class ResponseTransformer:
         
         # 没有找到思维链标签，返回空思维链和完整内容
         return "", content
+
+    
+    # ========================================================================
+    # Anthropic Tool Use Support (Requirements 4.1, 4.2, 4.3, 4.4)
+    # ========================================================================
+    
+    def create_tool_use_block(
+        self,
+        tool_call: "ParsedToolCall",
+        tool_use_id: str
+    ) -> Dict[str, Any]:
+        """
+        创建 Anthropic tool_use 内容块
+        
+        Args:
+            tool_call: 解析的工具调用
+            tool_use_id: 工具使用 ID
+            
+        Returns:
+            Anthropic tool_use 内容块字典
+            
+        Requirements: 4.1, 4.2
+        """
+        return {
+            "type": "tool_use",
+            "id": tool_use_id,
+            "name": tool_call.tool_name,
+            "input": tool_call.arguments
+        }
+    
+    def to_anthropic_response_with_tools(
+        self,
+        backend_response: Dict[str, Any],
+        model: str,
+        request_id: Optional[str] = None,
+        tool_parser: Optional["ToolParser"] = None
+    ) -> Dict[str, Any]:
+        """
+        将后端响应转换为带有 tool_use 支持的 Anthropic 格式
+        
+        处理逻辑：
+        1. 如果没有 tool_parser 或响应中没有工具调用，返回标准文本响应
+        2. 如果有工具调用，解析并转换为 tool_use 内容块
+        3. 如果工具调用之前有文本，将文本作为单独的内容块包含在 tool_use 块之前
+        
+        Args:
+            backend_response: 后端返回的响应数据
+            model: 请求的模型名称
+            request_id: 请求 ID（可选）
+            tool_parser: 工具解析器实例（可选）
+            
+        Returns:
+            Anthropic 格式的响应字典，可能包含 tool_use 内容块
+            
+        Requirements: 4.1, 4.2, 4.3, 4.4
+        """
+        raw_content = self._extract_content(backend_response)
+        
+        # 如果没有 tool_parser，返回标准响应
+        if tool_parser is None:
+            return self.to_anthropic_response(backend_response, model, request_id)
+        
+        # 解析工具调用
+        parse_result = tool_parser.parse(raw_content)
+        
+        # 如果没有工具调用，返回标准文本响应
+        if not parse_result.has_tool_calls:
+            return self.to_anthropic_response(backend_response, model, request_id)
+        
+        # 构建 content 数组
+        content_blocks: List[Dict[str, Any]] = []
+        
+        # 如果工具调用之前有文本，添加文本块 (Requirement 4.4)
+        if parse_result.text_before and parse_result.text_before.strip():
+            content_blocks.append({
+                "type": "text",
+                "text": parse_result.text_before.strip()
+            })
+        
+        # 为每个工具调用创建 tool_use 块 (Requirements 4.1, 4.2)
+        for tool_call in parse_result.tool_calls:
+            tool_use_id = tool_parser.generate_tool_use_id()
+            tool_use_block = self.create_tool_use_block(tool_call, tool_use_id)
+            content_blocks.append(tool_use_block)
+        
+        # 如果工具调用之后有文本，添加文本块
+        if parse_result.text_after and parse_result.text_after.strip():
+            content_blocks.append({
+                "type": "text",
+                "text": parse_result.text_after.strip()
+            })
+        
+        # 如果没有任何内容块（理论上不应该发生），添加空文本块 (Requirement 4.3)
+        if not content_blocks:
+            content_blocks.append({
+                "type": "text",
+                "text": ""
+            })
+        
+        # 计算 token
+        usage = self._estimate_token_usage(raw_content)
+        
+        # 确定 stop_reason：如果有工具调用，使用 "tool_use"
+        stop_reason = "tool_use" if parse_result.has_tool_calls else "end_turn"
+        
+        return {
+            "id": f"msg_{request_id or uuid.uuid4().hex[:24]}",
+            "type": "message",
+            "role": "assistant",
+            "content": content_blocks,
+            "model": model,
+            "stop_reason": stop_reason,
+            "stop_sequence": None,
+            "usage": {
+                "input_tokens": usage.prompt_tokens,
+                "output_tokens": usage.completion_tokens
+            }
+        }
+
+    # ========================================================================
+    # Streaming Tool Use Support (Requirements 4.5, 4.6, 7.1, 7.2, 7.3, 7.4, 7.5)
+    # ========================================================================
+
+    async def transform_backend_sse_to_anthropic_with_tools(
+        self,
+        backend_stream: AsyncGenerator[str, None],
+        model: str,
+        request_id: Optional[str] = None,
+        tool_parser: Optional["ToolParser"] = None,
+        max_buffer_size: int = 65536
+    ) -> AsyncGenerator[str, None]:
+        """
+        将后端 SSE 流转换为带有 tool_use 检测的 Anthropic SSE 格式
+        
+        支持两种工具调用格式：
+        1. JSON 代码块: ```json {"tool": "...", "arguments": {...}} ```
+        2. XML 标签: <tool_use id="..." name="...">JSON参数</tool_use>
+        
+        Args:
+            backend_stream: 后端返回的 SSE 流
+            model: 模型名称
+            request_id: 请求 ID
+            tool_parser: 工具解析器实例（可选）
+            max_buffer_size: 最大缓冲区大小，防止内存溢出
+            
+        Yields:
+            Anthropic 格式的 SSE 事件
+            
+        Requirements: 4.5, 4.6, 7.1, 7.2, 7.3, 7.4, 7.5
+        """
+        msg_id = f"msg_{request_id or uuid.uuid4().hex[:24]}"
+        
+        # 状态常量
+        STATE_TEXT = 0           # 普通文本状态
+        STATE_BUFFERING_JSON = 1 # 缓冲 JSON 代码块状态
+        STATE_BUFFERING_XML = 2  # 缓冲 XML tool_use 标签状态
+        
+        state = STATE_TEXT
+        content_index = 0
+        buffer = ""
+        output_tokens = 0
+        message_started = False
+        current_block_started = False
+        current_block_type = "text"  # "text" or "tool_use"
+        has_tool_calls = False
+        
+        # 标记
+        JSON_BLOCK_START = "```json"
+        JSON_BLOCK_END = "```"
+        XML_TOOL_START = "<tool_use"
+        XML_TOOL_END = "</tool_use>"
+        
+        # XML tool_use 正则
+        import re
+        XML_TOOL_USE_PATTERN = re.compile(
+            r'<tool_use\s+id="([^"]+)"\s+name="([^"]+)">(.*?)</tool_use>',
+            re.DOTALL
+        )
+        
+        def emit_message_start() -> str:
+            """发送 message_start 事件"""
+            return self.to_anthropic_stream_event("message_start", {
+                "type": "message_start",
+                "message": {
+                    "id": msg_id,
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [],
+                    "model": model,
+                    "stop_reason": None,
+                    "stop_sequence": None,
+                    "usage": {"input_tokens": 0, "output_tokens": 0}
+                }
+            })
+        
+        def emit_text_block_start(index: int) -> str:
+            """发送 text content_block_start 事件"""
+            return self.to_anthropic_stream_event("content_block_start", {
+                "type": "content_block_start",
+                "index": index,
+                "content_block": {"type": "text", "text": ""}
+            })
+        
+        def emit_text_delta(index: int, text: str) -> str:
+            """发送 text_delta 事件"""
+            return self.to_anthropic_stream_event("content_block_delta", {
+                "type": "content_block_delta",
+                "index": index,
+                "delta": {"type": "text_delta", "text": text}
+            })
+        
+        def emit_tool_use_block_start(index: int, tool_use_id: str, tool_name: str) -> str:
+            """发送 tool_use content_block_start 事件 (Requirement 7.1)"""
+            return self.to_anthropic_stream_event("content_block_start", {
+                "type": "content_block_start",
+                "index": index,
+                "content_block": {
+                    "type": "tool_use",
+                    "id": tool_use_id,
+                    "name": tool_name,
+                    "input": {}
+                }
+            })
+        
+        def emit_tool_use_delta(index: int, partial_json: str) -> str:
+            """发送 input_json_delta 事件 (Requirement 7.2)"""
+            return self.to_anthropic_stream_event("content_block_delta", {
+                "type": "content_block_delta",
+                "index": index,
+                "delta": {"type": "input_json_delta", "partial_json": partial_json}
+            })
+        
+        def emit_block_stop(index: int) -> str:
+            """发送 content_block_stop 事件 (Requirement 7.3)"""
+            return self.to_anthropic_stream_event("content_block_stop", {
+                "type": "content_block_stop",
+                "index": index
+            })
+        
+        async def ensure_message_started():
+            """确保 message_start 事件已发送"""
+            nonlocal message_started
+            if not message_started:
+                message_started = True
+                return emit_message_start()
+            return None
+        
+        async def start_text_block():
+            """开始文本块"""
+            nonlocal current_block_started, current_block_type, content_index
+            if not current_block_started:
+                current_block_started = True
+                current_block_type = "text"
+                return emit_text_block_start(content_index)
+            return None
+        
+        async def end_current_block():
+            """结束当前块 (Requirement 7.4)"""
+            nonlocal current_block_started, content_index
+            if current_block_started:
+                current_block_started = False
+                event = emit_block_stop(content_index)
+                content_index += 1
+                return event
+            return None
+        
+        def parse_tool_call_from_json(json_str: str):
+            """从 JSON 字符串解析工具调用"""
+            if tool_parser is None:
+                return None
+            
+            try:
+                data = json.loads(json_str)
+                if not isinstance(data, dict):
+                    return None
+                
+                tool_name = data.get("tool")
+                if not tool_name or not isinstance(tool_name, str):
+                    return None
+                
+                arguments = data.get("arguments", {})
+                if not isinstance(arguments, dict):
+                    arguments = {}
+                
+                # 验证工具调用
+                from .tool_parser import ParsedToolCall
+                parsed_call = ParsedToolCall(
+                    tool_name=tool_name,
+                    arguments=arguments,
+                    raw_json=json_str
+                )
+                
+                if tool_parser.validate_tool_call(parsed_call):
+                    return parsed_call
+                return None
+                
+            except json.JSONDecodeError:
+                return None
+            except Exception:
+                return None
+        
+        def parse_xml_tool_use(xml_content: str):
+            """从 XML tool_use 标签解析工具调用"""
+            if tool_parser is None:
+                return None, None
+            
+            match = XML_TOOL_USE_PATTERN.match(xml_content)
+            if not match:
+                return None, None
+            
+            tool_id = match.group(1)
+            tool_name = match.group(2)
+            json_content = match.group(3).strip()
+            
+            try:
+                arguments = json.loads(json_content) if json_content else {}
+                if not isinstance(arguments, dict):
+                    arguments = {}
+            except json.JSONDecodeError:
+                return None, None
+            
+            from .tool_parser import ParsedToolCall
+            parsed_call = ParsedToolCall(
+                tool_name=tool_name,
+                arguments=arguments,
+                raw_json=json_content
+            )
+            
+            if tool_parser.validate_tool_call(parsed_call):
+                return parsed_call, tool_id
+            return None, None
+        
+        # 处理流
+        async for raw_data in backend_stream:
+            token = self._parse_backend_sse(raw_data)
+            if not token:
+                continue
+            
+            output_tokens += 1
+            buffer += token
+            
+            while buffer:
+                if state == STATE_TEXT:
+                    # 检查是否有 JSON 代码块或 XML tool_use 开始标记
+                    json_start_pos = buffer.find(JSON_BLOCK_START)
+                    xml_start_pos = buffer.find(XML_TOOL_START)
+                    
+                    # 确定哪个标记先出现
+                    start_pos = -1
+                    start_type = None
+                    
+                    if json_start_pos != -1 and xml_start_pos != -1:
+                        if json_start_pos < xml_start_pos:
+                            start_pos = json_start_pos
+                            start_type = "json"
+                        else:
+                            start_pos = xml_start_pos
+                            start_type = "xml"
+                    elif json_start_pos != -1:
+                        start_pos = json_start_pos
+                        start_type = "json"
+                    elif xml_start_pos != -1:
+                        start_pos = xml_start_pos
+                        start_type = "xml"
+                    
+                    if start_pos != -1:
+                        # 找到开始标记
+                        # 先输出开始标记之前的文本
+                        if start_pos > 0:
+                            text_before = buffer[:start_pos]
+                            event = await ensure_message_started()
+                            if event:
+                                yield event
+                            event = await start_text_block()
+                            if event:
+                                yield event
+                            yield emit_text_delta(content_index, text_before)
+                        
+                        # 移除已处理的文本
+                        buffer = buffer[start_pos:]
+                        state = STATE_BUFFERING_JSON if start_type == "json" else STATE_BUFFERING_XML
+                    else:
+                        # 没有找到开始标记
+                        # 检查缓冲区末尾是否可能是不完整的开始标记
+                        potential_start_len = max(len(JSON_BLOCK_START), len(XML_TOOL_START)) - 1
+                        
+                        if len(buffer) <= potential_start_len:
+                            # 缓冲区太短，等待更多数据
+                            break
+                        
+                        # 输出安全的部分（保留可能的不完整标记）
+                        safe_len = len(buffer) - potential_start_len
+                        if safe_len > 0:
+                            text_to_output = buffer[:safe_len]
+                            event = await ensure_message_started()
+                            if event:
+                                yield event
+                            event = await start_text_block()
+                            if event:
+                                yield event
+                            yield emit_text_delta(content_index, text_to_output)
+                            buffer = buffer[safe_len:]
+                        break
+                
+                elif state == STATE_BUFFERING_JSON:
+                    # 在缓冲 JSON 代码块
+                    search_start = len(JSON_BLOCK_START)
+                    end_pos = buffer.find(JSON_BLOCK_END, search_start)
+                    
+                    if end_pos != -1:
+                        # 找到结束标记
+                        json_content = buffer[len(JSON_BLOCK_START):end_pos].strip()
+                        
+                        # 尝试解析工具调用
+                        tool_call = parse_tool_call_from_json(json_content)
+                        
+                        if tool_call is not None:
+                            # 有效的工具调用
+                            has_tool_calls = True
+                            
+                            event = await end_current_block()
+                            if event:
+                                yield event
+                            
+                            event = await ensure_message_started()
+                            if event:
+                                yield event
+                            
+                            tool_use_id = tool_parser.generate_tool_use_id()
+                            yield emit_tool_use_block_start(content_index, tool_use_id, tool_call.tool_name)
+                            
+                            input_json = json.dumps(tool_call.arguments)
+                            yield emit_tool_use_delta(content_index, input_json)
+                            
+                            yield emit_block_stop(content_index)
+                            content_index += 1
+                            current_block_started = False
+                        else:
+                            # 不是有效的工具调用，作为普通文本输出
+                            full_block = buffer[:end_pos + len(JSON_BLOCK_END)]
+                            event = await ensure_message_started()
+                            if event:
+                                yield event
+                            event = await start_text_block()
+                            if event:
+                                yield event
+                            yield emit_text_delta(content_index, full_block)
+                        
+                        buffer = buffer[end_pos + len(JSON_BLOCK_END):]
+                        state = STATE_TEXT
+                    else:
+                        if len(buffer) > max_buffer_size:
+                            event = await ensure_message_started()
+                            if event:
+                                yield event
+                            event = await start_text_block()
+                            if event:
+                                yield event
+                            yield emit_text_delta(content_index, buffer)
+                            buffer = ""
+                            state = STATE_TEXT
+                        break
+                
+                elif state == STATE_BUFFERING_XML:
+                    # 在缓冲 XML tool_use 标签
+                    end_pos = buffer.find(XML_TOOL_END)
+                    
+                    if end_pos != -1:
+                        # 找到结束标记
+                        xml_content = buffer[:end_pos + len(XML_TOOL_END)]
+                        
+                        # 尝试解析工具调用
+                        tool_call, original_id = parse_xml_tool_use(xml_content)
+                        
+                        if tool_call is not None:
+                            # 有效的工具调用
+                            has_tool_calls = True
+                            
+                            event = await end_current_block()
+                            if event:
+                                yield event
+                            
+                            event = await ensure_message_started()
+                            if event:
+                                yield event
+                            
+                            # 使用原始 ID 或生成新 ID
+                            tool_use_id = original_id if original_id else tool_parser.generate_tool_use_id()
+                            yield emit_tool_use_block_start(content_index, tool_use_id, tool_call.tool_name)
+                            
+                            input_json = json.dumps(tool_call.arguments)
+                            yield emit_tool_use_delta(content_index, input_json)
+                            
+                            yield emit_block_stop(content_index)
+                            content_index += 1
+                            current_block_started = False
+                        else:
+                            # 不是有效的工具调用，作为普通文本输出
+                            event = await ensure_message_started()
+                            if event:
+                                yield event
+                            event = await start_text_block()
+                            if event:
+                                yield event
+                            yield emit_text_delta(content_index, xml_content)
+                        
+                        buffer = buffer[end_pos + len(XML_TOOL_END):]
+                        state = STATE_TEXT
+                    else:
+                        if len(buffer) > max_buffer_size:
+                            event = await ensure_message_started()
+                            if event:
+                                yield event
+                            event = await start_text_block()
+                            if event:
+                                yield event
+                            yield emit_text_delta(content_index, buffer)
+                            buffer = ""
+                            state = STATE_TEXT
+                        break
+        
+        # 处理剩余缓冲区
+        if buffer:
+            if state in (STATE_BUFFERING_JSON, STATE_BUFFERING_XML):
+                # 代码块未完成，作为普通文本输出
+                event = await ensure_message_started()
+                if event:
+                    yield event
+                event = await start_text_block()
+                if event:
+                    yield event
+                yield emit_text_delta(content_index, buffer)
+            elif state == STATE_TEXT:
+                # 普通文本
+                event = await ensure_message_started()
+                if event:
+                    yield event
+                event = await start_text_block()
+                if event:
+                    yield event
+                yield emit_text_delta(content_index, buffer)
+        
+        # 确保当前块已关闭
+        event = await end_current_block()
+        if event:
+            yield event
+        
+        # 如果从未开始消息（空响应），发送基本结构
+        if not message_started:
+            yield emit_message_start()
+            yield emit_text_block_start(0)
+            yield emit_block_stop(0)
+            content_index = 1
+        
+        # 确定 stop_reason：如果有工具调用，使用 "tool_use"
+        stop_reason = "tool_use" if has_tool_calls else "end_turn"
+        
+        # 发送 message_delta 和 message_stop
+        yield self.to_anthropic_stream_event("message_delta", {
+            "type": "message_delta",
+            "delta": {"stop_reason": stop_reason, "stop_sequence": None},
+            "usage": {"output_tokens": output_tokens}
+        })
+        
+        yield self.to_anthropic_stream_event("message_stop", {
+            "type": "message_stop"
+        })
 
     
     # ========================================================================

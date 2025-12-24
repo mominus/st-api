@@ -2,7 +2,7 @@
 Anthropic Compatible Router
 实现 Anthropic API 兼容的路由端点
 
-Requirements: 1.2
+Requirements: 1.2, 2.1, 5.1, 6.1, 7.1, 7.2, 7.3, 7.4
 """
 
 import json
@@ -31,6 +31,14 @@ from app.services.error_handler import ErrorHandler, get_error_handler, APIError
 from app.services.logger import LoggerService, get_logger_service
 from app.services.stats import StatsService, get_stats_service
 from sqlalchemy import select
+
+# Tool Use 相关导入
+from app.services.tool_config import get_tool_config_service, is_tool_use_enabled
+from app.services.tool_registry import get_tool_registry
+from app.services.tool_injector import ToolInjector
+from app.services.tool_parser import ToolParser
+from app.services.tool_context_builder import ToolContextBuilder
+from app.services.tool_result_formatter import ToolResultFormatter
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +72,8 @@ class MessagesRequest(BaseModel):
     stop_sequences: Optional[List[str]] = Field(default=None, description="停止序列")
     metadata: Optional[Dict[str, Any]] = Field(default=None, description="元数据")
     thinking: Optional[ThinkingConfig] = Field(default=None, description="思维链配置")
+    tools: Optional[List[Dict[str, Any]]] = Field(default=None, description="工具定义列表")
+    tool_choice: Optional[Dict[str, Any]] = Field(default=None, description="工具选择配置")
     
     class Config:
         extra = "allow"  # 允许额外字段
@@ -122,6 +132,30 @@ class MessagesRequest(BaseModel):
                     texts.append(block)
             return "\n".join(texts) if texts else None
         return str(self.system)
+    
+    def has_tools(self) -> bool:
+        """检查请求是否包含工具定义"""
+        return self.tools is not None and len(self.tools) > 0
+    
+    def has_tool_results(self) -> bool:
+        """检查消息中是否包含 tool_result 内容块"""
+        for msg in self.messages:
+            content = msg.content
+            if isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "tool_result":
+                        return True
+        return False
+    
+    def has_tool_use_in_messages(self) -> bool:
+        """检查消息中是否包含 tool_use 内容块（助手之前的工具调用）"""
+        for msg in self.messages:
+            content = msg.content
+            if isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "tool_use":
+                        return True
+        return False
 
 
 # ============================================================================
@@ -235,9 +269,26 @@ async def create_message(
         body = await http_request.body()
         body_json = json.loads(body)
         
-        # 详细日志：打印思维链相关参数
+        # 详细日志：打印完整请求
         logger.info(f"Request {request_id}: Anthropic raw body: {json.dumps(body_json, ensure_ascii=False)[:500]}")
         logger.info(f"Request {request_id}: [THINKING DEBUG] model={body_json.get('model')}, thinking={body_json.get('thinking')}, stream={body_json.get('stream')}")
+        
+        # 打印 system 字段的长度和前 200 字符
+        system_field = body_json.get('system')
+        if system_field:
+            if isinstance(system_field, str):
+                logger.info(f"Request {request_id}: [SYSTEM DEBUG] system length={len(system_field)}, first 200 chars: {system_field[:200]}")
+            else:
+                logger.info(f"Request {request_id}: [SYSTEM DEBUG] system is list with {len(system_field)} blocks")
+        else:
+            logger.info(f"Request {request_id}: [SYSTEM DEBUG] system is None or empty")
+        
+        # 打印 tools 字段
+        tools_field = body_json.get('tools')
+        if tools_field:
+            logger.info(f"Request {request_id}: [TOOLS DEBUG] {len(tools_field)} tools: {[t.get('name') for t in tools_field]}")
+        else:
+            logger.info(f"Request {request_id}: [TOOLS DEBUG] no tools in request")
         
         request = MessagesRequest(**body_json)
     except json.JSONDecodeError as e:
@@ -328,9 +379,66 @@ async def create_message(
     # 日志：打印思维链检测结果
     logger.info(f"Request {request_id}: [THINKING DEBUG] thinking_enabled={thinking_enabled}, thinking_budget={thinking_budget}, request.thinking={request.thinking}")
     
+    # ========================================================================
+    # Tool Use 处理 (Requirements 2.1, 5.1, 6.1)
+    # ========================================================================
+    tool_use_enabled = False
+    tool_parser = None
+    tool_injector = None
+    filtered_tools = []
+    
+    # 检查是否启用工具使用功能并且请求包含工具
+    if is_tool_use_enabled() and request.has_tools():
+        tool_use_enabled = True
+        tool_config_service = get_tool_config_service()
+        tool_registry = get_tool_registry()
+        
+        # 根据配置过滤工具
+        for tool in request.tools:
+            tool_name = tool.get("name", "")
+            if tool_config_service.is_tool_enabled(tool_name):
+                filtered_tools.append(tool)
+        
+        if filtered_tools:
+            # 创建工具注入器和解析器
+            tool_injector = ToolInjector(tool_registry)
+            tool_parser = ToolParser(tool_registry)
+            
+            logger.info(f"Request {request_id}: [TOOL USE] Enabled with {len(filtered_tools)} tools")
+        else:
+            tool_use_enabled = False
+            logger.info(f"Request {request_id}: [TOOL USE] No enabled tools after filtering")
+    
     # 将 Anthropic 消息格式化为上下文字符串，包括 system prompt
     # Anthropic 的 system 是独立的字段，需要先添加到上下文
     context_parts = []
+    
+    # 处理系统提示词
+    final_system_text = system_text
+    
+    # 如果启用工具使用，检查是否需要注入工具定义 (Requirement 2.1)
+    # 如果 system_text 已经包含工具定义（如 Claude Code 发送的请求），则不再注入
+    if tool_use_enabled and tool_injector:
+        # 检查 system_text 是否已经包含工具定义
+        # 注意：system_text 可能是从列表格式提取的，需要检查完整内容
+        system_has_tools = False
+        if system_text:
+            tool_indicators = [
+                "# Available Tools",
+                "## Available Tools", 
+                "To use a tool, output a JSON code block",
+                '{"tool":',
+                "```json\n{\"tool\":",
+            ]
+            system_has_tools = any(indicator in system_text for indicator in tool_indicators)
+        
+        if system_has_tools:
+            # system_text 已经包含工具定义，不需要再注入
+            logger.info(f"Request {request_id}: [TOOL USE] System prompt already contains tool definitions, skipping injection")
+        else:
+            # system_text 不包含工具定义，需要注入
+            final_system_text = tool_injector.inject_tools(system_text, filtered_tools)
+            logger.info(f"Request {request_id}: [TOOL USE] Injected tools into system prompt")
     
     # 如果启用思维链，添加思维链指令到系统提示词
     if thinking_enabled:
@@ -344,33 +452,59 @@ async def create_message(
 </thinking>
 
 这里是你的最终回答..."""
-        if system_text:
-            context_parts.append(f"System: {thinking_instruction}\n\n{system_text}")
+        if final_system_text:
+            context_parts.append(f"System: {thinking_instruction}\n\n{final_system_text}")
         else:
             context_parts.append(f"System: {thinking_instruction}")
-    elif system_text:
-        context_parts.append(f"System: {system_text}")
+    elif final_system_text:
+        context_parts.append(f"System: {final_system_text}")
     
-    # 添加对话历史
-    for msg in request.messages:
-        role = msg.role
-        # Anthropic messages 可以有 content 为列表的情况
-        if isinstance(msg.content, list):
-            content = ""
-            for block in msg.content:
-                if isinstance(block, dict) and block.get("type") == "text":
-                    content += block.get("text", "")
-                elif isinstance(block, str):
-                    content += block
-        else:
-            content = msg.content
+    # 处理消息历史
+    # 如果启用工具使用且消息中包含 tool_use/tool_result，使用 ToolContextBuilder 处理 (Requirements 5.1, 6.1)
+    if tool_use_enabled and (request.has_tool_results() or request.has_tool_use_in_messages()):
+        tool_context_builder = ToolContextBuilder()
+        # 将消息转换为字典格式
+        messages_as_dicts = [
+            {"role": msg.role, "content": msg.content if isinstance(msg.content, (str, list)) else str(msg.content)}
+            for msg in request.messages
+        ]
+        # 使用 ToolContextBuilder 重建对话上下文
+        converted_messages = tool_context_builder.build_context(messages_as_dicts)
         
-        if role == "user":
-            context_parts.append(f"User: {content}")
-        elif role == "assistant":
-            context_parts.append(f"Assistant: {content}")
+        for msg in converted_messages:
+            role = msg.get("role", "")
+            content = msg.get("content", "")
+            if role == "user":
+                context_parts.append(f"User: {content}")
+            elif role == "assistant":
+                context_parts.append(f"Assistant: {content}")
+        
+        logger.debug(f"Request {request_id}: [TOOL USE] Rebuilt context with tool_use/tool_result")
+    else:
+        # 添加对话历史（原有逻辑）
+        for msg in request.messages:
+            role = msg.role
+            # Anthropic messages 可以有 content 为列表的情况
+            if isinstance(msg.content, list):
+                content = ""
+                for block in msg.content:
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        content += block.get("text", "")
+                    elif isinstance(block, str):
+                        content += block
+            else:
+                content = msg.content
+            
+            if role == "user":
+                context_parts.append(f"User: {content}")
+            elif role == "assistant":
+                context_parts.append(f"Assistant: {content}")
     
     messages_context = "\n".join(context_parts)
+    
+    # 调试日志：打印完整的上下文
+    logger.info(f"Request {request_id}: [CONTEXT DEBUG] tool_use_enabled={tool_use_enabled}, has_tools={request.has_tools()}")
+    logger.info(f"Request {request_id}: [CONTEXT DEBUG] context length={len(messages_context)}, first 500 chars: {messages_context[:500]}")
     
     # 构建 payload
     backend_payload = {
@@ -454,8 +588,14 @@ async def create_message(
                         account_pool=account_pool
                     )
                     
-                    # 根据是否启用思维链选择不同的转换方法
-                    if thinking_enabled:
+                    # 根据功能选择不同的转换方法 (Requirements 7.1, 7.2, 7.3, 7.4)
+                    if tool_use_enabled and tool_parser:
+                        # 使用带工具使用检测的流式转换
+                        transform_gen = response_transformer.transform_backend_sse_to_anthropic_with_tools(
+                            stream_gen, request.model, request_id, tool_parser
+                        )
+                        logger.debug(f"Request {request_id}: [TOOL USE] Using streaming with tool detection")
+                    elif thinking_enabled:
                         # 使用带思维链的实时流式转换
                         transform_gen = response_transformer.transform_backend_sse_to_anthropic_with_thinking(
                             stream_gen, request.model, request_id, thinking_budget
@@ -475,8 +615,8 @@ async def create_message(
                                     if line.startswith("data: "):
                                         chunk_data = json.loads(line[6:])
                                         delta = chunk_data.get("delta", {})
-                                        # 提取 text 或 thinking 内容
-                                        text = delta.get("text", "") or delta.get("thinking", "")
+                                        # 提取 text 或 thinking 或 input_json_delta 内容
+                                        text = delta.get("text", "") or delta.get("thinking", "") or delta.get("partial_json", "")
                                         if text:
                                             stream_context["accumulated_content"].append(text)
                             except (json.JSONDecodeError, KeyError):
@@ -525,10 +665,22 @@ async def create_message(
                 account_pool=account_pool
             )
             
-            # 转换响应格式（传入 thinking_enabled 参数）
-            anthropic_response = response_transformer.to_anthropic_response(
-                backend_response, request.model, request_id, thinking_enabled=thinking_enabled
-            )
+            # 调试日志：打印后端原始响应
+            logger.info(f"Request {request_id}: [BACKEND RESPONSE] {json.dumps(backend_response, ensure_ascii=False)[:1000]}")
+            
+            # 转换响应格式
+            # 如果启用工具使用，使用带工具解析的转换方法
+            if tool_use_enabled and tool_parser:
+                anthropic_response = response_transformer.to_anthropic_response_with_tools(
+                    backend_response, request.model, request_id, tool_parser
+                )
+                logger.info(f"Request {request_id}: [TOOL USE] Parsed response for tool calls")
+                logger.info(f"Request {request_id}: [ANTHROPIC RESPONSE] {json.dumps(anthropic_response, ensure_ascii=False)[:1000]}")
+            else:
+                # 使用普通转换（传入 thinking_enabled 参数）
+                anthropic_response = response_transformer.to_anthropic_response(
+                    backend_response, request.model, request_id, thinking_enabled=thinking_enabled
+                )
             
             # 更新 token 使用量
             usage = anthropic_response.get("usage", {})

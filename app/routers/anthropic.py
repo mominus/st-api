@@ -52,15 +52,16 @@ router = APIRouter(prefix="/v1", tags=["Anthropic Compatible"])
 
 class ThinkingConfig(BaseModel):
     """思维链配置"""
+    model_config = {"extra": "allow"}
+    
     type: str = Field(default="enabled", description="思维链类型: enabled/disabled")
     budget_tokens: Optional[int] = Field(default=10000, description="思维链 token 预算")
-    
-    class Config:
-        extra = "allow"
 
 
 class MessagesRequest(BaseModel):
     """Anthropic Messages 请求模型"""
+    model_config = {"extra": "allow"}  # 允许额外字段
+    
     model: str = Field(..., description="模型名称")
     messages: List[AnthropicMessage] = Field(..., description="消息列表")
     max_tokens: Optional[int] = Field(default=4096, description="最大 token 数")
@@ -74,9 +75,6 @@ class MessagesRequest(BaseModel):
     thinking: Optional[ThinkingConfig] = Field(default=None, description="思维链配置")
     tools: Optional[List[Dict[str, Any]]] = Field(default=None, description="工具定义列表")
     tool_choice: Optional[Dict[str, Any]] = Field(default=None, description="工具选择配置")
-    
-    class Config:
-        extra = "allow"  # 允许额外字段
     
     def is_thinking_enabled(self) -> bool:
         """
@@ -170,6 +168,44 @@ def sanitize_api_key(key: str) -> str:
     EN DASH (U+2013), EM DASH (U+2014), MINUS SIGN (U+2212) -> ASCII hyphen (U+002D)
     """
     return key.replace('\u2013', '-').replace('\u2014', '-').replace('\u2212', '-')
+
+
+def should_inject_tools(request: "MessagesRequest", system_text: Optional[str]) -> bool:
+    """
+    判断是否需要注入工具定义
+    
+    返回 False 的情况：
+    - 请求的 system prompt 已包含工具定义（避免重复注入）
+    
+    返回 True 的情况：
+    - system prompt 不包含工具定义
+    
+    注意：即使请求包含 tools 字段，由于 StackAI 后端不支持原生 tools 参数，
+    我们仍然需要将工具定义注入到上下文中，让模型知道有哪些工具可用。
+    
+    Args:
+        request: 请求对象
+        system_text: 系统提示词文本
+        
+    Returns:
+        是否需要注入工具定义
+    """
+    # 检查 system_text 是否已经包含工具定义
+    if system_text:
+        tool_indicators = [
+            "# Available Tools",
+            "## Available Tools", 
+            "To use a tool, output a JSON code block",
+            '{"tool":',
+            "```json\n{\"tool\":",
+            "# Tools",
+            "## Tools",
+        ]
+        if any(indicator in system_text for indicator in tool_indicators):
+            return False
+    
+    # system prompt 不包含工具定义，需要注入
+    return True
 
 
 def extract_api_key(x_api_key: Optional[str], authorization: Optional[str]) -> Optional[str]:
@@ -398,10 +434,17 @@ async def create_message(
     filtered_tools = []
     
     # 检查是否启用工具使用功能并且请求包含工具
+    # 记录工具使用决策的详细日志
+    logger.info(f"Request {request_id}: [TOOL USE] is_tool_use_enabled={is_tool_use_enabled()}, has_tools={request.has_tools()}")
+    
     if is_tool_use_enabled() and request.has_tools():
         tool_use_enabled = True
         tool_config_service = get_tool_config_service()
         tool_registry = get_tool_registry()
+        
+        # 记录请求中的工具列表
+        tool_names_in_request = [t.get("name", "") for t in request.tools]
+        logger.info(f"Request {request_id}: [TOOL USE] Tools in request: {tool_names_in_request}")
         
         # 根据配置过滤工具
         for tool in request.tools:
@@ -414,72 +457,32 @@ async def create_message(
             tool_injector = ToolInjector(tool_registry)
             tool_parser = ToolParser(tool_registry)
             
-            logger.info(f"Request {request_id}: [TOOL USE] Enabled with {len(filtered_tools)} tools")
+            filtered_names = [t.get("name", "") for t in filtered_tools]
+            logger.info(f"Request {request_id}: [TOOL USE] Enabled with {len(filtered_tools)} tools: {filtered_names}")
         else:
             tool_use_enabled = False
             logger.info(f"Request {request_id}: [TOOL USE] No enabled tools after filtering")
+    elif request.has_tools():
+        logger.info(f"Request {request_id}: [TOOL USE] Request has tools but ENABLE_TOOL_USE is false")
     
     # 将 Anthropic 消息格式化为上下文字符串，包括 system prompt
     # Anthropic 的 system 是独立的字段，需要先添加到上下文
     context_parts = []
     
-    # 如果启用工具使用，在上下文开头添加工具环境声明
-    # 使用强制性指令确保 Claude 知道这些工具是真正可用的
-    if tool_use_enabled and filtered_tools:
-        tool_names = [t.get("name", "") for t in filtered_tools]
-        env_declaration = f"""<SYSTEM_TOOL_OVERRIDE>
-[CRITICAL INSTRUCTION - READ CAREFULLY]
-
-You are running in a LOCAL DEVELOPMENT ENVIRONMENT. The following tools are ACTUALLY AVAILABLE and FUNCTIONAL:
-
-AVAILABLE TOOLS:
-1. LOCAL TOOLS (these ARE working and you CAN use them):
-   - {', '.join(tool_names)}
-   
-2. BACKEND TOOL:
-   - web_search: Search the web
-
-IMPORTANT: When the user asks you to read/write files or execute commands, you MUST use the local tools above. These tools ARE connected and WILL work. Do NOT say you cannot access local files - you CAN through these tools.
-
-TO USE A TOOL, output this JSON format:
-```json
-{{"tool": "ToolName", "arguments": {{"param": "value"}}}}
-```
-
-Example - to read a file:
-```json
-{{"tool": "Read", "arguments": {{"file_path": "/path/to/file"}}}}
-```
-</SYSTEM_TOOL_OVERRIDE>
-"""
-        context_parts.append(env_declaration)
-    
     # 处理系统提示词
     final_system_text = system_text
     
-    # 如果启用工具使用，检查是否需要注入工具定义 (Requirement 2.1)
-    # 如果 system_text 已经包含工具定义（如 Claude Code 发送的请求），则不再注入
-    if tool_use_enabled and tool_injector:
-        # 检查 system_text 是否已经包含工具定义
-        # 注意：system_text 可能是从列表格式提取的，需要检查完整内容
-        system_has_tools = False
-        if system_text:
-            tool_indicators = [
-                "# Available Tools",
-                "## Available Tools", 
-                "To use a tool, output a JSON code block",
-                '{"tool":',
-                "```json\n{\"tool\":",
-            ]
-            system_has_tools = any(indicator in system_text for indicator in tool_indicators)
-        
-        if system_has_tools:
-            # system_text 已经包含工具定义，不需要再注入
-            logger.info(f"Request {request_id}: [TOOL USE] System prompt already contains tool definitions, skipping injection")
-        else:
-            # system_text 不包含工具定义，需要注入
+    # 如果启用工具使用，需要将工具定义注入到上下文中
+    # 因为 StackAI 后端不支持原生的 tools 参数，模型只能通过文本方式了解可用工具
+    if tool_use_enabled and tool_injector and filtered_tools:
+        # 检查 system prompt 是否已经包含工具定义
+        if should_inject_tools(request, system_text):
+            # system prompt 不包含工具定义，需要注入
             final_system_text = tool_injector.inject_tools(system_text, filtered_tools)
             logger.info(f"Request {request_id}: [TOOL USE] Injected tools into system prompt")
+        else:
+            # system prompt 已经包含工具定义，不需要重复注入
+            logger.info(f"Request {request_id}: [TOOL USE] System prompt already contains tool definitions, skipping injection")
     
     # 如果启用思维链，添加思维链指令到系统提示词
     if thinking_enabled:
@@ -494,11 +497,16 @@ Example - to read a file:
 
 这里是你的最终回答..."""
         if final_system_text:
-            context_parts.append(f"<system_instruction>\n{thinking_instruction}\n\n{final_system_text}\n</system_instruction>")
+            context_parts.append(f"[System]\n{thinking_instruction}\n\n{final_system_text}")
         else:
-            context_parts.append(f"<system_instruction>\n{thinking_instruction}\n</system_instruction>")
+            context_parts.append(f"[System]\n{thinking_instruction}")
     elif final_system_text:
-        context_parts.append(f"<system_instruction>\n{final_system_text}\n</system_instruction>")
+        # 当请求包含 tools 字段时，使用简洁格式保持 system prompt 原样
+        # 避免使用可能干扰 Claude 身份认知的 XML 标签
+        if request.has_tools():
+            context_parts.append(f"[System]\n{final_system_text}")
+        else:
+            context_parts.append(f"[System]\n{final_system_text}")
     
     # 处理消息历史
     # 如果启用工具使用且消息中包含 tool_use/tool_result，使用 ToolContextBuilder 处理 (Requirements 5.1, 6.1)
@@ -516,9 +524,9 @@ Example - to read a file:
             role = msg.get("role", "")
             content = msg.get("content", "")
             if role == "user":
-                context_parts.append(f"<human_message>\n{content}\n</human_message>")
+                context_parts.append(f"[Human]\n{content}")
             elif role == "assistant":
-                context_parts.append(f"<assistant_message>\n{content}\n</assistant_message>")
+                context_parts.append(f"[Assistant]\n{content}")
         
         logger.debug(f"Request {request_id}: [TOOL USE] Rebuilt context with tool_use/tool_result")
     else:
@@ -537,9 +545,9 @@ Example - to read a file:
                 content = msg.content
             
             if role == "user":
-                context_parts.append(f"<human_message>\n{content}\n</human_message>")
+                context_parts.append(f"[Human]\n{content}")
             elif role == "assistant":
-                context_parts.append(f"<assistant_message>\n{content}\n</assistant_message>")
+                context_parts.append(f"[Assistant]\n{content}")
     
     messages_context = "\n\n".join(context_parts)
     

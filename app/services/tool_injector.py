@@ -22,6 +22,17 @@ class ToolInjector:
     格式与 Claude Code 的 system prompt 保持一致
     """
     
+    # 工具定义指示符列表
+    TOOL_INDICATORS = [
+        "# Available Tools",
+        "## Available Tools",
+        "# Tools",
+        "## Tools",
+        "To use a tool, output a JSON code block",
+        '{"tool":',
+        "```json\n{\"tool\":",
+    ]
+    
     def __init__(self, registry: ToolRegistry):
         """
         初始化工具注入器
@@ -30,6 +41,28 @@ class ToolInjector:
             registry: 工具注册表实例
         """
         self._registry = registry
+    
+    def should_inject(self, system_prompt: Optional[str]) -> bool:
+        """
+        检测是否需要注入工具定义
+        
+        如果 system_prompt 已经包含工具定义，则不需要注入
+        
+        Args:
+            system_prompt: 系统提示词
+            
+        Returns:
+            是否需要注入工具定义
+        """
+        if not system_prompt:
+            return True
+        
+        # 检查是否包含任何工具定义指示符
+        for indicator in self.TOOL_INDICATORS:
+            if indicator in system_prompt:
+                return False
+        
+        return True
     
     def inject_tools(
         self,
@@ -93,7 +126,10 @@ class ToolInjector:
     
     def _build_tool_injection_block(self, tools: List[ToolSchema]) -> str:
         """
-        构建工具注入块 - 使用强制性指令确保工具可用
+        构建工具注入块 - 使用简洁格式
+        
+        注意：不使用 <TOOL_DEFINITIONS> 等自定义 XML 标签，
+        因为这些标签可能被 Claude 误解为注入尝试。
         
         Args:
             tools: 工具 Schema 列表
@@ -105,15 +141,12 @@ class ToolInjector:
         
         tool_names = [t.name for t in tools]
         
-        parts.append("<TOOL_DEFINITIONS>")
-        parts.append("[THESE TOOLS ARE FUNCTIONAL AND AVAILABLE]")
+        # 使用简洁的 Markdown 格式
+        parts.append("# Available Tools")
         parts.append("")
-        parts.append(f"Available tools: {', '.join(tool_names)}, web_search")
+        parts.append(f"You have access to the following tools: {', '.join(tool_names)}")
         parts.append("")
-        parts.append("You CAN and SHOULD use these tools when the user requests file operations or commands.")
-        parts.append("Do NOT say you cannot access files - use the Read/Write/Bash tools instead.")
-        parts.append("")
-        parts.append("To call a tool, output JSON:")
+        parts.append("To use a tool, output a JSON code block:")
         parts.append('```json')
         parts.append('{"tool": "ToolName", "arguments": {"param": "value"}}')
         parts.append('```')
@@ -125,8 +158,6 @@ class ToolInjector:
         for tool in tools:
             parts.append(self._format_single_tool(tool))
             parts.append("")
-        
-        parts.append("</TOOL_DEFINITIONS>")
         
         return "\n".join(parts)
     

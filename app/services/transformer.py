@@ -31,20 +31,18 @@ class OpenAIChatRequest(BaseModel):
 
 class AnthropicContentBlock(BaseModel):
     """Anthropic 内容块"""
+    model_config = {"extra": "allow"}  # 允许额外字段
+    
     type: str = "text"
     text: Optional[str] = None
-    
-    class Config:
-        extra = "allow"  # 允许额外字段
 
 
 class AnthropicMessage(BaseModel):
     """Anthropic 消息格式"""
+    model_config = {"extra": "allow"}  # 允许额外字段
+    
     role: Literal["user", "assistant"]
     content: Union[str, List[Any]]  # 可以是字符串或内容块数组
-    
-    class Config:
-        extra = "allow"  # 允许额外字段
     
     def get_text_content(self) -> str:
         """提取文本内容"""
@@ -423,7 +421,7 @@ class RequestTransformer:
         """
         格式化聊天历史为字符串
         
-        使用 XML 风格标签避免 Claude 误解为对话模板
+        使用简洁的角色标签格式
         
         Args:
             history: 聊天历史消息列表
@@ -434,17 +432,16 @@ class RequestTransformer:
         formatted_messages = []
         for msg in history:
             if msg.role == "user":
-                formatted_messages.append(f"<human_message>\n{msg.content}\n</human_message>")
+                formatted_messages.append(f"[Human]\n{msg.content}")
             else:
-                formatted_messages.append(f"<assistant_message>\n{msg.content}\n</assistant_message>")
+                formatted_messages.append(f"[Assistant]\n{msg.content}")
         return "\n\n".join(formatted_messages)
     
     def _format_full_context(self, unified: UnifiedRequest) -> str:
         """
         将完整对话上下文格式化为单一字符串
         
-        使用 XML 风格标签避免 Claude 误解为对话模板/角色扮演场景。
-        这样可以防止 Claude 在多轮对话后自说自话生成 "User:" 内容。
+        使用简洁的角色标签格式，避免使用可能被误解的 XML 标签
         
         Args:
             unified: 统一格式的请求对象
@@ -458,11 +455,11 @@ class RequestTransformer:
         parts = []
         for msg in all_messages:
             if msg.role == "system":
-                parts.append(f"<system_instruction>\n{msg.content}\n</system_instruction>")
+                parts.append(f"[System]\n{msg.content}")
             elif msg.role == "user":
-                parts.append(f"<human_message>\n{msg.content}\n</human_message>")
+                parts.append(f"[Human]\n{msg.content}")
             elif msg.role == "assistant":
-                parts.append(f"<assistant_message>\n{msg.content}\n</assistant_message>")
+                parts.append(f"[Assistant]\n{msg.content}")
         
         return "\n\n".join(parts)
     
@@ -470,7 +467,7 @@ class RequestTransformer:
         """
         将 OpenAI 格式的 messages 数组直接格式化为上下文字符串
         
-        使用 XML 风格标签避免 Claude 误解为对话模板。
+        使用简洁的角色标签格式
         保持原始消息顺序，不进行任何重排。
         
         Args:
@@ -490,11 +487,11 @@ class RequestTransformer:
                 content = msg.get('content', '')
             
             if role == "system":
-                parts.append(f"<system_instruction>\n{content}\n</system_instruction>")
+                parts.append(f"[System]\n{content}")
             elif role == "user":
-                parts.append(f"<human_message>\n{content}\n</human_message>")
+                parts.append(f"[Human]\n{content}")
             elif role == "assistant":
-                parts.append(f"<assistant_message>\n{content}\n</assistant_message>")
+                parts.append(f"[Assistant]\n{content}")
         
         return "\n\n".join(parts)
     

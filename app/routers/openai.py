@@ -58,15 +58,14 @@ class ChatCompletionRequest(BaseModel):
 
 class ResponsesRequest(BaseModel):
     """OpenAI Responses API 请求模型 (用于 Codex 等)"""
+    model_config = {"extra": "allow"}  # 允许额外字段
+    
     model: str = Field(..., description="模型名称")
     input: Any = Field(..., description="输入内容，可以是字符串或消息数组")
     stream: bool = Field(default=False, description="是否流式响应")
     temperature: Optional[float] = Field(default=None, description="温度参数")
     max_output_tokens: Optional[int] = Field(default=None, description="最大输出 token 数")
     instructions: Optional[str] = Field(default=None, description="系统指令")
-    
-    class Config:
-        extra = "allow"  # 允许额外字段
 
 
 class ModelInfo(BaseModel):

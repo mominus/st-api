@@ -87,6 +87,8 @@ class ToolResultFormatter:
         """
         格式化成功的工具执行结果
         
+        使用简洁的格式，保持工具调用 ID 的可追踪性
+        
         Args:
             tool_use_id: 工具使用 ID
             content: 执行结果内容
@@ -94,9 +96,7 @@ class ToolResultFormatter:
         Returns:
             格式化的成功结果字符串
         """
-        return f"""<tool_result tool_use_id="{tool_use_id}">
-{content}
-</tool_result>"""
+        return f"[Tool Result: {tool_use_id}]\n{content}"
     
     def _format_error_result(self, tool_use_id: str, error_message: str) -> str:
         """
@@ -109,9 +109,7 @@ class ToolResultFormatter:
         Returns:
             格式化的错误结果字符串
         """
-        return f"""<tool_result tool_use_id="{tool_use_id}" is_error="true">
-Error: {error_message}
-</tool_result>"""
+        return f"[Tool Result: {tool_use_id}] Error: {error_message}"
     
     def format_tool_use_response(self, tool_use: Dict[str, Any]) -> str:
         """
@@ -133,11 +131,9 @@ Error: {error_message}
         tool_input = tool_use.get("input", {})
         
         # 将输入参数格式化为 JSON
-        input_json = json.dumps(tool_input, ensure_ascii=False, indent=2)
+        input_json = json.dumps(tool_input, ensure_ascii=False)
         
-        return f"""<tool_use id="{tool_use_id}" name="{tool_name}">
-{input_json}
-</tool_use>"""
+        return f"[Tool Call: {tool_name} ({tool_use_id})]\n{input_json}"
     
     def format_multiple_tool_results(
         self, 

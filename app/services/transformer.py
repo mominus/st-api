@@ -423,6 +423,8 @@ class RequestTransformer:
         """
         格式化聊天历史为字符串
         
+        使用 XML 风格标签避免 Claude 误解为对话模板
+        
         Args:
             history: 聊天历史消息列表
             
@@ -431,16 +433,18 @@ class RequestTransformer:
         """
         formatted_messages = []
         for msg in history:
-            role_label = "User" if msg.role == "user" else "Assistant"
-            formatted_messages.append(f"{role_label}: {msg.content}")
-        return "\n".join(formatted_messages)
+            if msg.role == "user":
+                formatted_messages.append(f"<human_message>\n{msg.content}\n</human_message>")
+            else:
+                formatted_messages.append(f"<assistant_message>\n{msg.content}\n</assistant_message>")
+        return "\n\n".join(formatted_messages)
     
     def _format_full_context(self, unified: UnifiedRequest) -> str:
         """
         将完整对话上下文格式化为单一字符串
         
-        包括系统提示、历史对话和当前用户输入，
-        适用于 Stack AI 工作流只使用单一输入字段的情况。
+        使用 XML 风格标签避免 Claude 误解为对话模板/角色扮演场景。
+        这样可以防止 Claude 在多轮对话后自说自话生成 "User:" 内容。
         
         Args:
             unified: 统一格式的请求对象
@@ -454,18 +458,19 @@ class RequestTransformer:
         parts = []
         for msg in all_messages:
             if msg.role == "system":
-                parts.append(f"System: {msg.content}")
+                parts.append(f"<system_instruction>\n{msg.content}\n</system_instruction>")
             elif msg.role == "user":
-                parts.append(f"User: {msg.content}")
+                parts.append(f"<human_message>\n{msg.content}\n</human_message>")
             elif msg.role == "assistant":
-                parts.append(f"Assistant: {msg.content}")
+                parts.append(f"<assistant_message>\n{msg.content}\n</assistant_message>")
         
-        return "\n".join(parts)
+        return "\n\n".join(parts)
     
     def format_messages_to_context(self, messages: List) -> str:
         """
         将 OpenAI 格式的 messages 数组直接格式化为上下文字符串
         
+        使用 XML 风格标签避免 Claude 误解为对话模板。
         保持原始消息顺序，不进行任何重排。
         
         Args:
@@ -485,13 +490,13 @@ class RequestTransformer:
                 content = msg.get('content', '')
             
             if role == "system":
-                parts.append(f"System: {content}")
+                parts.append(f"<system_instruction>\n{content}\n</system_instruction>")
             elif role == "user":
-                parts.append(f"User: {content}")
+                parts.append(f"<human_message>\n{content}\n</human_message>")
             elif role == "assistant":
-                parts.append(f"Assistant: {content}")
+                parts.append(f"<assistant_message>\n{content}\n</assistant_message>")
         
-        return "\n".join(parts)
+        return "\n\n".join(parts)
     
     def to_stackai_dict(
         self, 

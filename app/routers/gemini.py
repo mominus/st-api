@@ -54,6 +54,16 @@ class GenerateContentRequest(BaseModel):
 # Helper Functions
 # ============================================================================
 
+def sanitize_api_key(key: str) -> str:
+    """
+    清理 API Key 中可能的 Unicode 连字符变体
+    
+    用户复制粘贴时可能引入这些字符（从 Word、PDF、网页等）
+    EN DASH (U+2013), EM DASH (U+2014), MINUS SIGN (U+2212) -> ASCII hyphen (U+002D)
+    """
+    return key.replace('\u2013', '-').replace('\u2014', '-').replace('\u2212', '-')
+
+
 def extract_api_key(
     x_goog_api_key: Optional[str],
     authorization: Optional[str]
@@ -67,14 +77,14 @@ def extract_api_key(
     """
     # 优先使用 x-goog-api-key
     if x_goog_api_key:
-        return x_goog_api_key.strip()
+        return sanitize_api_key(x_goog_api_key.strip())
     
     # 其次使用 Authorization header
     if authorization:
         auth = authorization.strip()
         if auth.lower().startswith("bearer "):
-            return auth[7:].strip()
-        return auth
+            return sanitize_api_key(auth[7:].strip())
+        return sanitize_api_key(auth)
     
     return None
 
@@ -210,6 +220,7 @@ async def generate_content(
     
     # 6. 转换为 StackAI 格式
     # 将 Gemini 消息格式化为上下文字符串
+    # 使用 XML 风格标签避免 Claude 误解为对话模板
     context_parts = []
     for content in request.contents:
         role = content.role or "user"
@@ -223,11 +234,11 @@ async def generate_content(
         text_content = "\n".join(text_parts)
         
         if role == "user":
-            context_parts.append(f"User: {text_content}")
+            context_parts.append(f"<human_message>\n{text_content}\n</human_message>")
         elif role == "model":
-            context_parts.append(f"Assistant: {text_content}")
+            context_parts.append(f"<assistant_message>\n{text_content}\n</assistant_message>")
     
-    messages_context = "\n".join(context_parts)
+    messages_context = "\n\n".join(context_parts)
     
     # 构建 payload
     backend_payload = {
@@ -471,6 +482,7 @@ async def stream_generate_content(
     
     # 6. 转换为 StackAI 格式
     # 将 Gemini 消息格式化为上下文字符串
+    # 使用 XML 风格标签避免 Claude 误解为对话模板
     context_parts = []
     for content in request.contents:
         role = content.role or "user"
@@ -484,11 +496,11 @@ async def stream_generate_content(
         text_content = "\n".join(text_parts)
         
         if role == "user":
-            context_parts.append(f"User: {text_content}")
+            context_parts.append(f"<human_message>\n{text_content}\n</human_message>")
         elif role == "model":
-            context_parts.append(f"Assistant: {text_content}")
+            context_parts.append(f"<assistant_message>\n{text_content}\n</assistant_message>")
     
-    messages_context = "\n".join(context_parts)
+    messages_context = "\n\n".join(context_parts)
     
     # 构建 payload
     backend_payload = {

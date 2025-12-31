@@ -162,6 +162,16 @@ class MessagesRequest(BaseModel):
 # Helper Functions
 # ============================================================================
 
+def sanitize_api_key(key: str) -> str:
+    """
+    清理 API Key 中可能的 Unicode 连字符变体
+    
+    用户复制粘贴时可能引入这些字符（从 Word、PDF、网页等）
+    EN DASH (U+2013), EM DASH (U+2014), MINUS SIGN (U+2212) -> ASCII hyphen (U+002D)
+    """
+    return key.replace('\u2013', '-').replace('\u2014', '-').replace('\u2212', '-')
+
+
 def extract_api_key(x_api_key: Optional[str], authorization: Optional[str]) -> Optional[str]:
     """
     从请求头提取 API Key
@@ -172,14 +182,14 @@ def extract_api_key(x_api_key: Optional[str], authorization: Optional[str]) -> O
     """
     # 优先使用 x-api-key
     if x_api_key:
-        return x_api_key.strip()
+        return sanitize_api_key(x_api_key.strip())
     
     # 其次使用 Authorization header
     if authorization:
         auth = authorization.strip()
         if auth.lower().startswith("bearer "):
-            return auth[7:].strip()
-        return auth
+            return sanitize_api_key(auth[7:].strip())
+        return sanitize_api_key(auth)
     
     return None
 
@@ -413,6 +423,37 @@ async def create_message(
     # Anthropic 的 system 是独立的字段，需要先添加到上下文
     context_parts = []
     
+    # 如果启用工具使用，在上下文开头添加工具环境声明
+    # 使用强制性指令确保 Claude 知道这些工具是真正可用的
+    if tool_use_enabled and filtered_tools:
+        tool_names = [t.get("name", "") for t in filtered_tools]
+        env_declaration = f"""<SYSTEM_TOOL_OVERRIDE>
+[CRITICAL INSTRUCTION - READ CAREFULLY]
+
+You are running in a LOCAL DEVELOPMENT ENVIRONMENT. The following tools are ACTUALLY AVAILABLE and FUNCTIONAL:
+
+AVAILABLE TOOLS:
+1. LOCAL TOOLS (these ARE working and you CAN use them):
+   - {', '.join(tool_names)}
+   
+2. BACKEND TOOL:
+   - web_search: Search the web
+
+IMPORTANT: When the user asks you to read/write files or execute commands, you MUST use the local tools above. These tools ARE connected and WILL work. Do NOT say you cannot access local files - you CAN through these tools.
+
+TO USE A TOOL, output this JSON format:
+```json
+{{"tool": "ToolName", "arguments": {{"param": "value"}}}}
+```
+
+Example - to read a file:
+```json
+{{"tool": "Read", "arguments": {{"file_path": "/path/to/file"}}}}
+```
+</SYSTEM_TOOL_OVERRIDE>
+"""
+        context_parts.append(env_declaration)
+    
     # 处理系统提示词
     final_system_text = system_text
     
@@ -453,11 +494,11 @@ async def create_message(
 
 这里是你的最终回答..."""
         if final_system_text:
-            context_parts.append(f"System: {thinking_instruction}\n\n{final_system_text}")
+            context_parts.append(f"<system_instruction>\n{thinking_instruction}\n\n{final_system_text}\n</system_instruction>")
         else:
-            context_parts.append(f"System: {thinking_instruction}")
+            context_parts.append(f"<system_instruction>\n{thinking_instruction}\n</system_instruction>")
     elif final_system_text:
-        context_parts.append(f"System: {final_system_text}")
+        context_parts.append(f"<system_instruction>\n{final_system_text}\n</system_instruction>")
     
     # 处理消息历史
     # 如果启用工具使用且消息中包含 tool_use/tool_result，使用 ToolContextBuilder 处理 (Requirements 5.1, 6.1)
@@ -475,9 +516,9 @@ async def create_message(
             role = msg.get("role", "")
             content = msg.get("content", "")
             if role == "user":
-                context_parts.append(f"User: {content}")
+                context_parts.append(f"<human_message>\n{content}\n</human_message>")
             elif role == "assistant":
-                context_parts.append(f"Assistant: {content}")
+                context_parts.append(f"<assistant_message>\n{content}\n</assistant_message>")
         
         logger.debug(f"Request {request_id}: [TOOL USE] Rebuilt context with tool_use/tool_result")
     else:
@@ -496,11 +537,11 @@ async def create_message(
                 content = msg.content
             
             if role == "user":
-                context_parts.append(f"User: {content}")
+                context_parts.append(f"<human_message>\n{content}\n</human_message>")
             elif role == "assistant":
-                context_parts.append(f"Assistant: {content}")
+                context_parts.append(f"<assistant_message>\n{content}\n</assistant_message>")
     
-    messages_context = "\n".join(context_parts)
+    messages_context = "\n\n".join(context_parts)
     
     # 调试日志：打印完整的上下文
     logger.info(f"Request {request_id}: [CONTEXT DEBUG] tool_use_enabled={tool_use_enabled}, has_tools={request.has_tools()}")

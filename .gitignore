@@ -57,3 +57,17 @@ htmlcov/
 # OS
 .DS_Store
 Thumbs.db
+data/*.db-shm
+data/*.db-wal
+data/*.db-journal
+
+# Test files
+test_*.py
+data/*.db-shm
+data/*.db-wal
+data/*.db-shm
+data/*.db-wal
+data/*.db-journal
+
+# Test files
+test_*.py

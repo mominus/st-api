@@ -1781,8 +1781,8 @@ async function handleApiKeySubmit(e) {
         
         closeModal('apikey-modal');
         
-        // 显示新生成的 Key
-        document.getElementById('new-apikey-value').textContent = result.key;
+        // 显示新生成的 Key（清理可能的 Unicode 字符）
+        document.getElementById('new-apikey-value').textContent = sanitizeApiKey(result.key);
         openModal('new-apikey-modal');
         
         loadApiKeys();
@@ -2001,9 +2001,25 @@ function showToast(message, type = 'info') {
 
 // ==================== 一键复制功能 ====================
 
+/**
+ * 清理 API Key 中可能的 Unicode 连字符变体
+ * 某些字体/系统可能将 ASCII 连字符显示为 Unicode 变体
+ */
+function sanitizeApiKey(key) {
+    return key
+        .replace(/\u2013/g, '-')  // EN DASH
+        .replace(/\u2014/g, '-')  // EM DASH
+        .replace(/\u2212/g, '-')  // MINUS SIGN
+        .replace(/\u2010/g, '-')  // HYPHEN
+        .replace(/\u2011/g, '-'); // NON-BREAKING HYPHEN
+}
+
 async function copyToClipboard(text, button) {
+    // 清理可能的 Unicode 连字符
+    const cleanText = sanitizeApiKey(text);
+    
     try {
-        await navigator.clipboard.writeText(text);
+        await navigator.clipboard.writeText(cleanText);
         
         // 显示复制成功反馈
         const originalText = button.textContent;
@@ -2019,7 +2035,7 @@ async function copyToClipboard(text, button) {
     } catch (error) {
         // 降级方案：使用传统方法
         const textarea = document.createElement('textarea');
-        textarea.value = text;
+        textarea.value = cleanText;
         textarea.style.position = 'fixed';
         textarea.style.opacity = '0';
         document.body.appendChild(textarea);

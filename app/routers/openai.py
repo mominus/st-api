@@ -87,6 +87,16 @@ class ModelsResponse(BaseModel):
 # Helper Functions
 # ============================================================================
 
+def sanitize_api_key(key: str) -> str:
+    """
+    清理 API Key 中可能的 Unicode 连字符变体
+    
+    用户复制粘贴时可能引入这些字符（从 Word、PDF、网页等）
+    EN DASH (U+2013), EM DASH (U+2014), MINUS SIGN (U+2212) -> ASCII hyphen (U+002D)
+    """
+    return key.replace('\u2013', '-').replace('\u2014', '-').replace('\u2212', '-')
+
+
 def extract_api_key(authorization: Optional[str]) -> Optional[str]:
     """
     从 Authorization header 提取 API Key
@@ -100,8 +110,11 @@ def extract_api_key(authorization: Optional[str]) -> Optional[str]:
     
     auth = authorization.strip()
     if auth.lower().startswith("bearer "):
-        return auth[7:].strip()
-    return auth
+        key = auth[7:].strip()
+    else:
+        key = auth
+    
+    return sanitize_api_key(key)
 
 
 async def validate_api_key_and_model(

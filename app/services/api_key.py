@@ -113,6 +113,10 @@ class APIKeyService:
         Returns:
             (是否有效, 错误消息, APIKey 对象)
         """
+        # 清理可能的 Unicode 连字符变体（用户复制粘贴时可能引入）
+        # EN DASH (U+2013), EM DASH (U+2014), MINUS SIGN (U+2212) -> ASCII hyphen (U+002D)
+        raw_key = raw_key.replace('\u2013', '-').replace('\u2014', '-').replace('\u2212', '-')
+        
         # 计算 Key 的哈希值
         key_hash = CryptoService.hash_api_key(raw_key)
         

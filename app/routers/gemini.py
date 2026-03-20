@@ -390,7 +390,7 @@ async def generate_content(
         )
     except Exception as e:
         logger.exception(f"Request {request_id}: Unexpected error")
-        error = error_handler.create_server_error(str(e))
+        error = error_handler.create_server_error()
         return JSONResponse(
             status_code=error.status_code,
             content=error_handler.to_gemini_error(error)
@@ -606,24 +606,15 @@ async def stream_generate_content(
                 
         except BackendClientError as e:
             logger.error(f"Request {request_id}: Backend error - {e.message}")
-            # 在流式响应中发送错?
-            error_data = {
-                "error": {
-                    "code": 502,
-                    "message": e.message,
-                    "status": "UNAVAILABLE"
-                }
-            }
+            error_data = error_handler.to_gemini_error(
+                error_handler.from_backend_exception(e)
+            )
             yield f"data: {json.dumps(error_data)}\n\n"
         except Exception as e:
             logger.exception(f"Request {request_id}: Unexpected error")
-            error_data = {
-                "error": {
-                    "code": 500,
-                    "message": str(e),
-                    "status": "INTERNAL"
-                }
-            }
+            error_data = error_handler.to_gemini_error(
+                error_handler.create_server_error()
+            )
             yield f"data: {json.dumps(error_data)}\n\n"
     
     return StreamingResponse(

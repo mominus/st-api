@@ -11,7 +11,7 @@ import time
 import logging
 from typing import Optional, List, Dict, Any, Union
 
-from fastapi import APIRouter, Request, Depends, Header, HTTPException
+from fastapi import APIRouter, Request, Depends, Header, HTTPException, Query
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -30,6 +30,8 @@ from app.services.response_transformer import ResponseTransformer, get_response_
 from app.services.error_handler import ErrorHandler, get_error_handler, APIError, ErrorType
 from app.services.logger import LoggerService, get_logger_service
 from app.services.stats import StatsService, get_stats_service
+from app.services.key_info import build_public_key_info_payload
+from app.services.call_logger import get_call_logger_service
 from sqlalchemy import select
 
 logger = logging.getLogger(__name__)
@@ -114,6 +116,55 @@ def extract_api_key(authorization: Optional[str]) -> Optional[str]:
         key = auth
     
     return sanitize_api_key(key)
+
+
+def extract_api_key_from_headers(
+    authorization: Optional[str],
+    x_api_key: Optional[str] = None
+) -> Optional[str]:
+    """
+    从多个请求头中提取 API Key。
+
+    优先级:
+    1. Authorization: Bearer sk-xxx
+    2. x-api-key: sk-xxx
+    """
+    key = extract_api_key(authorization)
+    if key:
+        return key
+
+    if x_api_key:
+        return sanitize_api_key(x_api_key.strip())
+
+    return None
+
+
+def extract_api_key_from_request(
+    authorization: Optional[str],
+    x_api_key: Optional[str] = None,
+    api_key_query: Optional[str] = None,
+    key_query: Optional[str] = None
+) -> Optional[str]:
+    """
+    从请求头或查询参数中提取 API Key。
+
+    优先级:
+    1. Authorization: Bearer sk-xxx
+    2. x-api-key: sk-xxx
+    3. ?api_key=sk-xxx
+    4. ?key=sk-xxx
+    """
+    key = extract_api_key_from_headers(authorization, x_api_key)
+    if key:
+        return key
+
+    if api_key_query:
+        return sanitize_api_key(api_key_query.strip())
+
+    if key_query:
+        return sanitize_api_key(key_query.strip())
+
+    return None
 
 
 async def validate_api_key_and_model(
@@ -353,25 +404,15 @@ async def chat_completions(
                         
                 except BackendClientError as e:
                     logger.error(f"Request {request_id}: Backend error - {e.message}")
-                    # 在流式响应中发送错误
-                    error_data = {
-                        "error": {
-                            "message": e.message,
-                            "type": "backend_error",
-                            "code": "stackai_error"
-                        }
-                    }
+                    error = error_handler.from_backend_exception(e)
+                    error_data = error_handler.to_openai_error(error)
                     yield f"data: {json.dumps(error_data)}\n\n"
                     yield "data: [DONE]\n\n"
                 except Exception as e:
                     logger.exception(f"Request {request_id}: Unexpected error")
-                    error_data = {
-                        "error": {
-                            "message": str(e),
-                            "type": "server_error",
-                            "code": "internal_error"
-                        }
-                    }
+                    error_data = error_handler.to_openai_error(
+                        error_handler.create_server_error()
+                    )
                     yield f"data: {json.dumps(error_data)}\n\n"
                     yield "data: [DONE]\n\n"
             
@@ -528,7 +569,7 @@ async def chat_completions(
         )
     except Exception as e:
         logger.exception(f"Request {request_id}: Unexpected error")
-        error = error_handler.create_server_error(str(e))
+        error = error_handler.create_server_error()
         return JSONResponse(
             status_code=error.status_code,
             content=error_handler.to_openai_error(error)
@@ -657,6 +698,66 @@ async def get_model(
         "root": model_group.name,
         "parent": None
     }
+
+
+@router.get("/key/info")
+async def get_current_key_info(
+    authorization: Optional[str] = Header(None),
+    x_api_key: Optional[str] = Header(None, alias="x-api-key"),
+    api_key: Optional[str] = Query(None, description="API Key，支持浏览器地址栏查询"),
+    key: Optional[str] = Query(None, description="API Key，api_key 的简写"),
+    session: AsyncSession = Depends(get_session)
+):
+    """
+    获取当前 API Key 的模型权限、额度和使用情况。
+
+    支持:
+    - Authorization: Bearer sk-xxx
+    - x-api-key: sk-xxx
+    - /v1/key/info?api_key=sk-xxx
+    - /v1/key/info?key=sk-xxx
+    """
+    api_key_service = get_api_key_service()
+    account_pool = get_account_pool_service()
+    call_logger = get_call_logger_service()
+    error_handler = get_error_handler()
+
+    raw_key = extract_api_key_from_request(authorization, x_api_key, api_key, key)
+    if not raw_key:
+        error = error_handler.create_authentication_error(
+            "Missing API key. Please include Authorization, x-api-key, api_key, or key."
+        )
+        return JSONResponse(
+            status_code=error.status_code,
+            content=error_handler.to_openai_error(error)
+        )
+
+    api_key_obj = await api_key_service.get_key_by_raw(session, raw_key)
+    if api_key_obj is None or api_key_obj.status == "revoked":
+        error = error_handler.create_authentication_error("Invalid API key")
+        return JSONResponse(
+            status_code=error.status_code,
+            content=error_handler.to_openai_error(error)
+        )
+
+    allowed_models = api_key_service.get_model_groups(api_key_obj)
+    usage_by_model = await call_logger.get_api_key_usage_by_model(
+        session,
+        api_key_obj.id,
+        allowed_models=allowed_models,
+        since=api_key_obj.created_at,
+    )
+    models: List[Dict[str, Any]] = []
+
+    if allowed_models:
+        for model_name in allowed_models:
+            models.append({
+                "id": model_name,
+                "accounts": await account_pool.get_accounts_by_model_group(session, model_name),
+                "usage": usage_by_model.get(model_name),
+            })
+
+    return build_public_key_info_payload(api_key_obj, models)
 
 
 # ============================================================================
@@ -907,11 +1008,22 @@ async def create_response(
                     }
                     yield f"event: response.completed\ndata: {json.dumps(completed_event)}\n\n"
                     
+                except BackendClientError as e:
+                    logger.error(f"Responses API Request {request_id}: Backend error - {e.message}")
+                    error_event = {
+                        "type": "error",
+                        "error": error_handler.to_openai_error(
+                            error_handler.from_backend_exception(e)
+                        )["error"]
+                    }
+                    yield f"event: error\ndata: {json.dumps(error_event)}\n\n"
                 except Exception as e:
                     logger.exception(f"Responses API Request {request_id}: Error")
                     error_event = {
                         "type": "error",
-                        "error": {"message": str(e), "type": "server_error"}
+                        "error": error_handler.to_openai_error(
+                            error_handler.create_server_error()
+                        )["error"]
                     }
                     yield f"event: error\ndata: {json.dumps(error_event)}\n\n"
             
@@ -960,17 +1072,19 @@ async def create_response(
                 headers={"X-Request-ID": request_id}
             )
             
-    except BackendAPIError as e:
-        logger.error(f"Responses API Request {request_id}: Backend API error - {e.message}")
+    except BackendClientError as e:
+        logger.error(f"Responses API Request {request_id}: Backend error - {e.message}")
+        error = error_handler.from_backend_exception(e)
         return JSONResponse(
-            status_code=502,
-            content={"error": {"message": e.message, "type": "backend_error"}}
+            status_code=error.status_code,
+            content=error_handler.to_openai_error(error)
         )
     except Exception as e:
         logger.exception(f"Responses API Request {request_id}: Unexpected error")
+        error = error_handler.create_server_error()
         return JSONResponse(
-            status_code=500,
-            content={"error": {"message": str(e), "type": "server_error"}}
+            status_code=error.status_code,
+            content=error_handler.to_openai_error(error)
         )
 
 

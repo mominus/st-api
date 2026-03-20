@@ -309,6 +309,12 @@
                         <option value="exhausted">耗尽</option>
                         <option value="disabled">禁用</option>
                     </select>
+                    <div class="filter-bar-actions">
+                        <span class="filter-summary" id="account-filter-summary">当前显示 0 / 0 个账号</span>
+                        <button type="button" class="btn btn-sm btn-success" id="bulk-enable-btn" onclick="bulkSetAccountStatus('active')">一键启用</button>
+                        <button type="button" class="btn btn-sm btn-warning" id="bulk-disable-btn" onclick="bulkSetAccountStatus('disabled')">一键禁用</button>
+                        <button type="button" class="btn btn-sm btn-danger" id="bulk-delete-btn" onclick="bulkDeleteAccounts()">一键删除</button>
+                    </div>
                 </div>
                 
                 <!-- 测试进度条 -->

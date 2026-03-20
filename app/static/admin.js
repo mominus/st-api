@@ -650,18 +650,55 @@ async function loadAccounts() {
 // 存储测试结果状态
 let testResults = {};
 
-function renderAccountsTable() {
-    const tbody = document.getElementById('accounts-table-body');
-    const searchTerm = document.getElementById('account-search').value.toLowerCase();
+function getFilteredAccounts() {
+    const searchTerm = document.getElementById('account-search').value.toLowerCase().trim();
     const groupFilter = document.getElementById('account-group-filter').value;
     const statusFilter = document.getElementById('account-status-filter').value;
     
-    let filtered = accountsData.filter(account => {
+    return accountsData.filter(account => {
         if (searchTerm && !account.name.toLowerCase().includes(searchTerm)) return false;
         if (groupFilter && account.model_group !== groupFilter) return false;
         if (statusFilter && account.status !== statusFilter) return false;
         return true;
     });
+}
+
+function updateAccountBulkActionState(filteredAccounts) {
+    const visibleCount = filteredAccounts.length;
+    const totalCount = accountsData.length;
+    const enableCandidates = filteredAccounts.filter(account => account.status === 'disabled').length;
+    const disableCandidates = filteredAccounts.filter(account => account.status !== 'disabled').length;
+    const deleteCandidates = visibleCount;
+    
+    const summaryEl = document.getElementById('account-filter-summary');
+    const enableBtn = document.getElementById('bulk-enable-btn');
+    const disableBtn = document.getElementById('bulk-disable-btn');
+    const deleteBtn = document.getElementById('bulk-delete-btn');
+    
+    if (summaryEl) {
+        summaryEl.textContent = `当前显示 ${visibleCount} / ${totalCount} 个账号`;
+    }
+    
+    if (enableBtn) {
+        enableBtn.disabled = enableCandidates === 0;
+        enableBtn.title = enableCandidates > 0 ? `启用当前筛选中的 ${enableCandidates} 个禁用账号` : '当前筛选结果中没有可启用账号';
+    }
+    
+    if (disableBtn) {
+        disableBtn.disabled = disableCandidates === 0;
+        disableBtn.title = disableCandidates > 0 ? `禁用当前筛选中的 ${disableCandidates} 个账号` : '当前筛选结果中没有可禁用账号';
+    }
+    
+    if (deleteBtn) {
+        deleteBtn.disabled = deleteCandidates === 0;
+        deleteBtn.title = deleteCandidates > 0 ? `删除当前筛选中的 ${deleteCandidates} 个账号` : '当前没有可删除账号';
+    }
+}
+
+function renderAccountsTable() {
+    const tbody = document.getElementById('accounts-table-body');
+    const filtered = getFilteredAccounts();
+    updateAccountBulkActionState(filtered);
     
     if (filtered.length === 0) {
         tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted">暂无数据</td></tr>';
@@ -732,6 +769,84 @@ function getTestStatusHtml(accountId) {
 
 function filterAccounts() {
     renderAccountsTable();
+}
+
+async function bulkSetAccountStatus(newStatus) {
+    const actionText = newStatus === 'disabled' ? '禁用' : '启用';
+    const filteredAccounts = getFilteredAccounts();
+    const targetAccounts = filteredAccounts.filter(account => (
+        newStatus === 'active' ? account.status === 'disabled' : account.status !== 'disabled'
+    ));
+    
+    if (targetAccounts.length === 0) {
+        showToast(`当前筛选结果中没有可${actionText}账号`, 'warning');
+        return;
+    }
+    
+    const confirmMsg = newStatus === 'disabled'
+        ? `确定要一键禁用当前筛选结果中的 ${targetAccounts.length} 个账号吗？\n\n禁用后，这些账号的工作流将不会被 API 调用选中。`
+        : `确定要一键启用当前筛选结果中的 ${targetAccounts.length} 个账号吗？`;
+    
+    showConfirmModal(confirmMsg, async () => {
+        let successCount = 0;
+        let failureCount = 0;
+        
+        for (const account of targetAccounts) {
+            try {
+                await apiCall(`/accounts/${account.id}`, {
+                    method: 'PUT',
+                    body: JSON.stringify({ status: newStatus })
+                });
+                successCount++;
+            } catch (error) {
+                console.error(`${actionText}账号失败: ${account.name}`, error);
+                failureCount++;
+            }
+        }
+        
+        if (successCount > 0) {
+            showToast(`已${actionText} ${successCount} 个账号${failureCount > 0 ? `，失败 ${failureCount} 个` : ''}`, failureCount > 0 ? 'warning' : 'success');
+            await loadAccounts();
+            return;
+        }
+        
+        showToast(`${actionText}失败`, 'error');
+    });
+}
+
+function bulkDeleteAccounts() {
+    const filteredAccounts = getFilteredAccounts();
+    
+    if (filteredAccounts.length === 0) {
+        showToast('当前筛选结果中没有可删除账号', 'warning');
+        return;
+    }
+    
+    showConfirmModal(
+        `确定要一键删除当前筛选结果中的 ${filteredAccounts.length} 个账号吗？\n\n此操作不可恢复。`,
+        async () => {
+            let successCount = 0;
+            let failureCount = 0;
+            
+            for (const account of filteredAccounts) {
+                try {
+                    await apiCall(`/accounts/${account.id}`, { method: 'DELETE' });
+                    successCount++;
+                } catch (error) {
+                    console.error(`删除账号失败: ${account.name}`, error);
+                    failureCount++;
+                }
+            }
+            
+            if (successCount > 0) {
+                showToast(`已删除 ${successCount} 个账号${failureCount > 0 ? `，失败 ${failureCount} 个` : ''}`, failureCount > 0 ? 'warning' : 'success');
+                await loadAccounts();
+                return;
+            }
+            
+            showToast('删除失败', 'error');
+        }
+    );
 }
 
 // ==================== 批量导入账号 ====================
@@ -1606,82 +1721,149 @@ function getKeyLimitInfo(key) {
     }
 }
 
-// 显示 API Key 详情
-async function showApiKeyDetail(id) {
-    const key = apiKeysData.find(k => k.id === id);
-    if (!key) return;
-    
-    const content = document.getElementById('apikey-detail-content');
-    const groups = Array.isArray(key.model_groups) ? key.model_groups : [key.model_groups];
-    
-    // 格式化创建时间和过期时间
-    const createdAt = key.created_at ? new Date(key.created_at).toLocaleString('zh-CN') : '-';
-    const expiresAt = key.expires_at ? new Date(key.expires_at).toLocaleString('zh-CN') : '永不过期';
-    const lastUsedAt = key.last_used_at ? new Date(key.last_used_at).toLocaleString('zh-CN') : '从未使用';
-    
-    content.innerHTML = `
+function getKeyModelStatusMeta(status) {
+    if (status === 'active') {
+        return { text: '可用', className: 'status-active' };
+    }
+    if (status === 'exhausted') {
+        return { text: '已耗尽', className: 'status-exhausted' };
+    }
+    if (status === 'disabled' || status === 'revoked') {
+        return { text: '已禁用', className: 'status-revoked' };
+    }
+    if (status === 'expired') {
+        return { text: '已过期', className: 'status-revoked' };
+    }
+    return { text: '不可用', className: 'status-exhausted' };
+}
+
+function formatUnavailableReasons(reasons) {
+    if (!Array.isArray(reasons) || reasons.length === 0) {
+        return '无';
+    }
+    return reasons.map(reason => escapeHtml(reason)).join(' / ');
+}
+
+function renderPerModelUsageSection(items) {
+    if (!Array.isArray(items) || items.length === 0) {
+        return '';
+    }
+
+    return `
         <div class="detail-section">
-            <h4>📌 基本信息</h4>
-            <div class="detail-grid">
-                <div class="detail-item">
-                    <span class="detail-label">名称</span>
-                    <span class="detail-value">${escapeHtml(key.name || '未命名')}</span>
-                </div>
-                <div class="detail-item">
-                    <span class="detail-label">Key 前缀</span>
-                    <span class="detail-value">${escapeHtml(key.key_prefix)}...</span>
-                </div>
-                <div class="detail-item">
-                    <span class="detail-label">状态</span>
-                    <span class="detail-value">
-                        <span class="status-badge ${key.status === 'active' ? 'status-active' : 'status-revoked'}">
-                            ${key.status === 'active' ? '有效' : (key.status === 'exhausted' ? '已耗尽' : '已禁用')}
-                        </span>
-                    </span>
-                </div>
-                <div class="detail-item">
-                    <span class="detail-label">创建时间</span>
-                    <span class="detail-value">${createdAt}</span>
-                </div>
-                <div class="detail-item">
-                    <span class="detail-label">过期时间</span>
-                    <span class="detail-value">${expiresAt}</span>
-                </div>
-                <div class="detail-item">
-                    <span class="detail-label">最后使用</span>
-                    <span class="detail-value">${lastUsedAt}</span>
-                </div>
-            </div>
-        </div>
-        
-        <div class="detail-section">
-            <h4>📁 授权模型组</h4>
-            <div class="model-groups-list">
-                ${groups.map(g => `<span class="model-group-tag">${escapeHtml(g)}</span>`).join(' ')}
-            </div>
-        </div>
-        
-        <div class="detail-section">
-            <h4>📊 使用统计</h4>
-            <div class="stats-grid stats-grid-3" style="margin: 0;">
-                <div class="stat-card mini">
-                    <div class="stat-label">总请求数</div>
-                    <div class="stat-value">${formatNumber(key.total_requests || 0)}</div>
-                    ${key.request_quota ? `<div class="stat-sub">限制: ${formatNumber(key.request_quota)}</div>` : ''}
-                </div>
-                <div class="stat-card mini">
-                    <div class="stat-label">总 Token</div>
-                    <div class="stat-value">${formatNumber(key.total_tokens || 0)}</div>
-                    ${key.token_quota ? `<div class="stat-sub">限制: ${formatNumber(key.token_quota)}</div>` : ''}
-                </div>
-                <div class="stat-card mini">
-                    <div class="stat-label">总费用</div>
-                    <div class="stat-value">$${parseFloat(key.total_cost || 0).toFixed(4)}</div>
-                    ${key.cost_limit ? `<div class="stat-sub">限制: $${parseFloat(key.cost_limit).toFixed(2)}</div>` : ''}
-                </div>
+            <h4>🧩 按模型使用情况</h4>
+            <div style="display: grid; gap: 12px;">
+                ${items.map(item => {
+                    const statusMeta = getKeyModelStatusMeta(item.status);
+                    return `
+                        <div class="detail-item" style="display: block;">
+                            <div style="display: flex; justify-content: space-between; gap: 12px; align-items: center; margin-bottom: 8px; flex-wrap: wrap;">
+                                <span class="detail-value" style="font-weight: 700;">${escapeHtml(item.model || '-')}</span>
+                                <span class="status-badge ${statusMeta.className}">${statusMeta.text}</span>
+                            </div>
+                            <div class="detail-grid" style="margin-top: 0;">
+                                <div class="detail-item">
+                                    <span class="detail-label">不可用原因</span>
+                                    <span class="detail-value">${formatUnavailableReasons(item.unavailable_reasons)}</span>
+                                </div>
+                                <div class="detail-item">
+                                    <span class="detail-label">当前已用量</span>
+                                    <span class="detail-value">${escapeHtml(item.current_usage || '0 tokens')}</span>
+                                </div>
+                                <div class="detail-item">
+                                    <span class="detail-label">可用额度</span>
+                                    <span class="detail-value">${escapeHtml(item.available_tokens || '0 tokens')}</span>
+                                </div>
+                            </div>
+                        </div>
+                    `;
+                }).join('')}
             </div>
         </div>
     `;
+}
+
+// 显示 API Key 详情
+async function showApiKeyDetail(id) {
+    const content = document.getElementById('apikey-detail-content');
+    content.innerHTML = '<div class="text-center text-muted" style="padding: 24px 0;">加载中...</div>';
+    openModal('apikey-detail-modal');
+
+    try {
+        const response = await apiCall(`/keys/${id}`);
+        const key = response.key;
+        const groups = Array.isArray(key.model_groups) ? key.model_groups : [key.model_groups];
+        const createdAt = key.created_at ? new Date(key.created_at).toLocaleString('zh-CN') : '-';
+        const expiresAt = key.expires_at ? new Date(key.expires_at).toLocaleString('zh-CN') : '永不过期';
+        const lastUsedAt = key.last_used_at ? new Date(key.last_used_at).toLocaleString('zh-CN') : '从未使用';
+        const keyStatusMeta = getKeyModelStatusMeta(key.status);
+        
+        content.innerHTML = `
+            <div class="detail-section">
+                <h4>📌 基本信息</h4>
+                <div class="detail-grid">
+                    <div class="detail-item">
+                        <span class="detail-label">名称</span>
+                        <span class="detail-value">${escapeHtml(key.name || '未命名')}</span>
+                    </div>
+                    <div class="detail-item">
+                        <span class="detail-label">Key 前缀</span>
+                        <span class="detail-value">${escapeHtml(key.key_prefix)}...</span>
+                    </div>
+                    <div class="detail-item">
+                        <span class="detail-label">状态</span>
+                        <span class="detail-value">
+                            <span class="status-badge ${keyStatusMeta.className}">${keyStatusMeta.text}</span>
+                        </span>
+                    </div>
+                    <div class="detail-item">
+                        <span class="detail-label">创建时间</span>
+                        <span class="detail-value">${createdAt}</span>
+                    </div>
+                    <div class="detail-item">
+                        <span class="detail-label">过期时间</span>
+                        <span class="detail-value">${expiresAt}</span>
+                    </div>
+                    <div class="detail-item">
+                        <span class="detail-label">最后使用</span>
+                        <span class="detail-value">${lastUsedAt}</span>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="detail-section">
+                <h4>📁 授权模型组</h4>
+                <div class="model-groups-list">
+                    ${groups.map(g => `<span class="model-group-tag">${escapeHtml(g)}</span>`).join(' ')}
+                </div>
+            </div>
+            
+            <div class="detail-section">
+                <h4>📊 使用统计</h4>
+                <div class="stats-grid stats-grid-3" style="margin: 0;">
+                    <div class="stat-card mini">
+                        <div class="stat-label">总请求数</div>
+                        <div class="stat-value">${formatNumber(key.total_requests || 0)}</div>
+                        ${key.request_quota ? `<div class="stat-sub">限制: ${formatNumber(key.request_quota)}</div>` : ''}
+                    </div>
+                    <div class="stat-card mini">
+                        <div class="stat-label">总 Token</div>
+                        <div class="stat-value">${formatNumber(key.total_tokens || 0)}</div>
+                        ${key.token_quota ? `<div class="stat-sub">限制: ${formatNumber(key.token_quota)}</div>` : ''}
+                    </div>
+                    <div class="stat-card mini">
+                        <div class="stat-label">总费用</div>
+                        <div class="stat-value">$${parseFloat(key.total_cost || 0).toFixed(4)}</div>
+                        ${key.cost_limit ? `<div class="stat-sub">限制: $${parseFloat(key.cost_limit).toFixed(2)}</div>` : ''}
+                    </div>
+                </div>
+            </div>
+
+            ${renderPerModelUsageSection(key.per_model_usage)}
+        `;
+    } catch (error) {
+        content.innerHTML = `<div class="text-center text-danger" style="padding: 24px 0;">加载详情失败: ${escapeHtml(error.message || '未知错误')}</div>`;
+    }
     
     // 设置查看日志按钮
     const viewLogsBtn = document.getElementById('apikey-view-logs-btn');
@@ -1693,8 +1875,6 @@ async function showApiKeyDetail(id) {
     // 设置重算费用按钮
     const recalcBtn = document.getElementById('apikey-recalc-btn');
     recalcBtn.onclick = () => recalculateApiKeyCost(id);
-    
-    openModal('apikey-detail-modal');
 }
 
 // 重新计算 API Key 费用

@@ -678,23 +678,20 @@ async def create_message(
                         
                 except BackendClientError as e:
                     logger.error(f"Request {request_id}: Backend error - {e.message}")
-                    error_event = response_transformer.to_anthropic_stream_event("error", {
-                        "type": "error",
-                        "error": {
-                            "type": "api_error",
-                            "message": e.message
-                        }
-                    })
+                    error = error_handler.from_backend_exception(e)
+                    error_event = response_transformer.to_anthropic_stream_event(
+                        "error",
+                        error_handler.to_anthropic_error(error)
+                    )
                     yield error_event
                 except Exception as e:
                     logger.exception(f"Request {request_id}: Unexpected error")
-                    error_event = response_transformer.to_anthropic_stream_event("error", {
-                        "type": "error",
-                        "error": {
-                            "type": "api_error",
-                            "message": str(e)
-                        }
-                    })
+                    error_event = response_transformer.to_anthropic_stream_event(
+                        "error",
+                        error_handler.to_anthropic_error(
+                            error_handler.create_server_error()
+                        )
+                    )
                     yield error_event
             
             return StreamingResponse(
@@ -852,7 +849,7 @@ async def create_message(
         )
     except Exception as e:
         logger.exception(f"Request {request_id}: Unexpected error")
-        error = error_handler.create_server_error(str(e))
+        error = error_handler.create_server_error()
         return JSONResponse(
             status_code=error.status_code,
             content=error_handler.to_anthropic_error(error)

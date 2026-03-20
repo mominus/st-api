@@ -9,6 +9,8 @@ from typing import Optional, Dict, Any, Literal
 from dataclasses import dataclass
 from enum import Enum
 
+from app.services.upstream_sanitizer import sanitize_exposed_payload
+
 
 # ============================================================================
 # Error Types and Codes
@@ -81,6 +83,30 @@ class ErrorHandler:
         ErrorType.BACKEND_ERROR: 502,
         ErrorType.SERVICE_UNAVAILABLE: 503,
     }
+
+    SAFE_ERROR_CODES: Dict[ErrorType, str] = {
+        ErrorType.INVALID_REQUEST: "invalid_request",
+        ErrorType.AUTHENTICATION: "unauthorized",
+        ErrorType.PERMISSION: "permission_denied",
+        ErrorType.NOT_FOUND: "not_found",
+        ErrorType.RATE_LIMIT: "rate_limit_exceeded",
+        ErrorType.QUOTA_EXCEEDED: "quota_exceeded",
+        ErrorType.SERVER_ERROR: "internal_error",
+        ErrorType.BACKEND_ERROR: "upstream_error",
+        ErrorType.SERVICE_UNAVAILABLE: "service_unavailable",
+    }
+
+    SAFE_ERROR_MESSAGES: Dict[ErrorType, str] = {
+        ErrorType.INVALID_REQUEST: "Invalid request",
+        ErrorType.AUTHENTICATION: "Authentication failed",
+        ErrorType.PERMISSION: "Permission denied",
+        ErrorType.NOT_FOUND: "Requested resource not found",
+        ErrorType.RATE_LIMIT: "Upstream rate limit exceeded",
+        ErrorType.QUOTA_EXCEEDED: "Upstream account quota exceeded",
+        ErrorType.SERVER_ERROR: "Internal server error",
+        ErrorType.BACKEND_ERROR: "Upstream service error",
+        ErrorType.SERVICE_UNAVAILABLE: "Upstream service unavailable",
+    }
     
     # ========================================================================
     # StackAI Error Parsing
@@ -103,20 +129,20 @@ class ErrorHandler:
         """
         # 尝试提取错误信息
         error_code = self._extract_error_code(backend_response)
-        error_message = self._extract_error_message(backend_response)
-        
+        raw_error_message = self._extract_error_message(backend_response)
+
         # 映射到标准错误类型
-        error_type = self._map_error_type(error_code, status_code)
-        
+        error_type = self._map_error_type(error_code, status_code, raw_error_message)
+
         # 确定最终状态码
         final_status_code = self.ERROR_STATUS_CODES.get(error_type, status_code)
-        
+
         return APIError(
             error_type=error_type,
-            message=error_message,
-            code=error_code,
+            message=self._build_safe_message(error_type, raw_error_message),
+            code=self._build_safe_code(error_type),
             status_code=final_status_code,
-            details=backend_response if backend_response else None
+            details=sanitize_exposed_payload(backend_response) if backend_response else None
         )
     
     def _extract_error_code(self, response: Dict[str, Any]) -> Optional[str]:
@@ -157,13 +183,19 @@ class ErrorHandler:
     def _map_error_type(
         self,
         error_code: Optional[str],
-        status_code: int
+        status_code: int,
+        error_message: Optional[str] = None
     ) -> ErrorType:
         """将错误码映射到标准错误类型"""
         # 首先尝试通过错误码映射
         if error_code and error_code in self.STACKAI_ERROR_MAPPING:
             return self.STACKAI_ERROR_MAPPING[error_code]
-        
+
+        # 再根据错误消息推断，避免上游错误被 500 包裹时误分类
+        inferred_type = self._infer_error_type_from_message(error_message)
+        if inferred_type is not None:
+            return inferred_type
+
         # 然后通过 HTTP 状态码映射
         if status_code == 400:
             return ErrorType.INVALID_REQUEST
@@ -183,6 +215,93 @@ class ErrorHandler:
             return ErrorType.SERVER_ERROR
         else:
             return ErrorType.SERVER_ERROR
+
+    def _infer_error_type_from_message(
+        self,
+        error_message: Optional[str]
+    ) -> Optional[ErrorType]:
+        """根据上游错误消息推断错误类型。"""
+        if not error_message:
+            return None
+
+        message = error_message.lower()
+
+        quota_markers = (
+            "daily token usage limit",
+            "token usage limit",
+            "surpassed your daily",
+            "quota exceeded",
+            "exceeded your current quota",
+            "quota",
+        )
+        if any(marker in message for marker in quota_markers):
+            return ErrorType.QUOTA_EXCEEDED
+
+        rate_limit_markers = (
+            "rate limit",
+            "too many requests",
+        )
+        if any(marker in message for marker in rate_limit_markers):
+            return ErrorType.RATE_LIMIT
+
+        auth_markers = (
+            "invalid api key",
+            "authentication",
+            "unauthorized",
+            "token expired",
+        )
+        if any(marker in message for marker in auth_markers):
+            return ErrorType.AUTHENTICATION
+
+        permission_markers = (
+            "forbidden",
+            "permission denied",
+            "not authorized",
+        )
+        if any(marker in message for marker in permission_markers):
+            return ErrorType.PERMISSION
+
+        not_found_markers = (
+            "not found",
+            "does not exist",
+        )
+        if any(marker in message for marker in not_found_markers):
+            return ErrorType.NOT_FOUND
+
+        unavailable_markers = (
+            "service unavailable",
+            "temporarily unavailable",
+            "temporarily overloaded",
+            "overloaded",
+        )
+        if any(marker in message for marker in unavailable_markers):
+            return ErrorType.SERVICE_UNAVAILABLE
+
+        timeout_markers = (
+            "timed out",
+            "timeout",
+        )
+        if any(marker in message for marker in timeout_markers):
+            return ErrorType.BACKEND_ERROR
+
+        return None
+
+    def _build_safe_message(
+        self,
+        error_type: ErrorType,
+        raw_message: Optional[str] = None
+    ) -> str:
+        """构建不会暴露上游品牌信息的错误消息。"""
+        if error_type == ErrorType.QUOTA_EXCEEDED and raw_message:
+            message = raw_message.lower()
+            if "daily" in message and "token" in message:
+                return "Upstream account daily token quota exceeded"
+
+        return self.SAFE_ERROR_MESSAGES.get(error_type, "Internal server error")
+
+    def _build_safe_code(self, error_type: ErrorType) -> str:
+        """构建安全的错误码，避免把上游原始错误码透传给下游。"""
+        return self.SAFE_ERROR_CODES.get(error_type, "internal_error")
     
     # ========================================================================
     # OpenAI Error Format (Requirement 8.1)
@@ -362,6 +481,30 @@ class ErrorHandler:
         """
         error = self.parse_backend_error(backend_response, status_code)
         return self.convert_error(error, target_format)
+
+    def from_backend_exception(self, exc: Exception) -> APIError:
+        """将后端客户端异常转换为统一的安全错误对象。"""
+        from app.services.backend_client import (
+            BackendAPIError,
+            BackendConnectionError,
+            BackendTimeoutError,
+        )
+
+        if isinstance(exc, BackendAPIError):
+            return self.parse_backend_error(
+                exc.response_data or {},
+                exc.status_code or 502
+            )
+
+        if isinstance(exc, BackendTimeoutError):
+            return self.create_service_unavailable_error("Upstream request timed out")
+
+        if isinstance(exc, BackendConnectionError):
+            return self.create_service_unavailable_error(
+                "Failed to connect to upstream service"
+            )
+
+        return self.create_backend_error("Upstream service error")
     
     # ========================================================================
     # Common Error Creators
@@ -460,8 +603,8 @@ class ErrorHandler:
         """创建后端错误"""
         return APIError(
             error_type=ErrorType.BACKEND_ERROR,
-            message="Service error",  # 简洁消息
-            code="service_error",
+            message="Upstream service error",
+            code="upstream_error",
             status_code=502
         )
     
@@ -472,7 +615,7 @@ class ErrorHandler:
         """创建服务不可用错误"""
         return APIError(
             error_type=ErrorType.SERVICE_UNAVAILABLE,
-            message="Service unavailable",  # 简洁消息
+            message="Upstream service unavailable",
             code="service_unavailable",
             status_code=503
         )

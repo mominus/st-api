@@ -7,7 +7,8 @@
 import uuid
 import logging
 from datetime import datetime
-from typing import Optional, List
+from decimal import Decimal, InvalidOperation
+from typing import Optional, List, Dict, Any
 
 from sqlalchemy import select, desc
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -16,6 +17,83 @@ from app.models.database import CallLog, get_session_factory
 from app.services.pricing import get_pricing_service
 
 logger = logging.getLogger(__name__)
+
+
+def _normalize_cost(value: str) -> str:
+    try:
+        normalized = format(Decimal(str(value)).normalize(), "f")
+    except (InvalidOperation, ValueError):
+        return "0"
+
+    if "." in normalized:
+        normalized = normalized.rstrip("0").rstrip(".")
+    return normalized or "0"
+
+
+def _empty_model_usage() -> Dict[str, Any]:
+    return {
+        "requests": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "tokens": 0,
+        "cost": "0",
+    }
+
+
+def _get_log_field(log: Any, field_name: str, default: Any = None) -> Any:
+    if hasattr(log, field_name):
+        return getattr(log, field_name)
+
+    mapping = getattr(log, "_mapping", None)
+    if mapping is not None:
+        return mapping.get(field_name, default)
+
+    return default
+
+
+def build_api_key_usage_by_model(
+    logs: List[Any],
+    allowed_models: Optional[List[str]] = None,
+) -> Dict[str, Dict[str, Any]]:
+    usage_by_model: Dict[str, Dict[str, Any]] = {
+        model_name: _empty_model_usage()
+        for model_name in (allowed_models or [])
+    }
+
+    cost_totals: Dict[str, Decimal] = {
+        model_name: Decimal("0")
+        for model_name in usage_by_model
+    }
+
+    for log in logs:
+        model_name = _get_log_field(log, "model_group") or _get_log_field(log, "model") or ""
+        if not model_name:
+            continue
+
+        usage = usage_by_model.setdefault(model_name, _empty_model_usage())
+        cost_totals.setdefault(model_name, Decimal("0"))
+
+        input_tokens = _get_log_field(log, "input_tokens", 0) or 0
+        output_tokens = _get_log_field(log, "output_tokens", 0) or 0
+        total_tokens_value = _get_log_field(log, "total_tokens")
+        total_tokens = total_tokens_value if total_tokens_value is not None else (input_tokens + output_tokens)
+
+        usage["requests"] += 1
+        usage["input_tokens"] += input_tokens
+        usage["output_tokens"] += output_tokens
+        usage["tokens"] += total_tokens
+
+        total_cost = _get_log_field(log, "total_cost")
+        if total_cost:
+            try:
+                cost_totals[model_name] += Decimal(str(total_cost))
+            except (InvalidOperation, ValueError):
+                logger.warning("Invalid call log cost for model usage aggregation: %s", total_cost)
+
+    for model_name, usage in usage_by_model.items():
+        usage["cost"] = _normalize_cost(str(cost_totals[model_name]))
+
+    return usage_by_model
 
 
 def truncate_text(text: str, max_length: int = 500) -> str:
@@ -331,6 +409,36 @@ class CallLoggerService:
             "output": str(total_output),
             "total": str(total),
         }
+
+    async def get_api_key_usage_by_model(
+        self,
+        session: AsyncSession,
+        api_key_id: str,
+        *,
+        allowed_models: Optional[List[str]] = None,
+        since: Optional[datetime] = None,
+    ) -> Dict[str, Dict[str, Any]]:
+        """
+        获取某个 API Key 的按模型拆分使用统计。
+        """
+        query = select(
+            CallLog.model_group,
+            CallLog.model,
+            CallLog.input_tokens,
+            CallLog.output_tokens,
+            CallLog.total_tokens,
+            CallLog.total_cost,
+        ).where(
+            CallLog.api_key_id == api_key_id,
+            CallLog.status == "success",
+        )
+
+        if since is not None:
+            query = query.where(CallLog.timestamp >= since)
+
+        result = await session.execute(query.order_by(desc(CallLog.timestamp)))
+        logs = list(result.all())
+        return build_api_key_usage_by_model(logs, allowed_models=allowed_models)
 
 
 # 单例

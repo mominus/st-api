@@ -178,6 +178,25 @@ class APIKeyService:
             select(APIKey).where(APIKey.key_hash == key_hash)
         )
         return result.scalar_one_or_none()
+
+    async def get_key_by_raw(
+        self,
+        session: AsyncSession,
+        raw_key: str
+    ) -> Optional[APIKey]:
+        """
+        通过原始 Key 值获取 API Key。
+
+        Args:
+            session: 数据库会话
+            raw_key: 原始 API Key
+
+        Returns:
+            APIKey 对象，如果不存在则返回 None
+        """
+        raw_key = raw_key.replace('\u2013', '-').replace('\u2014', '-').replace('\u2212', '-')
+        key_hash = CryptoService.hash_api_key(raw_key)
+        return await self.get_key_by_hash(session, key_hash)
     
     async def get_key_by_id(
         self,

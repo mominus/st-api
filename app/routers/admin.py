@@ -25,6 +25,9 @@ from app.services.account_pool import AccountPoolService, get_account_pool_servi
 from app.services.api_key import APIKeyService, get_api_key_service
 from app.services.stats import StatsService, get_stats_service
 from app.services.analytics import AnalyticsService, get_analytics_service
+from app.services.call_logger import get_call_logger_service
+from app.services.key_info import build_public_key_info_payload
+from app.services.upstream_sanitizer import sanitize_exposed_text
 
 logger = logging.getLogger(__name__)
 
@@ -1052,6 +1055,8 @@ async def get_api_key(
     获取单个 API Key 详情
     """
     api_key_service = get_api_key_service()
+    account_pool = get_account_pool_service()
+    call_logger = get_call_logger_service()
     key = await api_key_service.get_key_by_id(session, key_id)
     
     if not key:
@@ -1059,6 +1064,23 @@ async def get_api_key(
     
     model_groups = api_key_service.get_model_groups(key)
     display_key = api_key_service.get_display_key(key)
+    usage_by_model = await call_logger.get_api_key_usage_by_model(
+        session,
+        key.id,
+        allowed_models=model_groups,
+        since=key.created_at,
+    )
+    model_details = build_public_key_info_payload(
+        key,
+        [
+            {
+                "id": model_name,
+                "accounts": await account_pool.get_accounts_by_model_group(session, model_name),
+                "usage": usage_by_model.get(model_name),
+            }
+            for model_name in model_groups
+        ],
+    )["models"]
     
     return {
         "success": True,
@@ -1078,7 +1100,8 @@ async def get_api_key(
             "last_used_at": key.last_used_at.isoformat() if key.last_used_at else None,
             "total_requests": key.total_requests or 0,
             "total_tokens": key.total_tokens or 0,
-            "total_cost": key.total_cost or "0"
+            "total_cost": key.total_cost or "0",
+            "per_model_usage": model_details,
         }
     }
 
@@ -1638,7 +1661,7 @@ async def test_account(
             status_code=500,
             content={
                 "success": False,
-                "message": f"Failed to decrypt API key: {str(e)}",
+                "message": f"Failed to decrypt API key: {sanitize_exposed_text(str(e))}",
                 "error_type": "decryption_error"
             }
         )
@@ -1705,7 +1728,7 @@ async def test_account(
                     "raw_response": response_data
                 }
             else:
-                error_detail = response.text[:500]
+                error_detail = sanitize_exposed_text(response.text[:500]) or "Upstream service error"
                 logger.warning(f"Account test failed: {account_id}, status: {response.status_code}")
                 
                 return JSONResponse(
@@ -1735,7 +1758,7 @@ async def test_account(
             status_code=502,
             content={
                 "success": False,
-                "message": f"网络错误: {str(e)}",
+                "message": f"网络错误: {sanitize_exposed_text(str(e))}",
                 "response_time_ms": elapsed_ms,
                 "error_type": "network_error"
             }
@@ -1747,7 +1770,7 @@ async def test_account(
             status_code=500,
             content={
                 "success": False,
-                "message": f"测试失败: {str(e)}",
+                "message": f"测试失败: {sanitize_exposed_text(str(e))}",
                 "response_time_ms": elapsed_ms,
                 "error_type": "unknown_error"
             }

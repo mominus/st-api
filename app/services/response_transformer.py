@@ -13,6 +13,8 @@ import uuid
 from typing import Optional, Dict, Any, AsyncGenerator, Literal, List, TYPE_CHECKING
 from dataclasses import dataclass
 
+from app.services.upstream_sanitizer import is_stream_completion_marker
+
 if TYPE_CHECKING:
     from .tool_parser import ToolParser, ParsedToolCall
 
@@ -1515,22 +1517,31 @@ class ResponseTransformer:
             data = data[5:].strip()
         
         # 跳过空数据和结束标记
-        if not data or data == "[DONE]":
+        if not data or data == "[DONE]" or is_stream_completion_marker(data):
             return None
         
         # 尝试解析 JSON
         try:
             parsed = json.loads(data)
             if isinstance(parsed, dict):
+                if is_stream_completion_marker(parsed):
+                    return None
+
                 # 首先检查 outputs 字段（StackAI 标准流式格式）
                 if "outputs" in parsed:
                     outputs = parsed["outputs"]
                     if isinstance(outputs, dict):
                         # 遍历 outputs 找到内容
                         for key, value in outputs.items():
-                            if isinstance(value, str):
+                            if str(key).lower() == "stream_complete":
+                                continue
+                            if isinstance(value, str) and not is_stream_completion_marker(value):
                                 return value
+                        if is_stream_completion_marker(outputs):
+                            return None
                     elif isinstance(outputs, str):
+                        if is_stream_completion_marker(outputs):
+                            return None
                         return outputs
                 
                 # 尝试其他常见字段
@@ -1538,13 +1549,21 @@ class ResponseTransformer:
                     if key in parsed:
                         value = parsed[key]
                         if isinstance(value, str):
+                            if is_stream_completion_marker(value):
+                                return None
                             return value
                         elif isinstance(value, dict) and "content" in value:
+                            if is_stream_completion_marker(value["content"]):
+                                return None
                             return value["content"]
             elif isinstance(parsed, str):
+                if is_stream_completion_marker(parsed):
+                    return None
                 return parsed
         except json.JSONDecodeError:
             # 不是 JSON，直接返回原始数据
+            if is_stream_completion_marker(data):
+                return None
             return data
         
         return None

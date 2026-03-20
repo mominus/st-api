@@ -1100,6 +1100,27 @@ code {
     color: var(--text-muted);
 }
 
+.filter-bar-actions {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin-left: auto;
+}
+
+.filter-summary {
+    color: var(--text-muted);
+    font-size: 0.9rem;
+    white-space: nowrap;
+}
+
+.filter-bar-actions .btn:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+    transform: none;
+    box-shadow: none;
+}
+
 /* 日志列表 */
 .log-item {
     background: white;
@@ -1485,6 +1506,21 @@ code {
         flex-direction: column;
         padding: 16px;
         gap: 12px;
+    }
+
+    .filter-bar-actions {
+        margin-left: 0;
+        width: 100%;
+    }
+
+    .filter-bar-actions .btn {
+        flex: 1 1 calc(33.333% - 8px);
+        min-width: 120px;
+    }
+
+    .filter-summary {
+        width: 100%;
+        white-space: normal;
     }
     
     .filter-bar input,

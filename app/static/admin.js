@@ -852,6 +852,229 @@ function bulkDeleteAccounts() {
 // ==================== 批量导入账号 ====================
 
 let importData = []; // 存储待导入的数据
+const AUTO_GROUP_INPUT_MAPPING = { user_input: 'in-0' };
+
+function parseImportJsonData(rawText) {
+    const jsonText = (rawText || '').replace(/^\uFEFF/, '').trim();
+    if (!jsonText) {
+        return [];
+    }
+    
+    try {
+        const parsed = JSON.parse(jsonText);
+        return Array.isArray(parsed) ? parsed : [parsed];
+    } catch (directError) {
+        // 兼容多个对象连续粘贴但未包裹 []
+        try {
+            const wrapped = JSON.parse(`[${jsonText}]`);
+            return Array.isArray(wrapped) ? wrapped : [wrapped];
+        } catch (wrappedError) {
+            const records = [];
+            let cursor = 0;
+            
+            while (cursor < jsonText.length) {
+                while (cursor < jsonText.length && /[\s,]/.test(jsonText[cursor])) {
+                    cursor++;
+                }
+                
+                if (cursor >= jsonText.length) {
+                    break;
+                }
+                
+                if (jsonText[cursor] !== '{') {
+                    throw new Error(directError.message);
+                }
+                
+                let depth = 0;
+                let inString = false;
+                let escaped = false;
+                let end = cursor;
+                
+                for (; end < jsonText.length; end++) {
+                    const ch = jsonText[end];
+                    if (inString) {
+                        if (escaped) {
+                            escaped = false;
+                        } else if (ch === '\\') {
+                            escaped = true;
+                        } else if (ch === '"') {
+                            inString = false;
+                        }
+                        continue;
+                    }
+                    
+                    if (ch === '"') {
+                        inString = true;
+                    } else if (ch === '{') {
+                        depth++;
+                    } else if (ch === '}') {
+                        depth--;
+                        if (depth === 0) {
+                            end++;
+                            break;
+                        }
+                    }
+                }
+                
+                if (depth !== 0) {
+                    throw new Error(directError.message);
+                }
+                
+                const chunk = jsonText.slice(cursor, end).trim();
+                records.push(JSON.parse(chunk));
+                cursor = end;
+            }
+            
+            if (records.length === 0) {
+                throw new Error(directError.message);
+            }
+            
+            return records;
+        }
+    }
+}
+
+function normalizeClaudeModelName(rawName) {
+    const lowered = String(rawName || '').trim().toLowerCase();
+    if (!lowered) {
+        return '';
+    }
+    
+    let parts = lowered.split(/[^a-z0-9]+/).filter(Boolean);
+    if (parts.length === 0) {
+        return lowered;
+    }
+    
+    // 兼容导入值中带厂商前缀，例如: anthropic-claude_4_6_opus
+    if (parts[0] === 'anthropic') {
+        parts = parts.slice(1);
+    }
+    
+    if (parts.length === 0 || parts[0] !== 'claude') {
+        return lowered;
+    }
+    
+    const supportedSeries = ['opus', 'sonnet', 'haiku'];
+    const series = parts.find(part => supportedSeries.includes(part));
+    if (!series) {
+        return lowered;
+    }
+    
+    const versionParts = parts
+        .filter(part => /^\d+$/.test(part))
+        .slice(0, 2);
+    if (versionParts.length < 2) {
+        return lowered;
+    }
+    
+    return `claude-${series}-${versionParts[0]}-${versionParts[1]}`;
+}
+
+function normalizeImportedModelNames(llmModels) {
+    if (llmModels === null || llmModels === undefined) {
+        return [];
+    }
+    
+    let modelCandidates = [];
+    
+    if (Array.isArray(llmModels)) {
+        modelCandidates = llmModels;
+    } else if (typeof llmModels === 'string') {
+        const text = llmModels.trim();
+        if (!text) {
+            return [];
+        }
+        
+        if (text.startsWith('[') && text.endsWith(']')) {
+            try {
+                const parsed = JSON.parse(text);
+                modelCandidates = Array.isArray(parsed) ? parsed : [parsed];
+            } catch (e) {
+                modelCandidates = text.split(/[\n,]/);
+            }
+        } else {
+            modelCandidates = text.split(/[\n,]/);
+        }
+    } else {
+        modelCandidates = [llmModels];
+    }
+    
+    const normalized = [];
+    const seen = new Set();
+    
+    modelCandidates.forEach(candidate => {
+        let rawName = '';
+        
+        if (typeof candidate === 'string' || typeof candidate === 'number') {
+            rawName = String(candidate);
+        } else if (candidate && typeof candidate === 'object') {
+            rawName = String(candidate.model || candidate.name || candidate.id || '');
+        }
+        
+        const name = normalizeClaudeModelName(rawName);
+        if (!name || seen.has(name)) {
+            return;
+        }
+        
+        seen.add(name);
+        normalized.push(name);
+    });
+    
+    return normalized;
+}
+
+function resolveImportModelGroups(item, defaultModelGroup, index) {
+    const groupsFromItem = normalizeImportedModelNames(item.llm_models);
+    if (groupsFromItem.length > 0) {
+        return groupsFromItem;
+    }
+    
+    if (defaultModelGroup) {
+        return [defaultModelGroup];
+    }
+    
+    throw new Error(`第 ${index + 1} 条记录缺少 llm_models，且未选择默认模型组`);
+}
+
+function buildImportAccountKey(orgId, flowId, modelGroup) {
+    return `${orgId}:::${flowId}:::${modelGroup}`;
+}
+
+async function ensureImportModelGroup(modelGroupName) {
+    if (!modelGroupName) {
+        throw new Error('模型组名称为空');
+    }
+    
+    if (groupsData.some(group => group.name === modelGroupName)) {
+        return false;
+    }
+    
+    try {
+        await apiCall('/groups', {
+            method: 'POST',
+            body: JSON.stringify({
+                name: modelGroupName,
+                description: 'Auto created from batch import',
+                input_mapping: AUTO_GROUP_INPUT_MAPPING
+            })
+        });
+        
+        groupsData.push({
+            name: modelGroupName,
+            description: 'Auto created from batch import',
+            input_mapping: AUTO_GROUP_INPUT_MAPPING
+        });
+        return true;
+    } catch (error) {
+        if (error.message && error.message.includes('already exists')) {
+            if (!groupsData.some(group => group.name === modelGroupName)) {
+                groupsData.push({ name: modelGroupName });
+            }
+            return false;
+        }
+        throw new Error(`自动创建模型组 "${modelGroupName}" 失败: ${error.message}`);
+    }
+}
 
 function showImportAccountsModal() {
     // 重置表单
@@ -912,7 +1135,13 @@ async function loadGroupsForImportSelect() {
         const select = document.getElementById('import-model-group');
         select.innerHTML = '<option value="">选择模型组</option>';
         groupsData.forEach(group => {
-            select.innerHTML += `<option value="${group.name}">${group.name}</option>`;
+            if (!group || !group.name) {
+                return;
+            }
+            const option = document.createElement('option');
+            option.value = group.name;
+            option.textContent = group.name;
+            select.appendChild(option);
         });
     } catch (error) {
         console.error('加载模型组失败:', error);
@@ -989,12 +1218,7 @@ function clearImportFile() {
 
 function previewImport() {
     const jsonText = document.getElementById('import-json-text').value.trim();
-    const modelGroup = document.getElementById('import-model-group').value;
-    
-    if (!modelGroup) {
-        showToast('请先选择目标模型组', 'warning');
-        return;
-    }
+    const defaultModelGroup = document.getElementById('import-model-group').value.trim();
     
     if (!jsonText) {
         showToast('请输入或上传 JSON 数据', 'warning');
@@ -1002,53 +1226,71 @@ function previewImport() {
     }
     
     try {
-        // 解析 JSON
-        let parsed = JSON.parse(jsonText);
-        
-        // 支持单个对象或数组
-        if (!Array.isArray(parsed)) {
-            parsed = [parsed];
-        }
+        const parsed = parseImportJsonData(jsonText);
         
         if (parsed.length === 0) {
             showToast('JSON 数据为空', 'warning');
             return;
         }
         
-        // 验证并转换数据
-        importData = parsed.map((item, index) => {
-            // 验证必要字段
-            if (!item.org_id) {
+        const existingAccountKeys = new Set(
+            accountsData.map(account => buildImportAccountKey(account.org_id, account.flow_id, account.model_group))
+        );
+        const pendingAccountKeys = new Set();
+        
+        // 验证并转换数据（每个 llm_models 项会展开为一条账号导入记录）
+        const normalizedImportData = [];
+        
+        parsed.forEach((item, index) => {
+            if (!item || typeof item !== 'object' || Array.isArray(item)) {
+                throw new Error(`第 ${index + 1} 条记录不是有效对象`);
+            }
+            
+            const orgId = String(item.org_id || '').trim();
+            const flowId = String(item.flow_id || '').trim();
+            const apiKey = String(item.public_api_key || item.api_key || '').trim();
+            
+            if (!orgId) {
                 throw new Error(`第 ${index + 1} 条记录缺少 org_id`);
             }
-            if (!item.flow_id) {
+            if (!flowId) {
                 throw new Error(`第 ${index + 1} 条记录缺少 flow_id`);
             }
-            if (!item.public_api_key && !item.api_key) {
+            if (!apiKey) {
                 throw new Error(`第 ${index + 1} 条记录缺少 public_api_key 或 api_key`);
             }
             
-            // 生成账号名称
-            const name = item.email || item.name || `账号_${item.org_id.substring(0, 8)}`;
+            const modelGroups = resolveImportModelGroups(item, defaultModelGroup, index);
+            const email = typeof item.email === 'string' ? item.email.trim() : '';
+            const customName = typeof item.name === 'string' ? item.name.trim() : '';
+            const baseName = email || customName || `账号_${orgId.substring(0, 8)}`;
+            const privateApiKey = item.private_api_key ? String(item.private_api_key).trim() : null;
             
-            // 检查是否重复（基于 org_id + flow_id）
-            const isDuplicate = accountsData.some(
-                a => a.org_id === item.org_id && a.flow_id === item.flow_id
-            );
-            
-            return {
-                name: name,
-                org_id: item.org_id,
-                flow_id: item.flow_id,
-                // public_api_key -> API Key (Bearer token，必填)
-                api_key: item.public_api_key || item.api_key,
-                // private_api_key -> Private API Key (可选，用于同步使用量)
-                private_api_key: item.private_api_key || null,
-                email: item.email,
-                isDuplicate: isDuplicate,
-                status: isDuplicate ? 'duplicate' : 'pending'
-            };
+            modelGroups.forEach(modelGroup => {
+                const accountKey = buildImportAccountKey(orgId, flowId, modelGroup);
+                const isDuplicate = existingAccountKeys.has(accountKey) || pendingAccountKeys.has(accountKey);
+                pendingAccountKeys.add(accountKey);
+                
+                normalizedImportData.push({
+                    name: baseName,
+                    org_id: orgId,
+                    flow_id: flowId,
+                    api_key: apiKey,
+                    private_api_key: privateApiKey || null,
+                    email: email || null,
+                    model_group: modelGroup,
+                    isDuplicate: isDuplicate,
+                    status: isDuplicate ? 'duplicate' : 'pending'
+                });
+            });
         });
+        
+        importData = normalizedImportData;
+        
+        if (importData.length === 0) {
+            showToast('没有可导入的数据', 'warning');
+            return;
+        }
         
         // 渲染预览
         renderImportPreview();
@@ -1077,7 +1319,7 @@ function renderImportPreview() {
         <div class="import-preview-item ${item.isDuplicate ? 'duplicate' : ''}">
             <div class="item-info">
                 <span class="item-name">${escapeHtml(item.name)}</span>
-                <span class="item-detail">org: ${item.org_id.substring(0, 8)}... | flow: ${item.flow_id.substring(0, 8)}...</span>
+                <span class="item-detail">model: ${escapeHtml(item.model_group)} | org: ${item.org_id.substring(0, 8)}... | flow: ${item.flow_id.substring(0, 8)}...</span>
             </div>
             <span class="item-status ${item.status}" id="import-status-${index}">
                 ${item.isDuplicate ? '⚠️ 已存在' : '⏳ 待导入'}
@@ -1092,7 +1334,6 @@ function renderImportPreview() {
 async function handleImportSubmit(e) {
     e.preventDefault();
     
-    const modelGroup = document.getElementById('import-model-group').value;
     const dailyQuota = parseInt(document.getElementById('import-daily-quota').value) || 1000000;
     const submitBtn = document.getElementById('import-submit-btn');
     
@@ -1109,6 +1350,8 @@ async function handleImportSubmit(e) {
     
     let successCount = 0;
     let failCount = 0;
+    let createdGroupCount = 0;
+    const ensuredGroups = new Set();
     
     for (let i = 0; i < toImport.length; i++) {
         const item = toImport[i];
@@ -1116,6 +1359,14 @@ async function handleImportSubmit(e) {
         const statusEl = document.getElementById(`import-status-${index}`);
         
         try {
+            if (!ensuredGroups.has(item.model_group)) {
+                const created = await ensureImportModelGroup(item.model_group);
+                ensuredGroups.add(item.model_group);
+                if (created) {
+                    createdGroupCount++;
+                }
+            }
+            
             await apiCall('/accounts', {
                 method: 'POST',
                 body: JSON.stringify({
@@ -1124,34 +1375,45 @@ async function handleImportSubmit(e) {
                     flow_id: item.flow_id,
                     api_key: item.api_key,
                     private_api_key: item.private_api_key,
-                    model_group: modelGroup,
+                    model_group: item.model_group,
                     daily_quota: dailyQuota
                 })
             });
             
             item.status = 'success';
-            if (statusEl) statusEl.innerHTML = '✅ 成功';
-            statusEl.className = 'item-status success';
+            if (statusEl) {
+                statusEl.innerHTML = '✅ 成功';
+                statusEl.className = 'item-status success';
+            }
             successCount++;
         } catch (error) {
             item.status = 'error';
-            if (statusEl) statusEl.innerHTML = '❌ 失败';
-            statusEl.className = 'item-status error';
+            if (statusEl) {
+                statusEl.innerHTML = '❌ 失败';
+                statusEl.className = 'item-status error';
+            }
             failCount++;
-            console.error(`导入失败 [${item.name}]:`, error);
+            console.error(`导入失败 [${item.name} / ${item.model_group}]:`, error);
         }
     }
     
     submitBtn.innerHTML = '导入';
     submitBtn.disabled = false;
     
+    if (createdGroupCount > 0) {
+        groupsData = [];
+        await loadGroupsForImportSelect();
+        await loadGroupsForSelect();
+    }
+    
     // 显示结果
+    const createGroupTips = createdGroupCount > 0 ? `，自动创建模型组 ${createdGroupCount} 个` : '';
     if (failCount === 0) {
-        showToast(`成功导入 ${successCount} 个账号`, 'success');
+        showToast(`成功导入 ${successCount} 个账号${createGroupTips}`, 'success');
         closeModal('import-accounts-modal');
         loadAccounts();
     } else {
-        showToast(`导入完成: ${successCount} 成功, ${failCount} 失败`, 'warning');
+        showToast(`导入完成: ${successCount} 成功, ${failCount} 失败${createGroupTips}`, 'warning');
         loadAccounts();
     }
 }

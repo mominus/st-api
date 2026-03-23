@@ -76,6 +76,54 @@ Example response:
 | `ADMIN_PASSWORD` | Admin password |
 | `ADMIN_PATH` | Hidden admin panel path |
 
+## Release Management
+
+This project now includes built-in changelog + version release workflow:
+
+- `VERSION`: single source of release version.
+- `CHANGELOG.md`: records each release change.
+- `scripts/release.py`: release helper.
+
+### Prepare a release entry
+
+```bash
+python scripts/release.py --version 1.0.1 \
+  --note "批量导入支持无[] JSON" \
+  --note "llm_models 自动建模并分配账号"
+```
+
+### One-command publish to Hugging Face
+
+```bash
+python scripts/release.py --version 1.0.1 \
+  --note "批量导入支持无[] JSON" \
+  --note "llm_models 自动建模并分配账号" \
+  --commit --tag --push --remote origin --branch main
+```
+
+### Download specific version
+
+```bash
+git clone --branch v1.0.1 https://huggingface.co/spaces/<username>/st-api
+```
+
+List released versions:
+
+```bash
+git ls-remote --tags https://huggingface.co/spaces/<username>/st-api
+```
+
+Or with `huggingface_hub`:
+
+```python
+from huggingface_hub import snapshot_download
+snapshot_download(
+    repo_id="<username>/st-api",
+    repo_type="space",
+    revision="v1.0.1",
+)
+```
+
 ## License
 
 MIT

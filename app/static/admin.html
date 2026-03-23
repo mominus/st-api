@@ -487,11 +487,11 @@
             </div>
             <form id="import-accounts-form">
                 <div class="form-group">
-                    <label for="import-model-group">目标模型组 *</label>
-                    <select id="import-model-group" required>
+                    <label for="import-model-group">默认模型组（可选）</label>
+                    <select id="import-model-group">
                         <option value="">选择模型组</option>
                     </select>
-                    <small class="text-muted">所有导入的账号将归属到此模型组</small>
+                    <small class="text-muted">如果导入数据包含 llm_models，将自动创建并匹配模型组；未提供 llm_models 时使用这里的默认模型组</small>
                 </div>
                 <div class="form-group">
                     <label for="import-daily-quota">每日配额 (Token)</label>
@@ -507,21 +507,23 @@
                 <div class="import-tab-content" id="import-tab-json">
                     <div class="form-group">
                         <label for="import-json-text">JSON 数据</label>
-                        <textarea id="import-json-text" rows="10" placeholder='支持单个对象或数组格式，例如：
+                        <textarea id="import-json-text" rows="10" placeholder='支持单个对象、数组，或多个对象连续粘贴（可不加 []）。例如：
 [
   {
     "email": "user@example.com",
     "public_api_key": "xxx (必填，API Key)",
     "private_api_key": "xxx (可选，用于同步使用量)",
     "org_id": "xxx",
-    "flow_id": "xxx"
+    "flow_id": "xxx",
+    "llm_models": ["gpt-5.1", "claude-3.7-sonnet"]
   }
 ]
 
 字段说明：
 - public_api_key: API Key (Bearer token，必填)
 - private_api_key: Private API Key (可选)
-- email: 用作账号名称 (可选)'></textarea>
+- email: 用作账号名称 (可选)
+- llm_models: 模型名列表（可选，导入时会自动创建并分配）'></textarea>
                     </div>
                 </div>
                 <div class="import-tab-content hidden" id="import-tab-file">

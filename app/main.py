@@ -23,6 +23,7 @@ import secrets
 from app.routers import openai_router, anthropic_router, gemini_router, admin_router
 from app.models.database import init_database, close_database
 from app.services.auth import get_auth_service
+from app import __version__ as APP_VERSION
 import logging
 
 # 配置日志
@@ -61,7 +62,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="API Service",
     description="API Service",
-    version="1.0.0",
+    version=APP_VERSION,
     docs_url=None,  # 禁用 Swagger UI
     redoc_url=None,  # 禁用 ReDoc
     openapi_url=None,  # 禁用 OpenAPI schema

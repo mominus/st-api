@@ -178,6 +178,32 @@ git commit -m "update"
 git push hf main
 ```
 
+### 发布新版本（自动写更新日志 + 打 Tag + 推送）
+
+项目内置了版本发布脚本：
+- `VERSION`：版本号
+- `CHANGELOG.md`：更新日志
+- `scripts/release.py`：发布工具
+
+```bash
+python scripts/release.py --version 1.0.1 \
+  --note "本次更新说明 1" \
+  --note "本次更新说明 2" \
+  --commit --tag --push --remote hf --branch main
+```
+
+### 查看可下载版本
+
+```bash
+git ls-remote --tags https://huggingface.co/spaces/你的用户名/st-api
+```
+
+### 下载指定版本
+
+```bash
+git clone --branch v1.0.1 https://huggingface.co/spaces/你的用户名/st-api
+```
+
 ### 查看数据库文件
 可以在 Space 的 Files 标签查看 `/data` 目录下的文件。
 

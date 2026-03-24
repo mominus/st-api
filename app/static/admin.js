@@ -286,6 +286,17 @@ function switchPage(page) {
 // 存储账号的分析数据
 let analyticsCache = {};
 let monitorInterval = null;
+let isSilentSyncRunning = false;
+let isManualSyncRunning = false;
+const DASHBOARD_AUTO_SYNC_INTERVAL_MS = 120000; // 2 分钟
+const DASHBOARD_SYNC_WINDOW_SIZE = 120;
+const DASHBOARD_SYNC_STALE_PRIORITY_SIZE = 80;
+const AUTO_SYNC_MAX_CONCURRENCY = 10;
+const MANUAL_SYNC_MAX_CONCURRENCY = 20;
+let dashboardSyncCursor = (() => {
+    const value = parseInt(localStorage.getItem('dashboardSyncCursor') || '0', 10);
+    return Number.isInteger(value) && value >= 0 ? value : 0;
+})();
 
 async function loadDashboard() {
     try {
@@ -300,7 +311,7 @@ async function loadDashboard() {
                 totalTodayTokens += analytics?.today_tokens ?? account.daily_used;
             });
             updateDashboardStats(uniqueOrgIds.size, totalTodayTokens);
-            // 启动30秒自动同步
+            // 启动自动同步
             startMonitorAutoSync();
             return;
         }
@@ -314,7 +325,7 @@ async function loadDashboard() {
         // 加载监控表格（会计算统计数据）
         await loadMonitorTable();
         
-        // 启动30秒自动同步
+        // 启动自动同步
         startMonitorAutoSync();
     } catch (error) {
         showToast('加载仪表板失败: ' + error.message, 'error');
@@ -331,12 +342,12 @@ function startMonitorAutoSync() {
     if (monitorInterval) {
         clearInterval(monitorInterval);
     }
-    // 每30秒自动同步
+    // 自动同步（默认每 2 分钟一次）
     monitorInterval = setInterval(() => {
-        if (currentPage === 'dashboard') {
+        if (currentPage === 'dashboard' && !isSilentSyncRunning && !isManualSyncRunning) {
             syncAllAccountsSilent();
         }
-    }, 30000);
+    }, DASHBOARD_AUTO_SYNC_INTERVAL_MS);
 }
 
 function stopMonitorAutoSync() {
@@ -346,36 +357,151 @@ function stopMonitorAutoSync() {
     }
 }
 
+function toTimestamp(value) {
+    if (!value) return 0;
+    const ts = Date.parse(value);
+    return Number.isFinite(ts) ? ts : 0;
+}
+
+function buildSyncWindowAccountIds(accounts) {
+    const eligible = (accounts || []).filter(account => account && account.has_private_key && account.id);
+    if (eligible.length === 0) {
+        return [];
+    }
+
+    if (eligible.length <= DASHBOARD_SYNC_WINDOW_SIZE) {
+        return eligible.map(account => account.id);
+    }
+
+    const selectedIds = [];
+    const seen = new Set();
+    const addAccount = (account) => {
+        if (!account || !account.id || seen.has(account.id)) {
+            return false;
+        }
+        seen.add(account.id);
+        selectedIds.push(account.id);
+        return selectedIds.length >= DASHBOARD_SYNC_WINDOW_SIZE;
+    };
+
+    // 第一优先级：有调用但尚未同步的账号（last_used_at > last_sync_at）
+    const usedButUnsynced = eligible
+        .filter(account => {
+            const usedTs = toTimestamp(account.last_used_at);
+            if (!usedTs) return false;
+            const syncTs = toTimestamp(account.last_sync_at);
+            return !syncTs || usedTs > syncTs;
+        })
+        .sort((a, b) => toTimestamp(b.last_used_at) - toTimestamp(a.last_used_at));
+
+    for (const account of usedButUnsynced) {
+        if (addAccount(account)) {
+            return selectedIds;
+        }
+    }
+
+    // 第二优先级：最久未同步账号（保证不会长期饿死）
+    const staleFirst = [...eligible].sort((a, b) => {
+        const aSync = toTimestamp(a.last_sync_at);
+        const bSync = toTimestamp(b.last_sync_at);
+        if (!aSync && !bSync) return String(a.id).localeCompare(String(b.id));
+        if (!aSync) return -1;
+        if (!bSync) return 1;
+        if (aSync !== bSync) return aSync - bSync;
+        return String(a.id).localeCompare(String(b.id));
+    });
+
+    const staleTarget = Math.min(DASHBOARD_SYNC_WINDOW_SIZE, DASHBOARD_SYNC_STALE_PRIORITY_SIZE);
+    for (const account of staleFirst) {
+        if (selectedIds.length >= staleTarget) {
+            break;
+        }
+        addAccount(account);
+    }
+
+    // 第三优先级：轮转补齐，覆盖全量账号
+    const allSorted = [...eligible].sort((a, b) => String(a.id).localeCompare(String(b.id)));
+    if (allSorted.length > 0) {
+        dashboardSyncCursor = dashboardSyncCursor % allSorted.length;
+    } else {
+        dashboardSyncCursor = 0;
+    }
+
+    for (let i = 0; i < allSorted.length && selectedIds.length < DASHBOARD_SYNC_WINDOW_SIZE; i++) {
+        const index = (dashboardSyncCursor + i) % allSorted.length;
+        addAccount(allSorted[index]);
+    }
+
+    if (allSorted.length > 0) {
+        dashboardSyncCursor = (dashboardSyncCursor + DASHBOARD_SYNC_WINDOW_SIZE) % allSorted.length;
+        localStorage.setItem('dashboardSyncCursor', String(dashboardSyncCursor));
+    }
+
+    return selectedIds;
+}
+
+function applyBatchSyncResults(syncResults = []) {
+    if (!Array.isArray(syncResults) || syncResults.length === 0) {
+        return;
+    }
+
+    syncResults.forEach(result => {
+        if (!result || result.status !== 'synced' || !result.account_id) {
+            return;
+        }
+
+        const account = accountsData.find(a => a.id === result.account_id);
+        if (account) {
+            account.daily_used = result.current_used ?? account.daily_used;
+            account.status = result.account_status || account.status;
+            account.last_sync_at = result.last_sync_at || new Date().toISOString();
+        }
+
+        analyticsCache[result.account_id] = {
+            ...analyticsCache[result.account_id],
+            today_tokens: result.current_used ?? 0,
+            today_runs: result.today_runs ?? 0,
+            total_tokens: result.total_tokens ?? 0
+        };
+    });
+}
+
+async function batchSyncAccounts(accountIds, options = {}) {
+    const payload = {
+        days: options.days || 30,
+        max_concurrency: options.maxConcurrency || AUTO_SYNC_MAX_CONCURRENCY
+    };
+
+    if (Array.isArray(accountIds) && accountIds.length > 0) {
+        payload.account_ids = accountIds;
+    }
+
+    const response = await apiCall('/accounts/batch/sync', {
+        method: 'POST',
+        body: JSON.stringify(payload)
+    });
+
+    applyBatchSyncResults(response.results || []);
+    return response;
+}
+
 // 静默同步（不显示提示，使用缓存的账号数据）
 async function syncAllAccountsSilent() {
-    // 使用缓存的账号数据，避免重复请求
-    const accounts = accountsData.filter(a => a.has_private_key);
-    if (accounts.length === 0) return;
-    
+    if (isSilentSyncRunning || isManualSyncRunning) {
+        return;
+    }
+
+    // 使用窗口机制同步，优先有调用未同步和久未同步账号
+    const windowAccountIds = buildSyncWindowAccountIds(accountsData);
+    if (windowAccountIds.length === 0) return;
+
+    isSilentSyncRunning = true;
     try {
-        for (const account of accounts) {
-            try {
-                const syncResponse = await apiCall(`/accounts/${account.id}/sync`, { method: 'POST' });
-                if (syncResponse.success) {
-                    // 更新缓存
-                    analyticsCache[account.id] = {
-                        ...analyticsCache[account.id],
-                        today_tokens: syncResponse.current_used,
-                        today_runs: syncResponse.today_runs,
-                        total_tokens: syncResponse.total_tokens
-                    };
-                    // 更新账号数据中的 daily_used
-                    const acc = accountsData.find(a => a.id === account.id);
-                    if (acc) {
-                        acc.daily_used = syncResponse.current_used;
-                        acc.last_sync_at = new Date().toISOString();
-                    }
-                }
-            } catch (e) {
-                // 静默失败
-            }
-        }
-        
+        await batchSyncAccounts(
+            windowAccountIds,
+            { days: 30, maxConcurrency: AUTO_SYNC_MAX_CONCURRENCY }
+        );
+
         // 直接重新渲染表格，不重新请求 API
         renderMonitorTable(accountsData);
         updateLastSyncTime();
@@ -391,6 +517,8 @@ async function syncAllAccountsSilent() {
         document.getElementById('stat-today-tokens').textContent = formatNumber(totalTodayTokens);
     } catch (error) {
         // 静默失败
+    } finally {
+        isSilentSyncRunning = false;
     }
 }
 
@@ -413,23 +541,15 @@ async function loadMonitorTable() {
         
         // 为有 Private API Key 的账户获取分析数据
         const accountsWithKey = accounts.filter(a => a.has_private_key);
-        for (const account of accountsWithKey) {
+        if (accountsWithKey.length > 0) {
             try {
-                const syncResponse = await apiCall(`/accounts/${account.id}/sync`, { method: 'POST' });
-                if (syncResponse.success) {
-                    analyticsCache[account.id] = {
-                        today_tokens: syncResponse.current_used,
-                        today_runs: syncResponse.today_runs,
-                        total_tokens: syncResponse.total_tokens
-                    };
-                    // 更新账号数据
-                    const acc = accountsData.find(a => a.id === account.id);
-                    if (acc) {
-                        acc.daily_used = syncResponse.current_used;
-                    }
-                }
+                const initialWindowIds = buildSyncWindowAccountIds(accountsWithKey);
+                await batchSyncAccounts(
+                    initialWindowIds,
+                    { days: 30, maxConcurrency: MANUAL_SYNC_MAX_CONCURRENCY }
+                );
             } catch (e) {
-                console.error(`同步账号 ${account.name} 失败:`, e);
+                console.error('批量同步账号失败:', e);
             }
         }
         
@@ -619,43 +739,55 @@ function updateMonitorRow(accountId) {
 }
 
 async function syncAllAccounts() {
+    if (isManualSyncRunning || isSilentSyncRunning) {
+        showToast('正在同步中，请稍候', 'warning');
+        return;
+    }
+
     const btn = document.getElementById('sync-all-btn');
     const icon = btn.querySelector('.sync-icon');
     btn.disabled = true;
     if (icon) icon.classList.add('spinning');
+    isManualSyncRunning = true;
     
     try {
         const response = await apiCall('/accounts');
-        const accounts = (response.accounts || []).filter(a => a.has_private_key);
+        accountsData = response.accounts || [];
+        const accounts = accountsData.filter(a => a.has_private_key);
         
         if (accounts.length === 0) {
             showToast('没有配置 Private API Key 的账号', 'warning');
             return;
         }
-        
-        let successCount = 0;
-        for (const account of accounts) {
-            try {
-                const syncResponse = await apiCall(`/accounts/${account.id}/sync`, { method: 'POST' });
-                if (syncResponse.success) {
-                    analyticsCache[account.id] = {
-                        today_tokens: syncResponse.current_used,
-                        today_runs: syncResponse.today_runs,
-                        total_tokens: syncResponse.total_tokens
-                    };
-                    successCount++;
-                }
-            } catch (e) {
-                console.error(`同步账号 ${account.name} 失败:`, e);
-            }
-        }
-        
-        // 重新加载表格
-        await loadMonitorTable();
-        showToast(`同步完成: ${successCount}/${accounts.length}`, 'success');
+
+        const syncResponse = await batchSyncAccounts(
+            accounts.map(account => account.id),
+            { days: 30, maxConcurrency: MANUAL_SYNC_MAX_CONCURRENCY }
+        );
+
+        // 重新渲染表格和统计
+        renderMonitorTable(accountsData);
+        updateLastSyncTime();
+
+        const uniqueOrgIds = new Set(accountsData.filter(a => a.status === 'active').map(a => a.org_id));
+        let totalTodayTokens = 0;
+        accountsData.forEach(account => {
+            const analytics = analyticsCache[account.id];
+            totalTodayTokens += analytics?.today_tokens ?? account.daily_used;
+        });
+        await updateDashboardStats(uniqueOrgIds.size, totalTodayTokens);
+
+        const syncedCount = syncResponse.synced_count || 0;
+        const failedCount = syncResponse.failed_count || 0;
+        const skippedCount = syncResponse.skipped_count || 0;
+        showToast(
+            `同步完成: 成功 ${syncedCount}，失败 ${failedCount}，跳过 ${skippedCount}`,
+            failedCount > 0 ? 'warning' : 'success'
+        );
     } catch (error) {
         showToast('同步失败: ' + error.message, 'error');
     } finally {
+        isManualSyncRunning = false;
         btn.disabled = false;
         if (icon) icon.classList.remove('spinning');
     }
@@ -842,29 +974,30 @@ async function bulkSetAccountStatus(newStatus) {
         : `确定要一键启用当前筛选结果中的 ${targetAccounts.length} 个账号吗？`;
     
     showConfirmModal(confirmMsg, async () => {
-        let successCount = 0;
-        let failureCount = 0;
-        
-        for (const account of targetAccounts) {
-            try {
-                await apiCall(`/accounts/${account.id}`, {
-                    method: 'PUT',
-                    body: JSON.stringify({ status: newStatus })
-                });
-                successCount++;
-            } catch (error) {
-                console.error(`${actionText}账号失败: ${account.name}`, error);
-                failureCount++;
+        try {
+            const response = await apiCall('/accounts/batch/status', {
+                method: 'POST',
+                body: JSON.stringify({
+                    account_ids: targetAccounts.map(account => account.id),
+                    status: newStatus
+                })
+            });
+
+            const successCount = response.updated_count || 0;
+            const failureCount = response.not_found_count || 0;
+            if (successCount > 0) {
+                showToast(
+                    `已${actionText} ${successCount} 个账号${failureCount > 0 ? `，失败 ${failureCount} 个` : ''}`,
+                    failureCount > 0 ? 'warning' : 'success'
+                );
+            } else {
+                showToast(`${actionText}失败`, 'error');
             }
-        }
-        
-        if (successCount > 0) {
-            showToast(`已${actionText} ${successCount} 个账号${failureCount > 0 ? `，失败 ${failureCount} 个` : ''}`, failureCount > 0 ? 'warning' : 'success');
             await loadAccounts();
-            return;
+        } catch (error) {
+            console.error(`批量${actionText}失败:`, error);
+            showToast(`${actionText}失败: ` + error.message, 'error');
         }
-        
-        showToast(`${actionText}失败`, 'error');
     });
 }
 
@@ -879,26 +1012,29 @@ function bulkDeleteAccounts() {
     showConfirmModal(
         `确定要一键删除当前筛选结果中的 ${filteredAccounts.length} 个账号吗？\n\n此操作不可恢复。`,
         async () => {
-            let successCount = 0;
-            let failureCount = 0;
-            
-            for (const account of filteredAccounts) {
-                try {
-                    await apiCall(`/accounts/${account.id}`, { method: 'DELETE' });
-                    successCount++;
-                } catch (error) {
-                    console.error(`删除账号失败: ${account.name}`, error);
-                    failureCount++;
+            try {
+                const response = await apiCall('/accounts/batch/delete', {
+                    method: 'POST',
+                    body: JSON.stringify({
+                        account_ids: filteredAccounts.map(account => account.id)
+                    })
+                });
+
+                const successCount = response.deleted_count || 0;
+                const failureCount = response.not_found_count || 0;
+                if (successCount > 0) {
+                    showToast(
+                        `已删除 ${successCount} 个账号${failureCount > 0 ? `，失败 ${failureCount} 个` : ''}`,
+                        failureCount > 0 ? 'warning' : 'success'
+                    );
+                } else {
+                    showToast('删除失败', 'error');
                 }
-            }
-            
-            if (successCount > 0) {
-                showToast(`已删除 ${successCount} 个账号${failureCount > 0 ? `，失败 ${failureCount} 个` : ''}`, failureCount > 0 ? 'warning' : 'success');
                 await loadAccounts();
-                return;
+            } catch (error) {
+                console.error('批量删除账号失败:', error);
+                showToast('删除失败: ' + error.message, 'error');
             }
-            
-            showToast('删除失败', 'error');
         }
     );
 }
@@ -906,7 +1042,6 @@ function bulkDeleteAccounts() {
 // ==================== 批量导入账号 ====================
 
 let importData = []; // 存储待导入的数据
-const AUTO_GROUP_INPUT_MAPPING = { user_input: 'in-0', model_id: 'in-1' };
 
 function parseImportJsonData(rawText) {
     const jsonText = (rawText || '').replace(/^\uFEFF/, '').trim();
@@ -1092,42 +1227,6 @@ function resolveImportModelGroups(item, defaultModelGroup, index) {
 
 function buildImportAccountKey(orgId, flowId) {
     return `${orgId}:::${flowId}`;
-}
-
-async function ensureImportModelGroup(modelGroupName) {
-    if (!modelGroupName) {
-        throw new Error('模型组名称为空');
-    }
-    
-    if (groupsData.some(group => group.name === modelGroupName)) {
-        return false;
-    }
-    
-    try {
-        await apiCall('/groups', {
-            method: 'POST',
-            body: JSON.stringify({
-                name: modelGroupName,
-                description: 'Auto created from batch import',
-                input_mapping: AUTO_GROUP_INPUT_MAPPING
-            })
-        });
-        
-        groupsData.push({
-            name: modelGroupName,
-            description: 'Auto created from batch import',
-            input_mapping: AUTO_GROUP_INPUT_MAPPING
-        });
-        return true;
-    } catch (error) {
-        if (error.message && error.message.includes('already exists')) {
-            if (!groupsData.some(group => group.name === modelGroupName)) {
-                groupsData.push({ name: modelGroupName });
-            }
-            return false;
-        }
-        throw new Error(`自动创建模型组 "${modelGroupName}" 失败: ${error.message}`);
-    }
 }
 
 function showImportAccountsModal() {
@@ -1390,41 +1489,27 @@ async function handleImportSubmit(e) {
     const dailyQuota = parseInt(document.getElementById('import-daily-quota').value) || 1000000;
     const submitBtn = document.getElementById('import-submit-btn');
     
-    // 过滤掉重复的
-    const toImport = importData.filter(d => !d.isDuplicate);
+    // 过滤掉重复的，并保留原始索引
+    const toImportEntries = importData
+        .map((item, index) => ({ item, index }))
+        .filter(entry => !entry.item.isDuplicate);
     
-    if (toImport.length === 0) {
+    if (toImportEntries.length === 0) {
         showToast('没有可导入的数据', 'warning');
         return;
     }
     
     submitBtn.disabled = true;
     submitBtn.innerHTML = '<span class="spinner-sm"></span> 导入中...';
-    
-    let successCount = 0;
-    let failCount = 0;
-    let createdGroupCount = 0;
-    const ensuredGroups = new Set();
-    
-    for (let i = 0; i < toImport.length; i++) {
-        const item = toImport[i];
-        const index = importData.indexOf(item);
-        const statusEl = document.getElementById(`import-status-${index}`);
-        
-        try {
-            for (const modelGroup of (item.model_groups || [item.model_group])) {
-                if (!ensuredGroups.has(modelGroup)) {
-                    const created = await ensureImportModelGroup(modelGroup);
-                    ensuredGroups.add(modelGroup);
-                    if (created) {
-                        createdGroupCount++;
-                    }
-                }
-            }
-            
-            await apiCall('/accounts', {
-                method: 'POST',
-                body: JSON.stringify({
+
+    try {
+        const response = await apiCall('/accounts/batch/import', {
+            method: 'POST',
+            body: JSON.stringify({
+                daily_quota: dailyQuota,
+                skip_existing: true,
+                auto_create_groups: true,
+                accounts: toImportEntries.map(({ item }) => ({
                     name: item.name,
                     org_id: item.org_id,
                     flow_id: item.flow_id,
@@ -1433,44 +1518,72 @@ async function handleImportSubmit(e) {
                     model_group: item.model_group,
                     model_groups: item.model_groups || [item.model_group],
                     daily_quota: dailyQuota
-                })
-            });
-            
-            item.status = 'success';
-            if (statusEl) {
-                statusEl.innerHTML = '✅ 成功';
-                statusEl.className = 'item-status success';
+                }))
+            })
+        });
+
+        const backendResults = Array.isArray(response.results) ? response.results : [];
+        backendResults.forEach(result => {
+            const requestIndex = Number(result.index);
+            if (!Number.isInteger(requestIndex) || requestIndex < 0 || requestIndex >= toImportEntries.length) {
+                return;
             }
-            successCount++;
-        } catch (error) {
+
+            const targetEntry = toImportEntries[requestIndex];
+            const item = targetEntry.item;
+            const statusEl = document.getElementById(`import-status-${targetEntry.index}`);
+
+            if (result.status === 'created') {
+                item.status = 'success';
+                if (statusEl) {
+                    statusEl.innerHTML = '✅ 成功';
+                    statusEl.className = 'item-status success';
+                }
+                return;
+            }
+
+            if (result.status === 'skipped_existing' || result.status === 'skipped_duplicate') {
+                item.status = 'duplicate';
+                if (statusEl) {
+                    statusEl.innerHTML = '⚠️ 跳过';
+                    statusEl.className = 'item-status duplicate';
+                }
+                return;
+            }
+
             item.status = 'error';
             if (statusEl) {
                 statusEl.innerHTML = '❌ 失败';
                 statusEl.className = 'item-status error';
             }
-            failCount++;
-            console.error(`导入失败 [${item.name} / ${(item.model_groups || [item.model_group]).join(', ')}]:`, error);
+        });
+
+        const successCount = response.created_count || 0;
+        const skipCount = (response.skipped_existing_count || 0) + (response.skipped_duplicate_count || 0);
+        const failCount = response.failed_count || 0;
+        const createdGroupCount = response.created_group_count || 0;
+
+        if (createdGroupCount > 0) {
+            groupsData = [];
+            await loadGroupsForImportSelect();
+            await loadGroupsForSelect();
         }
-    }
-    
-    submitBtn.innerHTML = '导入';
-    submitBtn.disabled = false;
-    
-    if (createdGroupCount > 0) {
-        groupsData = [];
-        await loadGroupsForImportSelect();
-        await loadGroupsForSelect();
-    }
-    
-    // 显示结果
-    const createGroupTips = createdGroupCount > 0 ? `，自动创建模型组 ${createdGroupCount} 个` : '';
-    if (failCount === 0) {
-        showToast(`成功导入 ${successCount} 个账号${createGroupTips}`, 'success');
-        closeModal('import-accounts-modal');
-        loadAccounts();
-    } else {
-        showToast(`导入完成: ${successCount} 成功, ${failCount} 失败${createGroupTips}`, 'warning');
-        loadAccounts();
+
+        const createGroupTips = createdGroupCount > 0 ? `，自动创建模型组 ${createdGroupCount} 个` : '';
+        if (failCount === 0) {
+            const skipTips = skipCount > 0 ? `，跳过 ${skipCount} 个` : '';
+            showToast(`成功导入 ${successCount} 个账号${skipTips}${createGroupTips}`, 'success');
+            closeModal('import-accounts-modal');
+        } else {
+            showToast(`导入完成: ${successCount} 成功, ${failCount} 失败${skipCount > 0 ? `，跳过 ${skipCount}` : ''}${createGroupTips}`, 'warning');
+        }
+        await loadAccounts();
+    } catch (error) {
+        console.error('批量导入失败:', error);
+        showToast('导入失败: ' + error.message, 'error');
+    } finally {
+        submitBtn.innerHTML = '导入';
+        submitBtn.disabled = false;
     }
 }
 

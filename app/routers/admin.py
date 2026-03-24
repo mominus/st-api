@@ -5,10 +5,13 @@ Admin API Router
 Requirements: 4.1, 4.2, 4.3, 4.4, 4.5, 4.6, 4.7, 4.8, 5.1, 5.4, 5.5, 5.6, 6.1, 6.5, 3.2, 3.3
 """
 
+import asyncio
 import json
 import logging
+import time
+import uuid
 from datetime import datetime
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 
 from fastapi import APIRouter, Request, Depends, Header, HTTPException, Query
 from fastapi.responses import JSONResponse
@@ -92,6 +95,44 @@ class UpdateAccountRequest(BaseModel):
     private_api_key: Optional[str] = None
 
 
+class BatchImportAccountItem(BaseModel):
+    """批量导入账号项"""
+    name: Optional[str] = Field(None, description="账号名称")
+    org_id: str = Field(..., description="组织 ID")
+    flow_id: str = Field(..., description="工作流 ID")
+    api_key: str = Field(..., description="API Key")
+    model_group: Optional[str] = Field(None, description="主模型组（兼容旧字段）")
+    model_groups: Optional[List[str]] = Field(None, description="可路由模型组列表")
+    daily_quota: Optional[int] = Field(None, description="账号级每日配额，优先于批量默认值")
+    private_api_key: Optional[str] = Field(None, description="Private API Key（可选）")
+
+
+class BatchImportAccountsRequest(BaseModel):
+    """批量导入账号请求"""
+    accounts: List[BatchImportAccountItem] = Field(..., description="待导入账号列表")
+    daily_quota: int = Field(default=1000000, ge=0, description="默认每日配额")
+    skip_existing: bool = Field(default=True, description="是否跳过已存在账号（按 org_id + flow_id）")
+    auto_create_groups: bool = Field(default=True, description="是否自动创建缺失模型组")
+
+
+class BatchSetAccountStatusRequest(BaseModel):
+    """批量设置账号状态请求"""
+    account_ids: List[str] = Field(..., description="账号 ID 列表")
+    status: str = Field(..., description="目标状态（active/disabled）")
+
+
+class BatchDeleteAccountsRequest(BaseModel):
+    """批量删除账号请求"""
+    account_ids: List[str] = Field(..., description="账号 ID 列表")
+
+
+class BatchSyncAccountsRequest(BaseModel):
+    """批量同步账号使用量请求"""
+    account_ids: Optional[List[str]] = Field(None, description="账号 ID 列表，空则同步所有账号")
+    days: int = Field(default=30, ge=1, le=30, description="统计天数")
+    max_concurrency: int = Field(default=10, ge=1, le=100, description="同步并发上限")
+
+
 # Model Group Models
 class CreateModelGroupRequest(BaseModel):
     """创建模型组请求"""
@@ -163,6 +204,58 @@ def normalize_model_groups(
             result = [primary] + result
 
     return result
+
+
+AUTO_IMPORT_GROUP_INPUT_MAPPING = {"user_input": "in-0", "model_id": "in-1"}
+MAX_ACCOUNT_BATCH_SIZE = 5000
+
+
+def chunk_values(values: List[str], chunk_size: int = 500) -> List[List[str]]:
+    """按固定大小切片，避免 SQLite 变量数量限制。"""
+    if chunk_size <= 0:
+        return [values]
+    return [values[i:i + chunk_size] for i in range(0, len(values), chunk_size)]
+
+
+async def ensure_model_groups_exist(
+    session: AsyncSession,
+    model_groups: List[str]
+) -> List[str]:
+    """确保模型组存在，返回本次新建的模型组名称列表。"""
+    normalized = []
+    seen = set()
+    for item in model_groups or []:
+        name = str(item or "").strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        normalized.append(name)
+
+    if not normalized:
+        return []
+
+    existing = set()
+    for chunk in chunk_values(normalized):
+        result = await session.execute(
+            select(ModelGroup.name).where(ModelGroup.name.in_(chunk))
+        )
+        existing.update(row[0] for row in result.fetchall())
+    missing = [name for name in normalized if name not in existing]
+
+    now = datetime.utcnow()
+    for name in missing:
+        session.add(ModelGroup(
+            id=str(uuid.uuid4()),
+            name=name,
+            description="Auto created from batch import",
+            input_mapping=json.dumps(AUTO_IMPORT_GROUP_INPUT_MAPPING),
+            created_at=now
+        ))
+
+    if missing:
+        await session.flush()
+
+    return missing
 
 
 async def verify_admin_token(
@@ -542,6 +635,422 @@ async def create_account(
         # 其他异常，不暴露详细信息
         logger.error(f"Failed to create account: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to create account")
+
+
+@router.post("/accounts/batch/import")
+async def batch_import_accounts(
+    request: BatchImportAccountsRequest,
+    admin: dict = Depends(verify_admin_token),
+    session: AsyncSession = Depends(get_session)
+):
+    """
+    批量导入账号（后端批处理，单次请求/单事务）。
+    """
+    account_pool = get_account_pool_service()
+
+    total = len(request.accounts or [])
+    if total == 0:
+        raise HTTPException(status_code=400, detail="accounts cannot be empty")
+    if total > MAX_ACCOUNT_BATCH_SIZE:
+        raise HTTPException(
+            status_code=400,
+            detail=f"batch size exceeds limit: {MAX_ACCOUNT_BATCH_SIZE}"
+        )
+
+    pending_items: List[Dict[str, Any]] = []
+    results: List[Dict[str, Any]] = []
+    payload_keys = set()
+
+    for index, raw_item in enumerate(request.accounts):
+        org_id = str(raw_item.org_id or "").strip()
+        flow_id = str(raw_item.flow_id or "").strip()
+        api_key = str(raw_item.api_key or "").strip()
+        name = str(raw_item.name or "").strip()
+        private_api_key = (
+            str(raw_item.private_api_key).strip()
+            if raw_item.private_api_key is not None
+            else None
+        )
+
+        if not org_id or not flow_id or not api_key:
+            results.append({
+                "index": index,
+                "status": "invalid",
+                "message": "org_id / flow_id / api_key are required"
+            })
+            continue
+
+        if not name:
+            name = f"账号_{org_id[:8]}"
+
+        model_groups = normalize_model_groups(
+            model_group=raw_item.model_group,
+            model_groups=raw_item.model_groups
+        )
+        if not model_groups:
+            results.append({
+                "index": index,
+                "status": "invalid",
+                "message": "model_group or model_groups is required"
+            })
+            continue
+
+        account_key = (org_id, flow_id)
+        if account_key in payload_keys:
+            results.append({
+                "index": index,
+                "status": "skipped_duplicate",
+                "message": "duplicate org_id + flow_id in request payload"
+            })
+            continue
+        payload_keys.add(account_key)
+
+        pending_items.append({
+            "index": index,
+            "org_id": org_id,
+            "flow_id": flow_id,
+            "api_key": api_key,
+            "private_api_key": private_api_key if private_api_key else None,
+            "name": name,
+            "model_group": model_groups[0],
+            "model_groups": model_groups,
+            "daily_quota": raw_item.daily_quota
+            if raw_item.daily_quota is not None
+            else request.daily_quota,
+            "account_key": account_key
+        })
+
+    existing_keys = set()
+    if request.skip_existing and pending_items:
+        org_ids = list({item["org_id"] for item in pending_items})
+        for chunk in chunk_values(org_ids):
+            existing_result = await session.execute(
+                select(BackendAccount.org_id, BackendAccount.flow_id).where(
+                    BackendAccount.org_id.in_(chunk)
+                )
+            )
+            existing_keys.update((row[0], row[1]) for row in existing_result.fetchall())
+
+    create_items: List[Dict[str, Any]] = []
+    for item in pending_items:
+        if request.skip_existing and item["account_key"] in existing_keys:
+            results.append({
+                "index": item["index"],
+                "status": "skipped_existing",
+                "message": "account with same org_id + flow_id already exists"
+            })
+            continue
+        create_items.append(item)
+
+    created_groups: List[str] = []
+    if request.auto_create_groups and create_items:
+        all_groups: List[str] = []
+        for item in create_items:
+            all_groups.extend(item["model_groups"])
+        created_groups = await ensure_model_groups_exist(session, all_groups)
+
+    created_accounts = []
+    if create_items:
+        created_accounts = await account_pool.create_accounts_bulk(
+            session=session,
+            accounts_data=[{
+                "name": item["name"],
+                "org_id": item["org_id"],
+                "flow_id": item["flow_id"],
+                "api_key": item["api_key"],
+                "private_api_key": item["private_api_key"],
+                "model_group": item["model_group"],
+                "model_groups": item["model_groups"],
+                "daily_quota": item["daily_quota"]
+            } for item in create_items]
+        )
+
+    await session.commit()
+
+    created_id_by_key = {
+        (acc.org_id, acc.flow_id): acc.id for acc in created_accounts
+    }
+    for item in create_items:
+        account_id = created_id_by_key.get(item["account_key"])
+        results.append({
+            "index": item["index"],
+            "status": "created",
+            "message": "created",
+            "account_id": account_id
+        })
+
+    ordered_results = sorted(results, key=lambda x: x["index"])
+    created_count = sum(1 for item in ordered_results if item["status"] == "created")
+    skipped_existing_count = sum(
+        1 for item in ordered_results if item["status"] == "skipped_existing"
+    )
+    skipped_duplicate_count = sum(
+        1 for item in ordered_results if item["status"] == "skipped_duplicate"
+    )
+    invalid_count = sum(1 for item in ordered_results if item["status"] == "invalid")
+
+    logger.info(
+        f"Batch import accounts by {admin.get('username')}: total={total}, "
+        f"created={created_count}, skipped_existing={skipped_existing_count}, "
+        f"skipped_duplicate={skipped_duplicate_count}, invalid={invalid_count}, "
+        f"created_groups={len(created_groups)}"
+    )
+
+    return {
+        "success": True,
+        "message": "Batch import completed",
+        "total": total,
+        "created_count": created_count,
+        "skipped_existing_count": skipped_existing_count,
+        "skipped_duplicate_count": skipped_duplicate_count,
+        "failed_count": invalid_count,
+        "created_group_count": len(created_groups),
+        "created_groups": created_groups,
+        "results": ordered_results
+    }
+
+
+@router.post("/accounts/batch/status")
+async def batch_set_account_status(
+    request: BatchSetAccountStatusRequest,
+    admin: dict = Depends(verify_admin_token),
+    session: AsyncSession = Depends(get_session)
+):
+    """
+    批量设置账号状态（启用/禁用）。
+    """
+    status = str(request.status or "").strip().lower()
+    if status not in {"active", "disabled"}:
+        raise HTTPException(status_code=400, detail="status must be active or disabled")
+    if not request.account_ids:
+        raise HTTPException(status_code=400, detail="account_ids cannot be empty")
+
+    account_pool = get_account_pool_service()
+    result = await account_pool.bulk_update_account_status(
+        session=session,
+        account_ids=request.account_ids,
+        status=status
+    )
+    await session.commit()
+
+    not_found_ids = result["not_found_ids"]
+    updated_count = result["updated_count"]
+    logger.info(
+        f"Batch set account status by {admin.get('username')}: "
+        f"status={status}, updated={updated_count}, not_found={len(not_found_ids)}"
+    )
+
+    return {
+        "success": True,
+        "message": "Batch status update completed",
+        "status": status,
+        "updated_count": updated_count,
+        "not_found_count": len(not_found_ids),
+        "not_found_ids": not_found_ids
+    }
+
+
+@router.post("/accounts/batch/delete")
+async def batch_delete_accounts(
+    request: BatchDeleteAccountsRequest,
+    admin: dict = Depends(verify_admin_token),
+    session: AsyncSession = Depends(get_session)
+):
+    """
+    批量删除账号。
+    """
+    if not request.account_ids:
+        raise HTTPException(status_code=400, detail="account_ids cannot be empty")
+
+    account_pool = get_account_pool_service()
+    result = await account_pool.bulk_delete_accounts(
+        session=session,
+        account_ids=request.account_ids
+    )
+    await session.commit()
+
+    not_found_ids = result["not_found_ids"]
+    deleted_count = result["deleted_count"]
+    logger.info(
+        f"Batch deleted accounts by {admin.get('username')}: "
+        f"deleted={deleted_count}, not_found={len(not_found_ids)}"
+    )
+
+    return {
+        "success": True,
+        "message": "Batch delete completed",
+        "deleted_count": deleted_count,
+        "not_found_count": len(not_found_ids),
+        "not_found_ids": not_found_ids
+    }
+
+
+@router.post("/accounts/batch/sync")
+async def batch_sync_account_usage(
+    request: BatchSyncAccountsRequest,
+    admin: dict = Depends(verify_admin_token),
+    session: AsyncSession = Depends(get_session)
+):
+    """
+    批量同步账号今日使用量（后端并发执行）。
+    """
+    started_at = time.perf_counter()
+    account_pool = get_account_pool_service()
+    analytics_service = get_analytics_service()
+
+    requested_ids: Optional[List[str]] = None
+    not_found_ids: List[str] = []
+
+    if request.account_ids is not None:
+        requested_ids = [
+            str(x).strip()
+            for x in dict.fromkeys(request.account_ids)
+            if str(x).strip()
+        ]
+        if not requested_ids:
+            raise HTTPException(status_code=400, detail="account_ids cannot be empty")
+        if len(requested_ids) > MAX_ACCOUNT_BATCH_SIZE:
+            raise HTTPException(
+                status_code=400,
+                detail=f"batch size exceeds limit: {MAX_ACCOUNT_BATCH_SIZE}"
+            )
+
+    if requested_ids is None:
+        result = await session.execute(select(BackendAccount))
+        accounts = list(result.scalars().all())
+    else:
+        account_by_id: Dict[str, BackendAccount] = {}
+        for chunk in chunk_values(requested_ids):
+            result = await session.execute(
+                select(BackendAccount).where(BackendAccount.id.in_(chunk))
+            )
+            for account in result.scalars().all():
+                account_by_id[account.id] = account
+        accounts = [account_by_id[acc_id] for acc_id in requested_ids if acc_id in account_by_id]
+        not_found_ids = [acc_id for acc_id in requested_ids if acc_id not in account_by_id]
+
+    candidates: List[Dict[str, Any]] = []
+    results: List[Dict[str, Any]] = []
+
+    for account in accounts:
+        try:
+            private_key = account_pool.decrypt_private_api_key(account)
+        except Exception:
+            results.append({
+                "account_id": account.id,
+                "account_name": account.name,
+                "status": "failed",
+                "message": "failed to decrypt private_api_key"
+            })
+            continue
+
+        if not private_key:
+            results.append({
+                "account_id": account.id,
+                "account_name": account.name,
+                "status": "skipped_no_private_key",
+                "message": "private_api_key not configured"
+            })
+            continue
+
+        candidates.append({
+            "account": account,
+            "private_key": private_key
+        })
+
+    semaphore = asyncio.Semaphore(request.max_concurrency)
+
+    async def fetch_stats(item: Dict[str, Any]):
+        account = item["account"]
+        private_key = item["private_key"]
+        async with semaphore:
+            stats = await analytics_service.get_recent_stats(
+                org_id=account.org_id,
+                flow_id=account.flow_id,
+                private_api_key=private_key,
+                days=request.days
+            )
+            return account.id, stats
+
+    sync_outputs = await asyncio.gather(
+        *(fetch_stats(item) for item in candidates),
+        return_exceptions=True
+    )
+
+    now = datetime.utcnow()
+    synced_count = 0
+
+    for idx, output in enumerate(sync_outputs):
+        account = candidates[idx]["account"]
+
+        if isinstance(output, Exception):
+            results.append({
+                "account_id": account.id,
+                "account_name": account.name,
+                "status": "failed",
+                "message": f"sync failed: {output}"
+            })
+            continue
+
+        _, stats = output
+        if stats is None:
+            results.append({
+                "account_id": account.id,
+                "account_name": account.name,
+                "status": "failed",
+                "message": "failed to fetch analytics"
+            })
+            continue
+
+        old_used = account.daily_used
+        account.daily_used = stats.today_tokens
+        account.last_sync_at = now
+
+        if account.daily_used >= account.daily_quota:
+            account.status = "exhausted"
+        elif account.status == "exhausted":
+            account.status = "active"
+
+        synced_count += 1
+        results.append({
+            "account_id": account.id,
+            "account_name": account.name,
+            "status": "synced",
+            "previous_used": old_used,
+            "current_used": account.daily_used,
+            "today_runs": stats.today_runs,
+            "total_tokens": stats.total_tokens,
+            "account_status": account.status,
+            "last_sync_at": account.last_sync_at.isoformat() if account.last_sync_at else None
+        })
+
+    await session.commit()
+
+    failed_count = sum(1 for item in results if item["status"] == "failed")
+    skipped_count = sum(1 for item in results if item["status"].startswith("skipped"))
+    duration_ms = int((time.perf_counter() - started_at) * 1000)
+
+    logger.info(
+        f"Batch synced accounts by {admin.get('username')}: "
+        f"requested={len(requested_ids) if requested_ids is not None else 'all'}, "
+        f"target={len(accounts)}, synced={synced_count}, failed={failed_count}, "
+        f"skipped={skipped_count}, not_found={len(not_found_ids)}, "
+        f"days={request.days}, max_concurrency={request.max_concurrency}, "
+        f"duration_ms={duration_ms}"
+    )
+
+    return {
+        "success": True,
+        "message": "Batch sync completed",
+        "target_count": len(accounts),
+        "synced_count": synced_count,
+        "failed_count": failed_count,
+        "skipped_count": skipped_count,
+        "not_found_count": len(not_found_ids),
+        "not_found_ids": not_found_ids,
+        "duration_ms": duration_ms,
+        "results": results
+    }
 
 
 @router.put("/accounts/{account_id}")

@@ -29,6 +29,9 @@ import logging
 # 配置日志
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+# 降低第三方 HTTP 客户端日志噪音
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 
 # 从环境变量获取隐藏的后台路径，默认生成随机路径
@@ -122,7 +125,14 @@ async def log_requests(request: Request, call_next):
     from app.services.connection_pool import get_concurrency_limiter
     
     path = request.url.path
-    logger.info(f"[REQUEST] {request.method} {path}")
+    # 仅记录 API 请求，降低静态资源和页面请求日志噪音
+    if (
+        path.startswith("/api/") or
+        path.startswith("/v1") or
+        path.startswith("/anthropic/") or
+        path.startswith("/gemini/")
+    ):
+        logger.info(f"[REQUEST] {request.method} {path}")
     
     # 只统计 API 请求（排除静态文件和管理后台）
     should_track = (

@@ -34,6 +34,13 @@ class AccountPoolService:
         """初始化账号池服务"""
         # 轮询索引，按模型组分别维护
         self._round_robin_index: Dict[str, int] = defaultdict(int)
+
+    @staticmethod
+    def _chunked(values: List[str], chunk_size: int = 500) -> List[List[str]]:
+        """按固定大小切片，避免 SQLite 变量数量限制。"""
+        if chunk_size <= 0:
+            return [values]
+        return [values[i:i + chunk_size] for i in range(0, len(values), chunk_size)]
     
     # ==================== CRUD Operations ====================
     # Requirements: 2.1, 2.2
@@ -104,6 +111,105 @@ class AccountPoolService:
             f"Created account: {account.id} ({name}) with models={normalized_groups}"
         )
         return account
+
+    async def create_accounts_bulk(
+        self,
+        session: AsyncSession,
+        accounts_data: List[Dict[str, Any]]
+    ) -> List[BackendAccount]:
+        """
+        批量创建账号（单事务、单次 flush）。
+
+        Args:
+            session: 数据库会话
+            accounts_data: 账号数据列表
+
+        Returns:
+            创建的账号列表
+        """
+        if not accounts_data:
+            return []
+
+        crypto = get_crypto_service()
+        now = datetime.utcnow()
+        accounts: List[BackendAccount] = []
+        routes: List[AccountModelRoute] = []
+
+        for item in accounts_data:
+            name = str(item.get("name") or "").strip()
+            org_id = str(item.get("org_id") or "").strip()
+            flow_id = str(item.get("flow_id") or "").strip()
+            api_key = str(item.get("api_key") or "").strip()
+            private_api_key_raw = item.get("private_api_key")
+            private_api_key = (
+                str(private_api_key_raw).strip()
+                if private_api_key_raw is not None
+                else None
+            )
+            daily_quota = int(item.get("daily_quota") or 1000000)
+
+            normalized_groups = self._normalize_model_names(
+                item.get("model_groups") or []
+            )
+            primary_group = str(item.get("model_group") or "").strip()
+            if primary_group:
+                normalized_groups = [primary_group] + [
+                    m for m in normalized_groups if m != primary_group
+                ]
+
+            if not name:
+                raise ValueError("name is required")
+            if not org_id:
+                raise ValueError("org_id is required")
+            if not flow_id:
+                raise ValueError("flow_id is required")
+            if not api_key:
+                raise ValueError("api_key is required")
+            if not normalized_groups:
+                raise ValueError("model_group or model_groups is required")
+
+            account_id = str(uuid.uuid4())
+            encrypted_key = crypto.encrypt(api_key)
+            encrypted_private_key = (
+                crypto.encrypt(private_api_key) if private_api_key else None
+            )
+
+            account = BackendAccount(
+                id=account_id,
+                name=name,
+                org_id=org_id,
+                flow_id=flow_id,
+                api_key_encrypted=encrypted_key,
+                private_api_key_encrypted=encrypted_private_key,
+                model_group=normalized_groups[0],
+                daily_quota=daily_quota,
+                daily_used=0,
+                status="active",
+                created_at=now,
+                updated_at=now,
+            )
+            accounts.append(account)
+
+            for idx, model_name in enumerate(normalized_groups):
+                routes.append(
+                    AccountModelRoute(
+                        id=str(uuid.uuid4()),
+                        account_id=account_id,
+                        model_name=model_name,
+                        enabled=True,
+                        weight=100,
+                        priority=idx,
+                        created_at=now,
+                        updated_at=now,
+                    )
+                )
+
+        session.add_all(accounts)
+        session.add_all(routes)
+        await session.flush()
+
+        logger.info(f"Bulk created {len(accounts)} accounts")
+        return accounts
 
     async def get_account(
         self,
@@ -351,6 +457,95 @@ class AccountPoolService:
         
         logger.info(f"Deleted account: {account_id}")
         return True
+
+    async def bulk_update_account_status(
+        self,
+        session: AsyncSession,
+        account_ids: List[str],
+        status: str
+    ) -> Dict[str, Any]:
+        """
+        批量更新账号状态。
+
+        Args:
+            session: 数据库会话
+            account_ids: 账号 ID 列表
+            status: 目标状态（active / disabled）
+
+        Returns:
+            操作结果统计
+        """
+        unique_ids = [str(x).strip() for x in dict.fromkeys(account_ids or []) if str(x).strip()]
+        if not unique_ids:
+            return {"updated_count": 0, "not_found_ids": []}
+
+        accounts: List[STAccount] = []
+        found_ids = set()
+        for chunk in self._chunked(unique_ids):
+            result = await session.execute(
+                select(STAccount).where(STAccount.id.in_(chunk))
+            )
+            chunk_accounts = list(result.scalars().all())
+            accounts.extend(chunk_accounts)
+            found_ids.update(acc.id for acc in chunk_accounts)
+        now = datetime.utcnow()
+
+        for account in accounts:
+            account.status = status
+            account.updated_at = now
+
+        await session.flush()
+
+        not_found_ids = [acc_id for acc_id in unique_ids if acc_id not in found_ids]
+        logger.info(
+            f"Bulk updated account status: updated={len(accounts)}, "
+            f"status={status}, not_found={len(not_found_ids)}"
+        )
+        return {"updated_count": len(accounts), "not_found_ids": not_found_ids}
+
+    async def bulk_delete_accounts(
+        self,
+        session: AsyncSession,
+        account_ids: List[str]
+    ) -> Dict[str, Any]:
+        """
+        批量删除账号。
+
+        Args:
+            session: 数据库会话
+            account_ids: 账号 ID 列表
+
+        Returns:
+            操作结果统计
+        """
+        unique_ids = [str(x).strip() for x in dict.fromkeys(account_ids or []) if str(x).strip()]
+        if not unique_ids:
+            return {"deleted_count": 0, "not_found_ids": []}
+
+        found_ids: List[str] = []
+        for chunk in self._chunked(unique_ids):
+            result = await session.execute(
+                select(STAccount.id).where(STAccount.id.in_(chunk))
+            )
+            found_ids.extend(row[0] for row in result.fetchall())
+        found_id_set = set(found_ids)
+
+        if found_ids:
+            for chunk in self._chunked(found_ids):
+                await session.execute(
+                    delete(AccountModelRoute).where(AccountModelRoute.account_id.in_(chunk))
+                )
+            for chunk in self._chunked(found_ids):
+                await session.execute(
+                    delete(STAccount).where(STAccount.id.in_(chunk))
+                )
+            await session.flush()
+
+        not_found_ids = [acc_id for acc_id in unique_ids if acc_id not in found_id_set]
+        logger.info(
+            f"Bulk deleted accounts: deleted={len(found_ids)}, not_found={len(not_found_ids)}"
+        )
+        return {"deleted_count": len(found_ids), "not_found_ids": not_found_ids}
 
     # ==================== Round-Robin Load Balancing ====================
     # Requirements: 2.3, 2.4, 2.5

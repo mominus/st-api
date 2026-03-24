@@ -1155,7 +1155,16 @@ function normalizeClaudeModelName(rawName) {
     if (versionParts.length < 2) {
         return lowered;
     }
-    
+
+    // 兼容容量后缀，例如:
+    // - CLAUDE_SONNET_4_6_1m
+    // - CLAUDE_4_6_SONNET_1m
+    // 统一为: claude-sonnet-4-6-1m
+    const capacitySuffix = parts.find(part => /^\d+m$/.test(part));
+    if (capacitySuffix) {
+        return `claude-${series}-${versionParts[0]}-${versionParts[1]}-${capacitySuffix}`;
+    }
+
     return `claude-${series}-${versionParts[0]}-${versionParts[1]}`;
 }
 

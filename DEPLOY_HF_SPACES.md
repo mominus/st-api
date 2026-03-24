@@ -173,9 +173,10 @@ Settings → **Factory reboot**
 
 ### 更新代码
 ```bash
-git add .
-git commit -m "update"
-git push hf main
+git switch main #先切到 main，避免你在其他分支或 detached HEAD 上提交。
+git add -A       #暂存所在仓库所有变更
+git commit -m "feat/fix: ..."
+git push origin main
 ```
 
 ### 发布新版本（自动写更新日志 + 打 Tag + 推送）

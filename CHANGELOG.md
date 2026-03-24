@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
+## v1.1.1 - 2026-03-24
+
+- 单账号多模型路由(与v1.1.0版本一致)
+- 之前未提交功能代码，仅发布release
 ## v1.1.0 - 2026-03-24
 
 - 新增“单账号 + 多模型 + 模型注入”

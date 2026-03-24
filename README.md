@@ -75,6 +75,7 @@ Example response:
 | `ADMIN_USERNAME` | Admin username |
 | `ADMIN_PASSWORD` | Admin password |
 | `ADMIN_PATH` | Hidden admin panel path |
+| `PROXY_SHARED_SECRET` | Shared secret between Cloudflare Worker and source site (`x-proxy-secret` validation for `/v1/*` and `/v1beta/*`) |
 
 ## Release Management
 

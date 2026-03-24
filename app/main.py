@@ -36,6 +36,11 @@ logger = logging.getLogger(__name__)
 # 访问后台: https://your-domain.com/your-secret-path
 ADMIN_PATH = os.getenv("ADMIN_PATH", secrets.token_urlsafe(16))
 
+# Worker 代理共享密钥（可选）
+# 作用：当启用时，仅允许携带正确 x-proxy-secret 请求头的代理流量访问 API，
+# 防止外部直接绕过 Cloudflare Worker 访问源站。
+PROXY_SHARED_SECRET = os.getenv("PROXY_SHARED_SECRET")
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -83,6 +88,30 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# Worker 共享密钥校验中间件
+@app.middleware("http")
+async def verify_worker_proxy_secret(request: Request, call_next):
+    """校验 Worker 代理共享密钥，限制 API 仅可通过受信任代理访问。"""
+    if PROXY_SHARED_SECRET:
+        path = request.url.path
+        is_protected_api = (
+            path == "/v1" or
+            path.startswith("/v1/") or
+            path == "/v1beta" or
+            path.startswith("/v1beta/")
+        )
+
+        if is_protected_api:
+            provided = request.headers.get("x-proxy-secret", "")
+            if provided != PROXY_SHARED_SECRET:
+                return JSONResponse(
+                    status_code=403,
+                    content={"error": {"message": "Forbidden", "type": "permission_error"}}
+                )
+
+    return await call_next(request)
 
 
 # 请求日志中间件（带性能统计）

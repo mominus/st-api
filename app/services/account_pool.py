@@ -13,14 +13,14 @@ from sqlalchemy import select, update, delete, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.database import (
-    BackendAccount, TokenUsageHistory, get_session_factory
+    BackendAccount, AccountModelRoute, TokenUsageHistory, get_session_factory
 )
 from app.services.crypto import get_crypto_service
 
 logger = logging.getLogger(__name__)
 
 # 兼容旧名称
-StackAIAccount = BackendAccount
+STAccount = BackendAccount
 
 
 class AccountPoolService:
@@ -46,6 +46,7 @@ class AccountPoolService:
         flow_id: str,
         api_key: str,
         model_group: str,
+        model_groups: Optional[List[str]] = None,
         daily_quota: int = 1000000,
         private_api_key: Optional[str] = None
     ) -> BackendAccount:
@@ -58,7 +59,8 @@ class AccountPoolService:
             org_id: 组织 ID
             flow_id: 工作流 ID
             api_key: API Key（明文，将被加密存储）
-            model_group: 所属模型组
+            model_group: 主模型组（兼容旧字段）
+            model_groups: 可路由模型列表（可选）
             daily_quota: 每日 Token 配额
             private_api_key: Private API Key（用于监控，可选）
             
@@ -69,6 +71,14 @@ class AccountPoolService:
         encrypted_key = crypto.encrypt(api_key)
         encrypted_private_key = crypto.encrypt(private_api_key) if private_api_key else None
         
+        normalized_groups = self._normalize_model_names(model_groups or [])
+        primary_group = str(model_group or "").strip()
+        if primary_group:
+            normalized_groups = [primary_group] + [m for m in normalized_groups if m != primary_group]
+
+        if not normalized_groups:
+            raise ValueError("model_group or model_groups is required")
+
         account = BackendAccount(
             id=str(uuid.uuid4()),
             name=name,
@@ -76,7 +86,7 @@ class AccountPoolService:
             flow_id=flow_id,
             api_key_encrypted=encrypted_key,
             private_api_key_encrypted=encrypted_private_key,
-            model_group=model_group,
+            model_group=normalized_groups[0],
             daily_quota=daily_quota,
             daily_used=0,
             status="active",
@@ -86,15 +96,20 @@ class AccountPoolService:
         
         session.add(account)
         await session.flush()
+
+        # 同步账号-模型路由（支持单账号多模型）
+        await self.set_account_models(session, account.id, normalized_groups)
         
-        logger.info(f"Created account: {account.id} ({name}) in group {model_group}")
+        logger.info(
+            f"Created account: {account.id} ({name}) with models={normalized_groups}"
+        )
         return account
 
     async def get_account(
         self,
         session: AsyncSession,
         account_id: str
-    ) -> Optional[StackAIAccount]:
+    ) -> Optional[STAccount]:
         """
         获取单个账号
         
@@ -106,14 +121,14 @@ class AccountPoolService:
             账号对象，如果不存在则返回 None
         """
         result = await session.execute(
-            select(StackAIAccount).where(StackAIAccount.id == account_id)
+            select(STAccount).where(STAccount.id == account_id)
         )
         return result.scalar_one_or_none()
     
     async def get_all_accounts(
         self,
         session: AsyncSession
-    ) -> List[StackAIAccount]:
+    ) -> List[STAccount]:
         """
         获取所有账号
         
@@ -123,14 +138,88 @@ class AccountPoolService:
         Returns:
             账号列表
         """
-        result = await session.execute(select(StackAIAccount))
+        result = await session.execute(select(STAccount))
         return list(result.scalars().all())
+
+    async def get_account_model_routes(
+        self,
+        session: AsyncSession,
+        account_id: str,
+        enabled_only: bool = True
+    ) -> List[AccountModelRoute]:
+        """获取账号的模型路由配置。"""
+        conditions = [AccountModelRoute.account_id == account_id]
+        if enabled_only:
+            conditions.append(AccountModelRoute.enabled == True)
+
+        result = await session.execute(
+            select(AccountModelRoute).where(and_(*conditions)).order_by(
+                AccountModelRoute.priority.asc(),
+                AccountModelRoute.model_name.asc()
+            )
+        )
+        return list(result.scalars().all())
+
+    async def get_account_models(
+        self,
+        session: AsyncSession,
+        account_id: str,
+        enabled_only: bool = True
+    ) -> List[str]:
+        """获取账号支持的模型列表（优先新路由表，回退旧字段）。"""
+        routes = await self.get_account_model_routes(
+            session, account_id, enabled_only=enabled_only
+        )
+        models = [r.model_name for r in routes if r.model_name]
+        if models:
+            return models
+
+        account = await self.get_account(session, account_id)
+        if account and account.model_group:
+            return [account.model_group]
+        return []
+
+    async def set_account_models(
+        self,
+        session: AsyncSession,
+        account_id: str,
+        model_groups: List[str]
+    ) -> None:
+        """覆盖账号可路由模型列表。"""
+        normalized = self._normalize_model_names(model_groups)
+        if not normalized:
+            raise ValueError("model_groups cannot be empty")
+
+        account = await self.get_account(session, account_id)
+        if account is None:
+            raise ValueError("Account not found")
+
+        await session.execute(
+            delete(AccountModelRoute).where(AccountModelRoute.account_id == account_id)
+        )
+
+        for idx, model_name in enumerate(normalized):
+            session.add(AccountModelRoute(
+                id=str(uuid.uuid4()),
+                account_id=account_id,
+                model_name=model_name,
+                enabled=True,
+                weight=100,
+                priority=idx,
+                created_at=datetime.utcnow(),
+                updated_at=datetime.utcnow(),
+            ))
+
+        # 兼容旧字段：保留主模型
+        account.model_group = normalized[0]
+        account.updated_at = datetime.utcnow()
+        await session.flush()
     
     async def get_accounts_by_model_group(
         self,
         session: AsyncSession,
         model_group: str
-    ) -> List[StackAIAccount]:
+    ) -> List[STAccount]:
         """
         按模型组获取账号列表
         
@@ -141,17 +230,40 @@ class AccountPoolService:
         Returns:
             该模型组的账号列表
         """
-        result = await session.execute(
-            select(StackAIAccount).where(StackAIAccount.model_group == model_group)
+        # 新路由表命中
+        route_result = await session.execute(
+            select(AccountModelRoute.account_id).where(
+                and_(
+                    AccountModelRoute.model_name == model_group,
+                    AccountModelRoute.enabled == True
+                )
+            )
         )
-        return list(result.scalars().all())
+        route_account_ids = [row[0] for row in route_result.fetchall()]
+
+        accounts_by_id: Dict[str, STAccount] = {}
+        if route_account_ids:
+            result = await session.execute(
+                select(STAccount).where(STAccount.id.in_(route_account_ids))
+            )
+            for account in result.scalars().all():
+                accounts_by_id[account.id] = account
+
+        # 旧字段兜底（兼容历史数据）
+        legacy_result = await session.execute(
+            select(STAccount).where(STAccount.model_group == model_group)
+        )
+        for account in legacy_result.scalars().all():
+            accounts_by_id.setdefault(account.id, account)
+
+        return sorted(accounts_by_id.values(), key=lambda a: a.id)
     
     async def update_account(
         self,
         session: AsyncSession,
         account_id: str,
         **kwargs
-    ) -> Optional[StackAIAccount]:
+    ) -> Optional[STAccount]:
         """
         更新账号信息
         
@@ -166,6 +278,25 @@ class AccountPoolService:
         account = await self.get_account(session, account_id)
         if account is None:
             return None
+
+        marker = object()
+        model_groups_input = kwargs.pop("model_groups", marker)
+        model_group_input = kwargs.pop("model_group", marker)
+        resolved_model_groups: Optional[List[str]] = None
+
+        if model_groups_input is not marker:
+            resolved_model_groups = self._normalize_model_names(model_groups_input or [])
+
+        if model_group_input is not marker:
+            primary = str(model_group_input or "").strip()
+            if primary:
+                if resolved_model_groups is None:
+                    resolved_model_groups = [primary]
+                else:
+                    resolved_model_groups = [primary] + [m for m in resolved_model_groups if m != primary]
+
+        if resolved_model_groups is not None and not resolved_model_groups:
+            raise ValueError("model_groups cannot be empty")
         
         # 如果更新 API Key，需要加密
         if "api_key" in kwargs:
@@ -182,9 +313,12 @@ class AccountPoolService:
         for key, value in kwargs.items():
             if hasattr(account, key):
                 setattr(account, key, value)
-        
-        account.updated_at = datetime.utcnow()
-        await session.flush()
+
+        if resolved_model_groups is not None:
+            await self.set_account_models(session, account_id, resolved_model_groups)
+        else:
+            account.updated_at = datetime.utcnow()
+            await session.flush()
         
         logger.info(f"Updated account: {account_id}")
         return account
@@ -207,6 +341,10 @@ class AccountPoolService:
         account = await self.get_account(session, account_id)
         if account is None:
             return False
+
+        await session.execute(
+            delete(AccountModelRoute).where(AccountModelRoute.account_id == account_id)
+        )
         
         await session.delete(account)
         await session.flush()
@@ -221,7 +359,7 @@ class AccountPoolService:
         self,
         session: AsyncSession,
         model_group: str
-    ) -> Optional[StackAIAccount]:
+    ) -> Optional[STAccount]:
         """
         使用轮询算法获取可用账号
         
@@ -235,16 +373,43 @@ class AccountPoolService:
         Returns:
             可用的账号对象，如果没有可用账号则返回 None
         """
-        # 获取该模型组的所有活跃账号
-        result = await session.execute(
-            select(StackAIAccount).where(
+        # 优先按新路由表选择账号（支持单账号多模型）
+        routed_result = await session.execute(
+            select(STAccount)
+            .join(
+                AccountModelRoute,
+                AccountModelRoute.account_id == STAccount.id
+            )
+            .where(
                 and_(
-                    StackAIAccount.model_group == model_group,
-                    StackAIAccount.status == "active"
+                    AccountModelRoute.model_name == model_group,
+                    AccountModelRoute.enabled == True,
+                    STAccount.status == "active"
                 )
-            ).order_by(StackAIAccount.id)  # 确保顺序一致
+            )
+            .order_by(
+                AccountModelRoute.priority.asc(),
+                STAccount.id.asc()
+            )
         )
-        accounts = list(result.scalars().all())
+        accounts = list(routed_result.scalars().unique().all())
+
+        # 旧字段兜底（兼容历史数据，合并未迁移记录）
+        legacy_result = await session.execute(
+            select(STAccount).where(
+                and_(
+                    STAccount.model_group == model_group,
+                    STAccount.status == "active"
+                )
+            ).order_by(STAccount.id)
+        )
+        if accounts:
+            existing_ids = {a.id for a in accounts}
+            for legacy_account in legacy_result.scalars().all():
+                if legacy_account.id not in existing_ids:
+                    accounts.append(legacy_account)
+        else:
+            accounts = list(legacy_result.scalars().all())
         
         if not accounts:
             logger.warning(f"No available accounts in model group: {model_group}")
@@ -335,7 +500,7 @@ class AccountPoolService:
         account_id: str,
         input_tokens: int,
         output_tokens: int
-    ) -> Optional[StackAIAccount]:
+    ) -> Optional[STAccount]:
         """
         更新账号的 Token 使用量
         
@@ -423,7 +588,7 @@ class AccountPoolService:
             )
             session.add(history)
     
-    def get_usage_percentage(self, account: StackAIAccount) -> float:
+    def get_usage_percentage(self, account: STAccount) -> float:
         """
         计算账号的使用百分比
         
@@ -437,7 +602,7 @@ class AccountPoolService:
             return 100.0
         return (account.daily_used / account.daily_quota) * 100
     
-    def get_usage_status(self, account: StackAIAccount) -> str:
+    def get_usage_status(self, account: STAccount) -> str:
         """
         获取账号的使用状态
         
@@ -498,7 +663,7 @@ class AccountPoolService:
             重置的账号数量
         """
         # 获取所有账号
-        result = await session.execute(select(StackAIAccount))
+        result = await session.execute(select(STAccount))
         accounts = list(result.scalars().all())
         
         reset_count = 0
@@ -549,7 +714,7 @@ class AccountPoolService:
     
     # ==================== Utility Methods ====================
     
-    def decrypt_api_key(self, account: StackAIAccount) -> str:
+    def decrypt_api_key(self, account: STAccount) -> str:
         """
         解密账号的 API Key
         
@@ -562,7 +727,7 @@ class AccountPoolService:
         crypto = get_crypto_service()
         return crypto.decrypt(account.api_key_encrypted)
     
-    def decrypt_private_api_key(self, account: StackAIAccount) -> Optional[str]:
+    def decrypt_private_api_key(self, account: STAccount) -> Optional[str]:
         """
         解密账号的 Private API Key
         
@@ -610,6 +775,30 @@ class AccountPoolService:
             "total_used": total_used,
             "usage_percentage": (total_used / total_quota * 100) if total_quota > 0 else 0
         }
+
+    def _normalize_model_names(self, model_groups: Any) -> List[str]:
+        """标准化模型名列表：去空、去重、保序。"""
+        if model_groups is None:
+            return []
+
+        if isinstance(model_groups, (str, bytes)):
+            raw_items = [model_groups]
+        elif isinstance(model_groups, (list, tuple, set)):
+            raw_items = list(model_groups)
+        else:
+            raw_items = [model_groups]
+
+        normalized: List[str] = []
+        seen = set()
+
+        for item in raw_items:
+            value = str(item or "").strip()
+            if not value or value in seen:
+                continue
+            seen.add(value)
+            normalized.append(value)
+
+        return normalized
 
 
 # 全局账号池服务实例

@@ -30,6 +30,13 @@ from app.services.response_transformer import ResponseTransformer, get_response_
 from app.services.error_handler import ErrorHandler, get_error_handler, APIError, ErrorType
 from app.services.logger import LoggerService, get_logger_service
 from app.services.stats import StatsService, get_stats_service
+from app.services.st_usage import (
+    STUsage,
+    choose_better_usage,
+    extract_run_id,
+    extract_usage,
+    split_total_with_fallback,
+)
 from sqlalchemy import select
 
 # Tool Use 相关导入
@@ -180,7 +187,7 @@ def should_inject_tools(request: "MessagesRequest", system_text: Optional[str]) 
     返回 True 的情况：
     - system prompt 不包含工具定义
     
-    注意：即使请求包含 tools 字段，由于 StackAI 后端不支持原生 tools 参数，
+    注意：即使请求包含 tools 字段，由于 ST 后端不支持原生 tools 参数，
     我们仍然需要将工具定义注入到上下文中，让模型知道有哪些工具可用。
     
     Args:
@@ -263,6 +270,91 @@ async def validate_api_key_and_model(
         )
     
     return api_key_obj, None
+
+
+def build_backend_payload(
+    user_id: str,
+    messages_context: str,
+    model_name: str,
+    input_mapping: Optional[Dict[str, str]] = None
+) -> Dict[str, Any]:
+    """根据输入映射构建后端 payload（支持 model_id -> in-1）。"""
+    payload = {
+        "user_id": user_id,
+        "conversation_id": str(uuid.uuid4())
+    }
+
+    user_field = "in-0"
+    if input_mapping and "user_input" in input_mapping:
+        user_field = input_mapping["user_input"]
+    payload[user_field] = messages_context
+
+    model_field = None
+    if input_mapping:
+        model_field = input_mapping.get("model_id") or input_mapping.get("model")
+    if model_field:
+        payload[model_field] = model_name
+
+    return payload
+
+
+def _finalize_usage(
+    preferred_usage: Optional[STUsage],
+    fallback_input_tokens: int,
+    fallback_output_tokens: int,
+    fallback_source: str,
+) -> STUsage:
+    if preferred_usage is None:
+        return STUsage(
+            input_tokens=max(0, int(fallback_input_tokens or 0)),
+            output_tokens=max(0, int(fallback_output_tokens or 0)),
+            total_tokens=max(0, int(fallback_input_tokens or 0)) + max(0, int(fallback_output_tokens or 0)),
+            source=fallback_source,
+            exact=False,
+        ).normalized()
+
+    preferred = preferred_usage.normalized()
+    if preferred.exact:
+        return preferred
+
+    return split_total_with_fallback(
+        preferred,
+        fallback_input_tokens=fallback_input_tokens,
+        fallback_output_tokens=fallback_output_tokens,
+    )
+
+
+async def _fetch_analytics_usage(
+    org_id: str,
+    flow_id: str,
+    private_api_key: Optional[str],
+    run_id: Optional[str] = None,
+    fallback_to_latest: bool = False,
+    retries: int = 2,
+    delay_seconds: float = 0.5,
+) -> Optional[STUsage]:
+    if not private_api_key:
+        return None
+
+    from app.services.analytics import get_analytics_service
+    import asyncio
+
+    analytics_service = get_analytics_service()
+    for attempt in range(retries):
+        usage = await analytics_service.get_run_usage(
+            org_id=org_id,
+            flow_id=flow_id,
+            private_api_key=private_api_key,
+            run_id=run_id,
+            fallback_to_latest=fallback_to_latest
+        )
+        if usage is not None:
+            return usage.normalized()
+
+        if attempt < retries - 1 and delay_seconds > 0:
+            await asyncio.sleep(delay_seconds)
+
+    return None
 
 
 # ============================================================================
@@ -473,7 +565,7 @@ async def create_message(
     final_system_text = system_text
     
     # 如果启用工具使用，需要将工具定义注入到上下文中
-    # 因为 StackAI 后端不支持原生的 tools 参数，模型只能通过文本方式了解可用工具
+    # 因为 ST 后端不支持原生的 tools 参数，模型只能通过文本方式了解可用工具
     if tool_use_enabled and tool_injector and filtered_tools:
         # 检查 system prompt 是否已经包含工具定义
         if should_inject_tools(request, system_text):
@@ -555,19 +647,12 @@ async def create_message(
     logger.info(f"Request {request_id}: [CONTEXT DEBUG] tool_use_enabled={tool_use_enabled}, has_tools={request.has_tools()}")
     logger.info(f"Request {request_id}: [CONTEXT DEBUG] context length={len(messages_context)}, first 500 chars: {messages_context[:500]}")
     
-    # 构建 payload
-    backend_payload = {
-        "user_id": user_id,
-        "in-0": messages_context,  # 完整对话上下文
-        "conversation_id": str(uuid.uuid4())  # 每次请求使用新的会话ID
-    }
-    
-    # 如果有自定义输入映射，应用它
-    if input_mapping and "user_input" in input_mapping:
-        field_name = input_mapping["user_input"]
-        if field_name != "in-0":
-            backend_payload[field_name] = messages_context
-            del backend_payload["in-0"]
+    backend_payload = build_backend_payload(
+        user_id=user_id,
+        messages_context=messages_context,
+        model_name=request.model,
+        input_mapping=input_mapping
+    )
     
     logger.info(f"Request {request_id}: model={request.model}, stream={request.stream}")
     
@@ -580,25 +665,6 @@ async def create_message(
             
             # 获取账号的 Private API Key（用于从 Backend Analytics 获取真实 token）
             private_api_key = account_pool.decrypt_private_api_key(account)
-            
-            # 从 Stack AI Analytics 获取请求前的 today_tokens（用于计算差值）
-            pre_request_tokens = 0
-            if private_api_key:
-                try:
-                    from app.services.analytics import get_analytics_service
-                    analytics_service = get_analytics_service()
-                    stats = await analytics_service.get_recent_stats(
-                        org_id=account.org_id,
-                        flow_id=account.flow_id,
-                        private_api_key=private_api_key,
-                        days=1
-                    )
-                    if stats:
-                        pre_request_tokens = stats.today_tokens
-                        logger.debug(f"Request {request_id}: Pre-request today_tokens from Analytics: {pre_request_tokens}")
-                except Exception as e:
-                    logger.debug(f"Request {request_id}: Failed to get pre-request tokens: {e}")
-                    pre_request_tokens = 0
             
             # 提取输入预览
             from app.services.call_logger import extract_input_preview
@@ -617,14 +683,15 @@ async def create_message(
                 "model": request.model,
                 "account_id": account.id,
                 "account_name": account.name,
-                "model_group": account.model_group,
+                "model_group": request.model,
                 "account_org_id": account.org_id,
                 "account_flow_id": account.flow_id,
                 "private_api_key": private_api_key,
                 "start_time": start_time,
                 "accumulated_content": [],
                 "input_preview": input_preview,
-                "pre_request_tokens": pre_request_tokens  # 使用从 Stack AI Analytics 获取的真实值
+                "st_run_id": None,
+                "st_usage": None,
             }
             
             # 流式响应
@@ -636,23 +703,38 @@ async def create_message(
                         stream=True,
                         account_pool=account_pool
                     )
+
+                    async def tracked_backend_stream():
+                        async for raw_chunk in stream_gen:
+                            run_id = extract_run_id(raw_chunk)
+                            if run_id and not stream_context.get("st_run_id"):
+                                stream_context["st_run_id"] = run_id
+
+                            usage_candidate = extract_usage(raw_chunk, source="backend.stream")
+                            if usage_candidate is not None:
+                                stream_context["st_usage"] = choose_better_usage(
+                                    stream_context.get("st_usage"),
+                                    usage_candidate
+                                )
+
+                            yield raw_chunk
                     
                     # 根据功能选择不同的转换方法 (Requirements 7.1, 7.2, 7.3, 7.4)
                     if tool_use_enabled and tool_parser:
                         # 使用带工具使用检测的流式转换
                         transform_gen = response_transformer.transform_backend_sse_to_anthropic_with_tools(
-                            stream_gen, request.model, request_id, tool_parser
+                            tracked_backend_stream(), request.model, request_id, tool_parser
                         )
                         logger.debug(f"Request {request_id}: [TOOL USE] Using streaming with tool detection")
                     elif thinking_enabled:
                         # 使用带思维链的实时流式转换
                         transform_gen = response_transformer.transform_backend_sse_to_anthropic_with_thinking(
-                            stream_gen, request.model, request_id, thinking_budget
+                            tracked_backend_stream(), request.model, request_id, thinking_budget
                         )
                     else:
                         # 使用普通的流式转换
                         transform_gen = response_transformer.transform_backend_sse_to_anthropic(
-                            stream_gen, request.model, request_id
+                            tracked_backend_stream(), request.model, request_id
                         )
                     
                     # 直接转换并输出，同时累积内容
@@ -727,12 +809,49 @@ async def create_message(
                 anthropic_response = response_transformer.to_anthropic_response(
                     backend_response, request.model, request_id, thinking_enabled=thinking_enabled
                 )
-            
-            # 更新 token 使用量
-            usage = anthropic_response.get("usage", {})
-            input_tokens = usage.get("input_tokens", 0)
-            output_tokens = usage.get("output_tokens", 0)
-            total_tokens = input_tokens + output_tokens
+
+            # 从后端响应提取 usage；必要时回退到 analytics(run_id)
+            estimated_usage = anthropic_response.get("usage", {})
+            estimated_input_tokens = estimated_usage.get("input_tokens", 0)
+            estimated_output_tokens = estimated_usage.get("output_tokens", 0)
+
+            backend_usage = extract_usage(backend_response, source="backend.sync")
+            run_id = extract_run_id(backend_response)
+
+            analytics_usage = None
+            if backend_usage is None or not backend_usage.exact:
+                private_api_key = account_pool.decrypt_private_api_key(account)
+                analytics_usage = await _fetch_analytics_usage(
+                    org_id=account.org_id,
+                    flow_id=account.flow_id,
+                    private_api_key=private_api_key,
+                    run_id=run_id,
+                    fallback_to_latest=False,
+                    retries=2,
+                    delay_seconds=0.4,
+                )
+
+            selected_usage = choose_better_usage(backend_usage, analytics_usage)
+            final_usage = _finalize_usage(
+                preferred_usage=selected_usage,
+                fallback_input_tokens=estimated_input_tokens,
+                fallback_output_tokens=estimated_output_tokens,
+                fallback_source="estimate.anthropic",
+            )
+
+            input_tokens = final_usage.input_tokens
+            output_tokens = final_usage.output_tokens
+            total_tokens = final_usage.total_tokens
+
+            anthropic_response["usage"] = {
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens
+            }
+
+            logger.debug(
+                f"Request {request_id}: usage source={final_usage.source}, run_id={run_id}, "
+                f"tokens in/out/total={input_tokens}/{output_tokens}/{total_tokens}"
+            )
             
             if total_tokens > 0:
                 await account_pool.update_token_usage(
@@ -800,7 +919,7 @@ async def create_message(
                 client_ip=client_ip,
                 account_id=account.id,
                 account_name=account.name,
-                model_group=account.model_group,
+                model_group=request.model,
                 model=request.model,
                 api_type="anthropic",
                 is_stream=False,
@@ -872,49 +991,44 @@ async def update_anthropic_stream_stats(context: dict):
     """
     from app.models.database import get_session_factory
     from app.services.token_counter import get_token_counter
-    from app.services.analytics import get_analytics_service
     from app.services.call_logger import get_call_logger_service
     
     try:
         elapsed_ms = int((time.time() - context["start_time"]) * 1000)
-        input_tokens = 0
-        output_tokens = 0
-        total_tokens = 0
-        
-        # 尝试从 Backend Analytics 获取真实的 token 数据
-        private_api_key = context.get("private_api_key")
-        if private_api_key:
-            try:
-                analytics_service = get_analytics_service()
-                import asyncio
-                await asyncio.sleep(1)
-                
-                stats = await analytics_service.get_recent_stats(
-                    org_id=context["account_org_id"],
-                    flow_id=context["account_flow_id"],
-                    private_api_key=private_api_key,
-                    days=1
-                )
-                
-                if stats:
-                    pre_tokens = context.get("pre_request_tokens", 0)
-                    current_tokens = stats.today_tokens
-                    total_tokens = max(0, current_tokens - pre_tokens)
-                    input_tokens = total_tokens // 3
-                    output_tokens = total_tokens - input_tokens
-                    logger.debug(f"Got real token data from Backend: delta={total_tokens}")
-            except Exception as e:
-                logger.warning(f"Failed to get token data from Backend Analytics: {e}")
-        
         # 累积的输出内容
         accumulated_content = "".join(context.get("accumulated_content", []))
-        
-        # 如果无法从 StackAI 获取，使用 tiktoken 估算
-        if total_tokens == 0:
-            if accumulated_content:
-                token_counter = get_token_counter()
-                output_tokens = token_counter.count(accumulated_content)
-                total_tokens = output_tokens
+
+        token_counter = get_token_counter()
+        fallback_input_tokens = 0
+        fallback_output_tokens = token_counter.count(accumulated_content) if accumulated_content else 0
+
+        # 优先使用流中捕获 usage
+        selected_usage = context.get("st_usage")
+
+        # 若缺失则按 run_id 查询 analytics
+        run_id = context.get("st_run_id")
+        if selected_usage is None or not selected_usage.exact:
+            analytics_usage = await _fetch_analytics_usage(
+                org_id=context["account_org_id"],
+                flow_id=context["account_flow_id"],
+                private_api_key=context.get("private_api_key"),
+                run_id=run_id,
+                fallback_to_latest=False,
+                retries=3,
+                delay_seconds=0.5,
+            )
+            selected_usage = choose_better_usage(selected_usage, analytics_usage)
+
+        final_usage = _finalize_usage(
+            preferred_usage=selected_usage,
+            fallback_input_tokens=fallback_input_tokens,
+            fallback_output_tokens=fallback_output_tokens,
+            fallback_source="estimate.stream",
+        )
+
+        input_tokens = final_usage.input_tokens
+        output_tokens = final_usage.output_tokens
+        total_tokens = final_usage.total_tokens
         
         # 创建新的数据库会话
         session_factory = get_session_factory()
@@ -975,7 +1089,8 @@ async def update_anthropic_stream_stats(context: dict):
             
         logger.debug(
             f"Anthropic stream stats updated for request {context['request_id']}: "
-            f"tokens={total_tokens}, elapsed={elapsed_ms}ms"
+            f"tokens={total_tokens}, source={final_usage.source}, "
+            f"run_id={context.get('st_run_id')}, elapsed={elapsed_ms}ms"
         )
     except Exception as e:
         logger.error(f"Failed to update Anthropic stream stats: {e}")

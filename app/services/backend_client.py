@@ -47,10 +47,10 @@ class BackendAPIError(BackendClientError):
 
 
 # 兼容旧名称的别名
-StackAIClientError = BackendClientError
-StackAIConnectionError = BackendConnectionError
-StackAITimeoutError = BackendTimeoutError
-StackAIAPIError = BackendAPIError
+STClientError = BackendClientError
+STConnectionError = BackendConnectionError
+STTimeoutError = BackendTimeoutError
+STAPIError = BackendAPIError
 
 
 class BackendClient:
@@ -314,6 +314,6 @@ def init_backend_client(
 
 
 # 兼容旧名称的别名
-StackAIClient = BackendClient
-get_stackai_client = get_backend_client
-init_stackai_client = init_backend_client
+STClient = BackendClient
+get_st_client = get_backend_client
+init_st_client = init_backend_client

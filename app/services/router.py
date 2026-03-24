@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.database import BackendAccount, ModelGroup, APIKey
 
 # 兼容旧名称
-StackAIAccount = BackendAccount
+STAccount = BackendAccount
 from app.services.account_pool import AccountPoolService, get_account_pool_service
 from app.services.api_key import APIKeyService, get_api_key_service
 
@@ -66,7 +66,7 @@ class ModelGroupRouter:
         session: AsyncSession,
         model: str,
         api_key: Optional[APIKey] = None
-    ) -> Tuple[Optional[StackAIAccount], Optional[str]]:
+    ) -> Tuple[Optional[STAccount], Optional[str]]:
         """
         根据 model 参数路由请求到对应的账号池
         
@@ -250,7 +250,7 @@ class ModelGroupRouter:
         self,
         session: AsyncSession,
         model: str
-    ) -> List[StackAIAccount]:
+    ) -> List[STAccount]:
         """
         获取指定模型组的所有账号
         

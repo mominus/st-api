@@ -1,6 +1,6 @@
 """
 Error Handler Service
-将 StackAI 错误转换为标准 API 错误格式（OpenAI、Anthropic、Gemini）
+将 st 错误转换为标准 API 错误格式（OpenAI、Anthropic、Gemini）
 
 Requirements: 8.1
 """
@@ -51,12 +51,12 @@ class ErrorHandler:
     """
     错误处理器
     
-    负责将 StackAI 错误和内部错误转换为标准 API 错误格式。
+    负责将 st 错误和内部错误转换为标准 API 错误格式。
     支持 OpenAI、Anthropic 和 Gemini 三种格式。
     """
     
-    # StackAI 错误码到标准错误类型的映射
-    STACKAI_ERROR_MAPPING: Dict[str, ErrorType] = {
+    # st 错误码到标准错误类型的映射
+    ST_ERROR_MAPPING: Dict[str, ErrorType] = {
         "invalid_api_key": ErrorType.AUTHENTICATION,
         "unauthorized": ErrorType.AUTHENTICATION,
         "forbidden": ErrorType.PERMISSION,
@@ -109,7 +109,7 @@ class ErrorHandler:
     }
     
     # ========================================================================
-    # StackAI Error Parsing
+    # st Error Parsing
     # ========================================================================
     
     def parse_backend_error(
@@ -118,10 +118,10 @@ class ErrorHandler:
         status_code: int = 500
     ) -> APIError:
         """
-        解析 StackAI 错误响应
+        解析 st 错误响应
         
         Args:
-            backend_response: StackAI 返回的错误响应
+            backend_response: st 返回的错误响应
             status_code: HTTP 状态码
             
         Returns:
@@ -188,8 +188,8 @@ class ErrorHandler:
     ) -> ErrorType:
         """将错误码映射到标准错误类型"""
         # 首先尝试通过错误码映射
-        if error_code and error_code in self.STACKAI_ERROR_MAPPING:
-            return self.STACKAI_ERROR_MAPPING[error_code]
+        if error_code and error_code in self.ST_ERROR_MAPPING:
+            return self.ST_ERROR_MAPPING[error_code]
 
         # 再根据错误消息推断，避免上游错误被 500 包裹时误分类
         inferred_type = self._infer_error_type_from_message(error_message)
@@ -462,17 +462,17 @@ class ErrorHandler:
         else:
             return self.to_openai_error(error)
     
-    def convert_stackai_error(
+    def convert_st_error(
         self,
         backend_response: Dict[str, Any],
         status_code: int,
         target_format: Literal["openai", "anthropic", "gemini"] = "openai"
     ) -> Dict[str, Any]:
         """
-        将 StackAI 错误直接转换为目标格式
+        将 st 错误直接转换为目标格式
         
         Args:
-            backend_response: StackAI 返回的错误响应
+            backend_response: st 返回的错误响应
             status_code: HTTP 状态码
             target_format: 目标 API 格式
             

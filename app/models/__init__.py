@@ -6,6 +6,7 @@ Data Models
 from app.models.database import (
     Base,
     BackendAccount,
+    AccountModelRoute,
     ModelGroup,
     APIKey,
     TokenUsageHistory,
@@ -19,12 +20,13 @@ from app.models.database import (
 )
 
 # 兼容旧名称
-StackAIAccount = BackendAccount
+STAccount = BackendAccount
 
 __all__ = [
     "Base",
     "BackendAccount",
-    "StackAIAccount",  # 兼容旧名称
+    "STAccount",  # 兼容旧名称
+    "AccountModelRoute",
     "ModelGroup",
     "APIKey",
     "TokenUsageHistory",

@@ -14,11 +14,11 @@ from sqlalchemy import select, and_, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.database import (
-    BackendAccount, APIKey, TokenUsageHistory, RequestLog, ModelGroup, SystemStats
+    BackendAccount, AccountModelRoute, APIKey, TokenUsageHistory, RequestLog, ModelGroup, SystemStats
 )
 
 # 兼容旧名称
-StackAIAccount = BackendAccount
+STAccount = BackendAccount
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +37,7 @@ class AccountStats:
     daily_used: int
     usage_percentage: float
     status: str
+    model_groups: List[str] = field(default_factory=list)
     request_count: int = 0
     total_input_tokens: int = 0
     total_output_tokens: int = 0
@@ -147,7 +148,7 @@ class StatsService:
         """
         # 获取账号信息
         result = await session.execute(
-            select(StackAIAccount).where(StackAIAccount.id == account_id)
+            select(STAccount).where(STAccount.id == account_id)
         )
         account = result.scalar_one_or_none()
         
@@ -164,11 +165,14 @@ class StatsService:
         request_stats = await self._get_account_request_stats(
             session, account_id, today, today
         )
+        model_groups = await self._get_account_models(session, account.id)
+        primary_model_group = model_groups[0] if model_groups else account.model_group
         
         return AccountStats(
             id=account.id,
             name=account.name,
-            model_group=account.model_group,
+            model_group=primary_model_group,
+            model_groups=model_groups,
             daily_quota=account.daily_quota,
             daily_used=account.daily_used,
             usage_percentage=usage_percentage,
@@ -193,7 +197,7 @@ class StatsService:
             
         Requirements: 3.2
         """
-        result = await session.execute(select(StackAIAccount))
+        result = await session.execute(select(STAccount))
         accounts = list(result.scalars().all())
         
         stats_list = []
@@ -207,11 +211,14 @@ class StatsService:
             request_stats = await self._get_account_request_stats(
                 session, account.id, today, today
             )
+            model_groups = await self._get_account_models(session, account.id)
+            primary_model_group = model_groups[0] if model_groups else account.model_group
             
             stats_list.append(AccountStats(
                 id=account.id,
                 name=account.name,
-                model_group=account.model_group,
+                model_group=primary_model_group,
+                model_groups=model_groups,
                 daily_quota=account.daily_quota,
                 daily_used=account.daily_used,
                 usage_percentage=usage_percentage,
@@ -284,11 +291,31 @@ class StatsService:
         Requirements: 3.3
         """
         result = await session.execute(
-            select(StackAIAccount).where(
-                StackAIAccount.model_group == model_group
+            select(STAccount)
+            .join(
+                AccountModelRoute,
+                AccountModelRoute.account_id == STAccount.id
+            )
+            .where(
+                and_(
+                    AccountModelRoute.model_name == model_group,
+                    AccountModelRoute.enabled == True
+                )
             )
         )
-        accounts = list(result.scalars().all())
+        accounts = list(result.scalars().unique().all())
+        account_map = {a.id: a for a in accounts}
+
+        # 兼容旧字段兜底（补齐未迁移记录）
+        legacy_result = await session.execute(
+            select(STAccount).where(
+                STAccount.model_group == model_group
+            )
+        )
+        for account in legacy_result.scalars().all():
+            account_map.setdefault(account.id, account)
+
+        accounts = list(account_map.values())
         
         if not accounts:
             return None
@@ -334,14 +361,25 @@ class StatsService:
             
         Requirements: 3.3
         """
-        # 获取所有唯一的模型组
-        result = await session.execute(
-            select(StackAIAccount.model_group).distinct()
+        # 获取所有唯一模型（优先新路由表，兼容旧字段）
+        route_result = await session.execute(
+            select(AccountModelRoute.model_name).where(
+                AccountModelRoute.enabled == True
+            ).distinct()
         )
-        model_groups = [row[0] for row in result.fetchall()]
-        
+        legacy_result = await session.execute(
+            select(STAccount.model_group).distinct()
+        )
+
+        model_groups = {
+            row[0] for row in route_result.fetchall() if row[0]
+        }
+        model_groups.update(
+            {row[0] for row in legacy_result.fetchall() if row[0]}
+        )
+
         stats_list = []
-        for group in model_groups:
+        for group in sorted(model_groups):
             stats = await self.get_model_group_stats(session, group)
             if stats:
                 stats_list.append(stats)
@@ -676,7 +714,7 @@ class StatsService:
             系统概览统计
         """
         # 账号统计
-        accounts_result = await session.execute(select(StackAIAccount))
+        accounts_result = await session.execute(select(STAccount))
         accounts = list(accounts_result.scalars().all())
         
         total_accounts = len(accounts)
@@ -692,10 +730,8 @@ class StatsService:
         active_api_keys = sum(1 for k in api_keys if k.status == "active")
         
         # 模型组统计
-        groups_result = await session.execute(
-            select(StackAIAccount.model_group).distinct()
-        )
-        total_model_groups = len(list(groups_result.fetchall()))
+        groups_result = await session.execute(select(ModelGroup))
+        total_model_groups = len(list(groups_result.scalars().all()))
         
         # 今日请求统计（使用 UTC 时间）
         now_utc = datetime.utcnow()
@@ -765,6 +801,33 @@ class StatsService:
         if quota <= 0:
             return 100.0 if used > 0 else 0.0
         return (used / quota) * 100
+
+    async def _get_account_models(
+        self,
+        session: AsyncSession,
+        account_id: str
+    ) -> List[str]:
+        """获取账号可路由模型列表（优先新路由表，回退旧字段）。"""
+        route_result = await session.execute(
+            select(AccountModelRoute).where(
+                and_(
+                    AccountModelRoute.account_id == account_id,
+                    AccountModelRoute.enabled == True
+                )
+            ).order_by(AccountModelRoute.priority.asc(), AccountModelRoute.model_name.asc())
+        )
+        routes = list(route_result.scalars().all())
+        models = [r.model_name for r in routes if r.model_name]
+        if models:
+            return models
+
+        account_result = await session.execute(
+            select(STAccount).where(STAccount.id == account_id)
+        )
+        account = account_result.scalar_one_or_none()
+        if account and account.model_group:
+            return [account.model_group]
+        return []
     
     def get_usage_status(self, percentage: float) -> str:
         """

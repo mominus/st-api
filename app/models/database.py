@@ -9,7 +9,7 @@ from typing import Optional, AsyncGenerator
 
 from sqlalchemy import (
     Column, String, Integer, Text, DateTime, Date, 
-    Boolean, create_engine, event, text
+    Boolean, create_engine, event, text, UniqueConstraint
 )
 from sqlalchemy.ext.asyncio import (
     create_async_engine, AsyncSession, async_sessionmaker
@@ -42,6 +42,23 @@ class BackendAccount(Base):
     status = Column(String(20), default="active")  # active, exhausted, disabled
     last_used_at = Column(DateTime, nullable=True)
     last_sync_at = Column(DateTime, nullable=True)  # 最后同步时间
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class AccountModelRoute(Base):
+    """账号-模型路由表（支持单账号多模型）"""
+    __tablename__ = "account_model_routes"
+    __table_args__ = (
+        UniqueConstraint("account_id", "model_name", name="uq_account_model_route"),
+    )
+
+    id = Column(String(36), primary_key=True)
+    account_id = Column(String(36), nullable=False, index=True)
+    model_name = Column(String(255), nullable=False, index=True)
+    enabled = Column(Boolean, default=True, nullable=False)
+    weight = Column(Integer, default=100, nullable=False)
+    priority = Column(Integer, default=0, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -282,6 +299,56 @@ async def _migrate_sqlite_columns(conn) -> None:
                 print(f"[Migration] Added column {table_name}.{column_name}")
             except Exception as e:
                 print(f"[Migration] Failed to add column {table_name}.{column_name}: {e}")
+
+    # 账号-模型路由表（单账号多模型）
+    try:
+        await conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS account_model_routes (
+                id VARCHAR(36) PRIMARY KEY,
+                account_id VARCHAR(36) NOT NULL,
+                model_name VARCHAR(255) NOT NULL,
+                enabled BOOLEAN DEFAULT 1 NOT NULL,
+                weight INTEGER DEFAULT 100 NOT NULL,
+                priority INTEGER DEFAULT 0 NOT NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(account_id, model_name)
+            )
+        """))
+        await conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_account_model_routes_account_id ON account_model_routes(account_id)"
+        ))
+        await conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_account_model_routes_model_name ON account_model_routes(model_name)"
+        ))
+
+        # 回填历史数据：把 backend_accounts.model_group 同步到新路由表
+        await conn.execute(text("""
+            INSERT INTO account_model_routes (
+                id, account_id, model_name, enabled, weight, priority, created_at, updated_at
+            )
+            SELECT
+                lower(hex(randomblob(16))),
+                b.id,
+                b.model_group,
+                1,
+                100,
+                0,
+                CURRENT_TIMESTAMP,
+                CURRENT_TIMESTAMP
+            FROM backend_accounts b
+            WHERE b.model_group IS NOT NULL
+              AND b.model_group <> ''
+              AND NOT EXISTS (
+                    SELECT 1
+                    FROM account_model_routes r
+                    WHERE r.account_id = b.id
+                      AND r.model_name = b.model_group
+              )
+        """))
+        print("[Migration] account_model_routes ready")
+    except Exception as e:
+        print(f"[Migration] Failed to migrate account_model_routes: {e}")
 
 
 async def close_database() -> None:

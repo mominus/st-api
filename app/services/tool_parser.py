@@ -102,7 +102,7 @@ class ToolParser:
         if not content:
             return ParseResult()
         
-        # 优先尝试 XML 格式（StackAI 返回的格式）
+        # 优先尝试 XML 格式（st 返回的格式）
         xml_result = self._parse_xml_format(content)
         if xml_result.has_tool_calls:
             logger.debug(f"Parsed {len(xml_result.tool_calls)} tool calls from XML format")

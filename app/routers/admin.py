@@ -28,6 +28,7 @@ from app.services.analytics import AnalyticsService, get_analytics_service
 from app.services.call_logger import get_call_logger_service
 from app.services.key_info import build_public_key_info_payload
 from app.services.upstream_sanitizer import sanitize_exposed_text
+from app import __version__ as APP_VERSION
 
 logger = logging.getLogger(__name__)
 
@@ -72,7 +73,8 @@ class CreateAccountRequest(BaseModel):
     org_id: str = Field(..., description="组织 ID")
     flow_id: str = Field(..., description="工作流 ID")
     api_key: str = Field(..., description="API Key")
-    model_group: str = Field(..., description="所属模型组")
+    model_group: Optional[str] = Field(None, description="主模型组（兼容旧字段）")
+    model_groups: Optional[List[str]] = Field(None, description="可路由模型组列表")
     daily_quota: int = Field(default=1000000, description="每日 Token 配额")
     private_api_key: Optional[str] = Field(None, description="Private API Key（用于监控）")
 
@@ -84,6 +86,7 @@ class UpdateAccountRequest(BaseModel):
     flow_id: Optional[str] = None
     api_key: Optional[str] = None
     model_group: Optional[str] = None
+    model_groups: Optional[List[str]] = None
     daily_quota: Optional[int] = None
     status: Optional[str] = None
     private_api_key: Optional[str] = None
@@ -134,6 +137,32 @@ def get_client_ip(request: Request) -> str:
     if forwarded:
         return forwarded.split(",")[0].strip()
     return request.client.host if request.client else "unknown"
+
+
+def normalize_model_groups(
+    model_group: Optional[str] = None,
+    model_groups: Optional[List[str]] = None
+) -> List[str]:
+    """标准化模型列表：去空、去重、保序，并保证主模型在首位。"""
+    result: List[str] = []
+    seen = set()
+
+    if model_groups:
+        for item in model_groups:
+            value = str(item or "").strip()
+            if not value or value in seen:
+                continue
+            seen.add(value)
+            result.append(value)
+
+    primary = str(model_group or "").strip()
+    if primary:
+        if primary in seen:
+            result = [primary] + [m for m in result if m != primary]
+        else:
+            result = [primary] + result
+
+    return result
 
 
 async def verify_admin_token(
@@ -293,6 +322,19 @@ async def get_current_admin(
     return {"success": True, "admin": admin_info}
 
 
+@router.get("/meta")
+async def get_admin_meta(
+    admin: dict = Depends(verify_admin_token)
+):
+    """
+    获取管理后台元信息
+    """
+    return {
+        "success": True,
+        "version": APP_VERSION
+    }
+
+
 @router.post("/auth/change-password")
 async def change_password(
     request: ChangePasswordRequest,
@@ -363,6 +405,8 @@ async def list_accounts(
     for account in accounts:
         usage_percentage = account_pool.get_usage_percentage(account)
         usage_status = account_pool.get_usage_status(account)
+        model_groups = await account_pool.get_account_models(session, account.id)
+        primary_model_group = model_groups[0] if model_groups else account.model_group
         
         # 获取脱敏的 API Key
         api_key_masked = mask_api_key(account.api_key_encrypted)
@@ -372,7 +416,8 @@ async def list_accounts(
             "name": account.name,
             "org_id": account.org_id,
             "flow_id": account.flow_id,
-            "model_group": account.model_group,
+            "model_group": primary_model_group,
+            "model_groups": model_groups,
             "api_key_masked": api_key_masked,
             "has_private_key": account.private_api_key_encrypted is not None,
             "daily_quota": account.daily_quota,
@@ -408,6 +453,8 @@ async def get_account(
     
     usage_percentage = account_pool.get_usage_percentage(account)
     usage_status = account_pool.get_usage_status(account)
+    model_groups = await account_pool.get_account_models(session, account.id)
+    primary_model_group = model_groups[0] if model_groups else account.model_group
     
     # 获取脱敏的 API Key
     api_key_masked = mask_api_key(account.api_key_encrypted)
@@ -419,7 +466,8 @@ async def get_account(
             "name": account.name,
             "org_id": account.org_id,
             "flow_id": account.flow_id,
-            "model_group": account.model_group,
+            "model_group": primary_model_group,
+            "model_groups": model_groups,
             "api_key_masked": api_key_masked,
             "has_private_key": account.private_api_key_encrypted is not None,
             "daily_quota": account.daily_quota,
@@ -449,13 +497,21 @@ async def create_account(
     account_pool = get_account_pool_service()
     
     try:
+        resolved_model_groups = normalize_model_groups(
+            model_group=request.model_group,
+            model_groups=request.model_groups
+        )
+        if not resolved_model_groups:
+            raise ValueError("model_group or model_groups is required")
+
         account = await account_pool.create_account(
             session=session,
             name=request.name,
             org_id=request.org_id,
             flow_id=request.flow_id,
             api_key=request.api_key,
-            model_group=request.model_group,
+            model_group=resolved_model_groups[0],
+            model_groups=resolved_model_groups,
             daily_quota=request.daily_quota,
             private_api_key=request.private_api_key
         )
@@ -471,7 +527,8 @@ async def create_account(
                 "name": account.name,
                 "org_id": account.org_id,
                 "flow_id": account.flow_id,
-                "model_group": account.model_group,
+                "model_group": resolved_model_groups[0],
+                "model_groups": resolved_model_groups,
                 "daily_quota": account.daily_quota,
                 "status": account.status,
                 "has_private_key": account.private_api_key_encrypted is not None
@@ -511,8 +568,15 @@ async def update_account(
         update_data["flow_id"] = request.flow_id
     if request.api_key is not None:
         update_data["api_key"] = request.api_key
-    if request.model_group is not None:
-        update_data["model_group"] = request.model_group
+    if request.model_group is not None or request.model_groups is not None:
+        resolved_model_groups = normalize_model_groups(
+            model_group=request.model_group,
+            model_groups=request.model_groups
+        )
+        if not resolved_model_groups:
+            raise HTTPException(status_code=400, detail="model_groups cannot be empty")
+        update_data["model_group"] = resolved_model_groups[0]
+        update_data["model_groups"] = resolved_model_groups
     if request.daily_quota is not None:
         update_data["daily_quota"] = request.daily_quota
     if request.status is not None:
@@ -531,6 +595,8 @@ async def update_account(
     await session.commit()
     
     logger.info(f"Account updated: {account_id} by {admin.get('username')}")
+    model_groups = await account_pool.get_account_models(session, account.id)
+    primary_model_group = model_groups[0] if model_groups else account.model_group
     
     return {
         "success": True,
@@ -540,7 +606,8 @@ async def update_account(
             "name": account.name,
             "org_id": account.org_id,
             "flow_id": account.flow_id,
-            "model_group": account.model_group,
+            "model_group": primary_model_group,
+            "model_groups": model_groups,
             "daily_quota": account.daily_quota,
             "status": account.status,
             "has_private_key": account.private_api_key_encrypted is not None
@@ -1438,6 +1505,7 @@ async def get_all_account_stats(
             "id": stats.id,
             "name": stats.name,
             "model_group": stats.model_group,
+            "model_groups": stats.model_groups,
             "daily_quota": stats.daily_quota,
             "daily_used": stats.daily_used,
             "daily_remaining": max(0, stats.daily_quota - stats.daily_used),
@@ -1474,6 +1542,7 @@ async def get_account_stats(
             "id": stats.id,
             "name": stats.name,
             "model_group": stats.model_group,
+            "model_groups": stats.model_groups,
             "daily_quota": stats.daily_quota,
             "daily_used": stats.daily_used,
             "daily_remaining": max(0, stats.daily_quota - stats.daily_used),
@@ -1628,6 +1697,7 @@ async def get_usage_history(
 class TestAccountRequest(BaseModel):
     """测试账号请求"""
     message: str = Field(default="Hello, this is a test message.", description="测试消息")
+    model: Optional[str] = Field(default=None, description="要测试的模型（可选）")
 
 
 @router.post("/accounts/{account_id}/test")
@@ -1666,9 +1736,24 @@ async def test_account(
             }
         )
     
+    account_models = await account_pool.get_account_models(session, account.id)
+    test_model = str(request.model or "").strip()
+    if not test_model:
+        test_model = account_models[0] if account_models else account.model_group
+
+    if not test_model:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "success": False,
+                "message": "No model configured for this account",
+                "error_type": "model_not_configured"
+            }
+        )
+
     # 获取模型组的输入映射
     result = await session.execute(
-        select(ModelGroup).where(ModelGroup.name == account.model_group)
+        select(ModelGroup).where(ModelGroup.name == test_model)
     )
     model_group = result.scalar_one_or_none()
     
@@ -1690,6 +1775,10 @@ async def test_account(
         input_fields[input_mapping["user_input"]] = request.message
     else:
         input_fields["in-0"] = request.message
+
+    model_field = input_mapping.get("model_id") or input_mapping.get("model")
+    if model_field:
+        input_fields[model_field] = test_model
     
     payload = {
         "user_id": "test-user",
@@ -1723,6 +1812,7 @@ async def test_account(
                 return {
                     "success": True,
                     "message": "连接测试成功",
+                    "model": test_model,
                     "response_time_ms": elapsed_ms,
                     "output": output_text[:500] if output_text else "(无输出)",
                     "raw_response": response_data

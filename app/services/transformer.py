@@ -143,7 +143,7 @@ class BackendPayload:
 
 
 # 兼容旧名称
-StackAIPayload = BackendPayload
+STPayload = BackendPayload
 
 
 # ============================================================================
@@ -359,7 +359,7 @@ class RequestTransformer:
     # Unified to Backend Format Conversion
     # ========================================================================
     
-    def to_stackai_payload(
+    def to_st_payload(
         self, 
         unified: UnifiedRequest,
         input_mapping: Optional[Dict[str, str]] = None,
@@ -392,7 +392,7 @@ class RequestTransformer:
         
         if merge_context:
             # 合并模式：将完整上下文发送到 user_input 字段
-            # 这样 Stack AI 工作流只需要一个输入节点即可获得完整对话历史
+            # 这样 st 工作流只需要一个输入节点即可获得完整对话历史
             full_context = self._format_full_context(unified)
             if "user_input" in input_mapping:
                 input_fields[input_mapping["user_input"]] = full_context
@@ -411,6 +411,11 @@ class RequestTransformer:
                 # 将聊天历史转换为字符串格式
                 history_str = self._format_chat_history(unified.chat_history)
                 input_fields[input_mapping["chat_history"]] = history_str
+
+        # 可选：传递客户端选择的模型标识（用于多模型路由工作流）
+        model_field = input_mapping.get("model_id") or input_mapping.get("model")
+        if model_field:
+            input_fields[model_field] = unified.model
         
         return BackendPayload(
             user_id=user_id,
@@ -495,7 +500,7 @@ class RequestTransformer:
         
         return "\n\n".join(parts)
     
-    def to_stackai_dict(
+    def to_st_dict(
         self, 
         unified: UnifiedRequest,
         input_mapping: Optional[Dict[str, str]] = None,
@@ -514,7 +519,7 @@ class RequestTransformer:
         Returns:
             后端请求字典，可直接用于 HTTP 请求
         """
-        payload = self.to_stackai_payload(unified, input_mapping, user_id)
+        payload = self.to_st_payload(unified, input_mapping, user_id)
         
         result = {
             "user_id": payload.user_id,
@@ -522,7 +527,7 @@ class RequestTransformer:
         }
         
         # 无状态模式：每次请求使用新的 conversation_id
-        # 这样 Stack AI 就不会累积历史，每次都是全新对话
+        # 这样 st 就不会累积历史，每次都是全新对话
         if stateless:
             result["conversation_id"] = str(uuid.uuid4())
         

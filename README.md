@@ -88,16 +88,16 @@ This project now includes built-in changelog + version release workflow:
 
 ```bash
 python scripts/release.py --version 1.0.1 \
-  --note "批量导入支持无[] JSON" \
-  --note "llm_models 自动建模并分配账号"
+  --note "变更说明1" \
+  --note "变更说明2"
 ```
 
 ### One-command publish to Hugging Face
 
 ```bash
 python scripts/release.py --version 1.0.1 \
-  --note "批量导入支持无[] JSON" \
-  --note "llm_models 自动建模并分配账号" \
+  --note "变更说明1" \
+  --note "变更说明2" \
   --commit --tag --push --remote origin --branch main
 ```
 

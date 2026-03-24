@@ -47,13 +47,13 @@ from app.services.backend_client import (
     get_backend_client,
     init_backend_client,
     # 兼容旧名称
-    StackAIClient,
-    StackAIClientError,
-    StackAIConnectionError,
-    StackAITimeoutError,
-    StackAIAPIError,
-    get_stackai_client,
-    init_stackai_client,
+    STClient,
+    STClientError,
+    STConnectionError,
+    STTimeoutError,
+    STAPIError,
+    get_st_client,
+    init_st_client,
 )
 
 from app.services.router import (
@@ -140,13 +140,13 @@ __all__ = [
     "get_backend_client",
     "init_backend_client",
     # 兼容旧名称
-    "StackAIClient",
-    "StackAIClientError",
-    "StackAIConnectionError",
-    "StackAITimeoutError",
-    "StackAIAPIError",
-    "get_stackai_client",
-    "init_stackai_client",
+    "STClient",
+    "STClientError",
+    "STConnectionError",
+    "STTimeoutError",
+    "STAPIError",
+    "get_st_client",
+    "init_st_client",
     # Model Group Router
     "ModelGroupRouter",
     "get_router_service",

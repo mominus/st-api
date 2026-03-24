@@ -12,6 +12,9 @@ let accountsData = [];
 let groupsData = [];
 let apiKeysData = [];
 let callLogsData = [];
+let adminMeta = {
+    version: null
+};
 
 // ==================== 初始化 ====================
 
@@ -19,9 +22,11 @@ document.addEventListener('DOMContentLoaded', () => {
     // 检查登录状态
     if (authToken) {
         showAdminPage();
+        loadAdminMeta();
         loadDashboard();
     } else {
         showLoginPage();
+        setSidebarVersion(null);
     }
     
     // 绑定事件
@@ -147,6 +152,7 @@ async function handleLogin(e) {
         localStorage.setItem('authToken', authToken);
         
         showAdminPage();
+        await loadAdminMeta();
         loadDashboard();
         showToast('登录成功', 'success');
     } catch (error) {
@@ -158,6 +164,8 @@ async function handleLogin(e) {
 function handleLogout() {
     authToken = null;
     localStorage.removeItem('authToken');
+    adminMeta.version = null;
+    setSidebarVersion(null);
     showLoginPage();
     showToast('已退出登录', 'success');
 }
@@ -170,6 +178,37 @@ function showLoginPage() {
 function showAdminPage() {
     document.getElementById('login-page').classList.add('hidden');
     document.getElementById('admin-page').classList.remove('hidden');
+}
+
+function setSidebarVersion(version) {
+    const versionEl = document.getElementById('sidebar-version');
+    if (!versionEl) return;
+    
+    if (!version) {
+        versionEl.textContent = '版本 -';
+        return;
+    }
+    
+    const versionText = String(version).trim();
+    if (!versionText) {
+        versionEl.textContent = '版本 -';
+        return;
+    }
+    
+    const normalized = versionText.startsWith('v') ? versionText : `v${versionText}`;
+    versionEl.textContent = `版本 ${normalized}`;
+}
+
+async function loadAdminMeta() {
+    try {
+        const data = await apiCall('/meta');
+        adminMeta.version = data.version || null;
+        setSidebarVersion(adminMeta.version);
+    } catch (error) {
+        adminMeta.version = null;
+        setSidebarVersion(null);
+        console.error('加载后台元信息失败:', error);
+    }
 }
 
 
@@ -495,7 +534,7 @@ function renderMonitorTable(accounts) {
             });
         }
         const org = orgMap.get(orgId);
-        org.model_groups.push(account.model_group);
+        org.model_groups.push(...getAccountModels(account));
         org.account_ids.push(account.id);
         
         // 使用量取最大值（同一个 org_id 的使用量是共享的）
@@ -650,14 +689,25 @@ async function loadAccounts() {
 // 存储测试结果状态
 let testResults = {};
 
+function getAccountModels(account) {
+    if (Array.isArray(account?.model_groups) && account.model_groups.length > 0) {
+        return account.model_groups.filter(Boolean);
+    }
+    if (account?.model_group) {
+        return [account.model_group];
+    }
+    return [];
+}
+
 function getFilteredAccounts() {
     const searchTerm = document.getElementById('account-search').value.toLowerCase().trim();
     const groupFilter = document.getElementById('account-group-filter').value;
     const statusFilter = document.getElementById('account-status-filter').value;
     
     return accountsData.filter(account => {
+        const accountModels = getAccountModels(account);
         if (searchTerm && !account.name.toLowerCase().includes(searchTerm)) return false;
-        if (groupFilter && account.model_group !== groupFilter) return false;
+        if (groupFilter && !accountModels.includes(groupFilter)) return false;
         if (statusFilter && account.status !== statusFilter) return false;
         return true;
     });
@@ -714,6 +764,10 @@ function renderAccountsTable() {
         
         // 格式化最后使用时间
         const lastUsedClass = account.last_used_at && isRecent(account.last_used_at) ? 'recent' : '';
+        const accountModels = getAccountModels(account);
+        const modelTags = accountModels
+            .map(model => `<span class="model-group-tag">${escapeHtml(model)}</span>`)
+            .join('');
         
         return `
             <tr data-account-id="${account.id}">
@@ -724,7 +778,7 @@ function renderAccountsTable() {
                     </div>
                 </td>
                 <td>
-                    <span class="model-group-tag">${escapeHtml(account.model_group)}</span>
+                    ${modelTags}
                     ${testStatus}
                 </td>
                 <td>
@@ -852,7 +906,7 @@ function bulkDeleteAccounts() {
 // ==================== 批量导入账号 ====================
 
 let importData = []; // 存储待导入的数据
-const AUTO_GROUP_INPUT_MAPPING = { user_input: 'in-0' };
+const AUTO_GROUP_INPUT_MAPPING = { user_input: 'in-0', model_id: 'in-1' };
 
 function parseImportJsonData(rawText) {
     const jsonText = (rawText || '').replace(/^\uFEFF/, '').trim();
@@ -1036,8 +1090,8 @@ function resolveImportModelGroups(item, defaultModelGroup, index) {
     throw new Error(`第 ${index + 1} 条记录缺少 llm_models，且未选择默认模型组`);
 }
 
-function buildImportAccountKey(orgId, flowId, modelGroup) {
-    return `${orgId}:::${flowId}:::${modelGroup}`;
+function buildImportAccountKey(orgId, flowId) {
+    return `${orgId}:::${flowId}`;
 }
 
 async function ensureImportModelGroup(modelGroupName) {
@@ -1234,11 +1288,11 @@ function previewImport() {
         }
         
         const existingAccountKeys = new Set(
-            accountsData.map(account => buildImportAccountKey(account.org_id, account.flow_id, account.model_group))
+            accountsData.map(account => buildImportAccountKey(account.org_id, account.flow_id))
         );
         const pendingAccountKeys = new Set();
         
-        // 验证并转换数据（每个 llm_models 项会展开为一条账号导入记录）
+        // 验证并转换数据（每条记录导入为一个账号，可绑定多个模型）
         const normalizedImportData = [];
         
         parsed.forEach((item, index) => {
@@ -1266,22 +1320,21 @@ function previewImport() {
             const baseName = email || customName || `账号_${orgId.substring(0, 8)}`;
             const privateApiKey = item.private_api_key ? String(item.private_api_key).trim() : null;
             
-            modelGroups.forEach(modelGroup => {
-                const accountKey = buildImportAccountKey(orgId, flowId, modelGroup);
-                const isDuplicate = existingAccountKeys.has(accountKey) || pendingAccountKeys.has(accountKey);
-                pendingAccountKeys.add(accountKey);
-                
-                normalizedImportData.push({
-                    name: baseName,
-                    org_id: orgId,
-                    flow_id: flowId,
-                    api_key: apiKey,
-                    private_api_key: privateApiKey || null,
-                    email: email || null,
-                    model_group: modelGroup,
-                    isDuplicate: isDuplicate,
-                    status: isDuplicate ? 'duplicate' : 'pending'
-                });
+            const accountKey = buildImportAccountKey(orgId, flowId);
+            const isDuplicate = existingAccountKeys.has(accountKey) || pendingAccountKeys.has(accountKey);
+            pendingAccountKeys.add(accountKey);
+            
+            normalizedImportData.push({
+                name: baseName,
+                org_id: orgId,
+                flow_id: flowId,
+                api_key: apiKey,
+                private_api_key: privateApiKey || null,
+                email: email || null,
+                model_groups: modelGroups,
+                model_group: modelGroups[0], // 兼容显示与后端旧字段
+                isDuplicate: isDuplicate,
+                status: isDuplicate ? 'duplicate' : 'pending'
             });
         });
         
@@ -1319,7 +1372,7 @@ function renderImportPreview() {
         <div class="import-preview-item ${item.isDuplicate ? 'duplicate' : ''}">
             <div class="item-info">
                 <span class="item-name">${escapeHtml(item.name)}</span>
-                <span class="item-detail">model: ${escapeHtml(item.model_group)} | org: ${item.org_id.substring(0, 8)}... | flow: ${item.flow_id.substring(0, 8)}...</span>
+                <span class="item-detail">models: ${escapeHtml((item.model_groups || [item.model_group]).join(', '))} | org: ${item.org_id.substring(0, 8)}... | flow: ${item.flow_id.substring(0, 8)}...</span>
             </div>
             <span class="item-status ${item.status}" id="import-status-${index}">
                 ${item.isDuplicate ? '⚠️ 已存在' : '⏳ 待导入'}
@@ -1359,11 +1412,13 @@ async function handleImportSubmit(e) {
         const statusEl = document.getElementById(`import-status-${index}`);
         
         try {
-            if (!ensuredGroups.has(item.model_group)) {
-                const created = await ensureImportModelGroup(item.model_group);
-                ensuredGroups.add(item.model_group);
-                if (created) {
-                    createdGroupCount++;
+            for (const modelGroup of (item.model_groups || [item.model_group])) {
+                if (!ensuredGroups.has(modelGroup)) {
+                    const created = await ensureImportModelGroup(modelGroup);
+                    ensuredGroups.add(modelGroup);
+                    if (created) {
+                        createdGroupCount++;
+                    }
                 }
             }
             
@@ -1376,6 +1431,7 @@ async function handleImportSubmit(e) {
                     api_key: item.api_key,
                     private_api_key: item.private_api_key,
                     model_group: item.model_group,
+                    model_groups: item.model_groups || [item.model_group],
                     daily_quota: dailyQuota
                 })
             });
@@ -1393,7 +1449,7 @@ async function handleImportSubmit(e) {
                 statusEl.className = 'item-status error';
             }
             failCount++;
-            console.error(`导入失败 [${item.name} / ${item.model_group}]:`, error);
+            console.error(`导入失败 [${item.name} / ${(item.model_groups || [item.model_group]).join(', ')}]:`, error);
         }
     }
     
@@ -1457,7 +1513,11 @@ function editAccount(id) {
     apiKeyInput.placeholder = account.api_key_masked || '留空保持不变';
     apiKeyInput.required = false;
     
-    document.getElementById('account-model-group').value = account.model_group;
+    const modelSelect = document.getElementById('account-model-group');
+    const selectedModels = getAccountModels(account);
+    Array.from(modelSelect.options).forEach(option => {
+        option.selected = selectedModels.includes(option.value);
+    });
     document.getElementById('account-daily-quota').value = account.daily_quota;
     
     // Private API Key
@@ -1471,12 +1531,24 @@ function editAccount(id) {
 async function handleAccountSubmit(e) {
     e.preventDefault();
     
+    const selectedModelGroups = Array.from(
+        document.getElementById('account-model-group').selectedOptions || []
+    )
+        .map(option => option.value)
+        .filter(Boolean);
+
+    if (selectedModelGroups.length === 0) {
+        showToast('请至少选择一个模型组', 'warning');
+        return;
+    }
+
     const id = document.getElementById('account-id').value;
     const data = {
         name: document.getElementById('account-name').value,
         org_id: document.getElementById('account-org-id').value,
         flow_id: document.getElementById('account-flow-id').value,
-        model_group: document.getElementById('account-model-group').value,
+        model_group: selectedModelGroups[0],
+        model_groups: selectedModelGroups,
         daily_quota: parseInt(document.getElementById('account-daily-quota').value) || 1000000
     };
     
@@ -1567,7 +1639,7 @@ async function testAccount(id, showModal = true) {
         const result = {
             accountId: id,
             accountName: account.name,
-            modelGroup: account.model_group,
+            modelGroup: getAccountModels(account).join(', '),
             success: response.success,
             time: response.response_time_ms || 0,
             output: response.output || '(无输出)',
@@ -1592,7 +1664,7 @@ async function testAccount(id, showModal = true) {
         const result = {
             accountId: id,
             accountName: account.name,
-            modelGroup: account.model_group,
+            modelGroup: getAccountModels(account).join(', '),
             success: false,
             time: 0,
             output: '',
@@ -1630,7 +1702,10 @@ function updateTestStatusInTable(accountId) {
     if (!account) return;
     
     const testStatus = getTestStatusHtml(accountId);
-    modelGroupCell.innerHTML = `${escapeHtml(account.model_group)}${testStatus}`;
+    const modelTags = getAccountModels(account)
+        .map(model => `<span class="model-group-tag">${escapeHtml(model)}</span>`)
+        .join('');
+    modelGroupCell.innerHTML = `${modelTags}${testStatus}`;
 }
 
 async function testAllAccounts() {
@@ -1792,7 +1867,7 @@ function showAddGroupModal() {
     document.getElementById('group-form').reset();
     document.getElementById('group-id').value = '';
     document.getElementById('group-name').disabled = false; // 新建时启用名称输入
-    document.getElementById('group-input-mapping').value = '{"user_input": "in-0"}';
+    document.getElementById('group-input-mapping').value = '{"user_input": "in-0", "model_id": "in-1"}';
     openModal('group-modal');
 }
 
@@ -2372,10 +2447,16 @@ async function loadGroupsForSelect() {
         // 更新账号管理页面的模型组下拉框
         const accountGroupSelect = document.getElementById('account-model-group');
         if (accountGroupSelect) {
-            const currentValue = accountGroupSelect.value;
+            const currentValues = Array.from(accountGroupSelect.selectedOptions || []).map(
+                option => option.value
+            );
             accountGroupSelect.innerHTML = '<option value="">选择模型组</option>' + 
                 groupsData.map(g => `<option value="${escapeHtml(g.name)}">${escapeHtml(g.name)}</option>`).join('');
-            if (currentValue) accountGroupSelect.value = currentValue;
+            if (currentValues.length > 0) {
+                Array.from(accountGroupSelect.options).forEach(option => {
+                    option.selected = currentValues.includes(option.value);
+                });
+            }
         }
         
         // 更新账号筛选的模型组下拉框

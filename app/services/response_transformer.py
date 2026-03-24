@@ -39,7 +39,7 @@ class BackendResponse:
 
 
 # 兼容旧名称
-StackAIResponse = BackendResponse
+STResponse = BackendResponse
 
 
 # ============================================================================
@@ -1527,7 +1527,7 @@ class ResponseTransformer:
                 if is_stream_completion_marker(parsed):
                     return None
 
-                # 首先检查 outputs 字段（StackAI 标准流式格式）
+                # 首先检查 outputs 字段（st 标准流式格式）
                 if "outputs" in parsed:
                     outputs = parsed["outputs"]
                     if isinstance(outputs, dict):

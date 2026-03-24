@@ -12,6 +12,7 @@ from typing import Optional, Dict, Any, List
 from dataclasses import dataclass
 
 import httpx
+from app.services.st_usage import STUsage, extract_usage_from_analytics_run
 
 logger = logging.getLogger(__name__)
 
@@ -190,6 +191,92 @@ class AnalyticsService:
                     filtered_runs.append(r)
         
         return self._calculate_stats(filtered_runs, today_str=today)
+
+    async def find_run(
+        self,
+        org_id: str,
+        flow_id: str,
+        private_api_key: str,
+        run_id: Optional[str] = None,
+        max_pages: int = 5,
+        page_size: int = 200
+    ) -> Optional[Dict[str, Any]]:
+        """
+        查找指定 run_id 对应的运行记录。
+
+        如果 run_id 为空，则返回最新一条记录（第一页第一条）。
+        """
+        page = 0
+        target_run_id = str(run_id).strip() if run_id else None
+
+        while page < max_pages:
+            runs = await self.get_flow_analytics(
+                org_id=org_id,
+                flow_id=flow_id,
+                private_api_key=private_api_key,
+                page=page,
+                page_size=page_size
+            )
+
+            if not runs:
+                return None
+
+            if target_run_id:
+                for run in runs:
+                    run_value = str(run.get("run_id") or "").strip()
+                    if run_value and run_value == target_run_id:
+                        return run
+            else:
+                return runs[0]
+
+            if len(runs) < page_size:
+                break
+
+            page += 1
+
+        return None
+
+    async def get_run_usage(
+        self,
+        org_id: str,
+        flow_id: str,
+        private_api_key: str,
+        run_id: Optional[str] = None,
+        fallback_to_latest: bool = False
+    ) -> Optional[STUsage]:
+        """
+        获取指定 run 的 token 使用数据。
+
+        优先从 run + llms 提取 input/output/total。
+        """
+        run = await self.find_run(
+            org_id=org_id,
+            flow_id=flow_id,
+            private_api_key=private_api_key,
+            run_id=run_id
+        )
+
+        if run is None and fallback_to_latest:
+            run = await self.find_run(
+                org_id=org_id,
+                flow_id=flow_id,
+                private_api_key=private_api_key,
+                run_id=None
+            )
+
+        if not run:
+            return None
+
+        usage = extract_usage_from_analytics_run(run)
+        if usage is None:
+            return None
+
+        if run_id and str(run.get("run_id") or "").strip() == str(run_id).strip():
+            usage.source = "analytics.run_id"
+        else:
+            usage.source = "analytics.latest_run"
+
+        return usage
     
     async def _get_all_runs(
         self,
@@ -216,7 +303,7 @@ class AnalyticsService:
         """
         all_runs = []
         page = 0
-        page_size = 200  # StackAI API 最大支持 200
+        page_size = 200  # ST API 最大支持 200
         
         while page < max_pages:
             runs = await self.get_flow_analytics(
@@ -343,5 +430,5 @@ def get_analytics_service() -> AnalyticsService:
     return _analytics_service
 
 
-# 兼容旧名称
-StackAIAnalyticsService = AnalyticsService
+# st 别名
+STAnalyticsService = AnalyticsService

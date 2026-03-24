@@ -32,6 +32,13 @@ from app.services.logger import LoggerService, get_logger_service
 from app.services.stats import StatsService, get_stats_service
 from app.services.key_info import build_public_key_info_payload
 from app.services.call_logger import get_call_logger_service
+from app.services.st_usage import (
+    STUsage,
+    choose_better_usage,
+    extract_run_id,
+    extract_usage,
+    split_total_with_fallback,
+)
 from sqlalchemy import select
 
 logger = logging.getLogger(__name__)
@@ -202,6 +209,93 @@ async def validate_api_key_and_model(
     return api_key_obj, None
 
 
+def build_backend_payload(
+    user_id: str,
+    messages_context: str,
+    model_name: str,
+    input_mapping: Optional[Dict[str, str]] = None
+) -> Dict[str, Any]:
+    """根据输入映射构建后端 payload（支持 model_id -> in-1）。"""
+    payload = {
+        "user_id": user_id,
+        "conversation_id": str(uuid.uuid4())
+    }
+
+    user_field = "in-0"
+    if input_mapping and "user_input" in input_mapping:
+        user_field = input_mapping["user_input"]
+    payload[user_field] = messages_context
+
+    model_field = None
+    if input_mapping:
+        model_field = input_mapping.get("model_id") or input_mapping.get("model")
+    if model_field:
+        payload[model_field] = model_name
+
+    return payload
+
+
+def _finalize_usage(
+    preferred_usage: Optional[STUsage],
+    fallback_input_tokens: int,
+    fallback_output_tokens: int,
+    fallback_source: str,
+) -> STUsage:
+    """最终确定计费 usage，避免固定比例拆分。"""
+    if preferred_usage is None:
+        return STUsage(
+            input_tokens=max(0, int(fallback_input_tokens or 0)),
+            output_tokens=max(0, int(fallback_output_tokens or 0)),
+            total_tokens=max(0, int(fallback_input_tokens or 0)) + max(0, int(fallback_output_tokens or 0)),
+            source=fallback_source,
+            exact=False,
+        ).normalized()
+
+    preferred = preferred_usage.normalized()
+    if preferred.exact:
+        return preferred
+
+    return split_total_with_fallback(
+        preferred,
+        fallback_input_tokens=fallback_input_tokens,
+        fallback_output_tokens=fallback_output_tokens,
+    )
+
+
+async def _fetch_analytics_usage(
+    org_id: str,
+    flow_id: str,
+    private_api_key: Optional[str],
+    run_id: Optional[str] = None,
+    fallback_to_latest: bool = False,
+    retries: int = 2,
+    delay_seconds: float = 0.5,
+) -> Optional[STUsage]:
+    """从 ST Analytics 获取 run 级 usage。"""
+    if not private_api_key:
+        return None
+
+    from app.services.analytics import get_analytics_service
+    import asyncio
+
+    analytics_service = get_analytics_service()
+    for attempt in range(retries):
+        usage = await analytics_service.get_run_usage(
+            org_id=org_id,
+            flow_id=flow_id,
+            private_api_key=private_api_key,
+            run_id=run_id,
+            fallback_to_latest=fallback_to_latest
+        )
+        if usage is not None:
+            return usage.normalized()
+
+        if attempt < retries - 1 and delay_seconds > 0:
+            await asyncio.sleep(delay_seconds)
+
+    return None
+
+
 # ============================================================================
 # Chat Completions Endpoint (Requirement 1.1, 1.4, 1.5)
 # ============================================================================
@@ -290,19 +384,12 @@ async def chat_completions(
     # 使用 format_messages_to_context 直接格式化原始消息，保持正确顺序
     messages_context = transformer.format_messages_to_context(request.messages)
     
-    # 构建 payload
-    backend_payload = {
-        "user_id": request.user or "anonymous",
-        "in-0": messages_context,  # 完整对话上下文
-        "conversation_id": str(uuid.uuid4())  # 每次请求使用新的会话ID
-    }
-    
-    # 如果有自定义输入映射，应用它（但 merge_context 模式下只使用 user_input 映射）
-    if input_mapping and "user_input" in input_mapping:
-        field_name = input_mapping["user_input"]
-        if field_name != "in-0":
-            backend_payload[field_name] = messages_context
-            del backend_payload["in-0"]
+    backend_payload = build_backend_payload(
+        user_id=request.user or "anonymous",
+        messages_context=messages_context,
+        model_name=request.model,
+        input_mapping=input_mapping
+    )
     
     logger.info(f"Request {request_id}: model={request.model}, stream={request.stream}")
     
@@ -331,25 +418,6 @@ async def chat_completions(
                     last_user_msg = msg.content if isinstance(msg.content, str) else str(msg.content)
                     break
             
-            # 从 Stack AI Analytics 获取请求前的 today_tokens（用于计算差值）
-            pre_request_tokens = 0
-            if private_api_key:
-                try:
-                    from app.services.analytics import get_analytics_service
-                    analytics_service = get_analytics_service()
-                    stats = await analytics_service.get_recent_stats(
-                        org_id=account.org_id,
-                        flow_id=account.flow_id,
-                        private_api_key=private_api_key,
-                        days=1
-                    )
-                    if stats:
-                        pre_request_tokens = stats.today_tokens
-                        print(f"[DEBUG] Pre-request today_tokens from Analytics: {pre_request_tokens}")
-                except Exception as e:
-                    print(f"[DEBUG] Failed to get pre-request tokens: {e}")
-                    pre_request_tokens = 0
-            
             stream_context = {
                 "request_id": request_id,
                 "api_key_id": api_key_obj.id if api_key_obj else None,
@@ -359,7 +427,7 @@ async def chat_completions(
                 "model": request.model,
                 "account_id": account.id,
                 "account_name": account.name,
-                "model_group": account.model_group,
+                "model_group": request.model,
                 "account_org_id": account.org_id,
                 "account_flow_id": account.flow_id,
                 "private_api_key": private_api_key,
@@ -367,7 +435,8 @@ async def chat_completions(
                 "accumulated_content": [],
                 "input_preview": input_preview,
                 "last_user_msg": last_user_msg,  # 只用当前消息计算输入 token
-                "pre_request_tokens": pre_request_tokens  # 从 Stack AI Analytics 获取的请求前 token
+                "st_run_id": None,
+                "st_usage": None,
             }
             
             # [DEBUG] 流式请求调试输出
@@ -382,10 +451,25 @@ async def chat_completions(
                         stream=True,
                         account_pool=account_pool
                     )
-                    
+
+                    async def tracked_backend_stream():
+                        async for raw_chunk in stream_gen:
+                            run_id = extract_run_id(raw_chunk)
+                            if run_id and not stream_context.get("st_run_id"):
+                                stream_context["st_run_id"] = run_id
+
+                            usage_candidate = extract_usage(raw_chunk, source="backend.stream")
+                            if usage_candidate is not None:
+                                stream_context["st_usage"] = choose_better_usage(
+                                    stream_context.get("st_usage"),
+                                    usage_candidate
+                                )
+
+                            yield raw_chunk
+
                     # 直接转换并输出，同时累积内容
                     async for chunk in response_transformer.transform_backend_sse_to_openai(
-                        stream_gen, request.model, request_id
+                        tracked_backend_stream(), request.model, request_id
                     ):
                         # 尝试从 chunk 中提取内容用于 token 估算
                         if chunk.startswith("data: ") and not chunk.startswith("data: [DONE]"):
@@ -434,7 +518,7 @@ async def chat_completions(
             )
             
             # 转换响应格式
-            # 只用最后一条用户消息计算输入 token（匹配 Stack AI 的计费方式）
+            # 只用最后一条用户消息计算输入 token（匹配 ST 的计费方式）
             last_user_msg = ""
             for msg in reversed(request.messages):
                 if msg.role == "user":
@@ -445,15 +529,52 @@ async def chat_completions(
                 backend_response, request.model, request_id,
                 input_text=last_user_msg  # 只用当前用户消息计算 prompt_tokens
             )
-            
-            # 更新 token 使用量
-            usage = openai_response.get("usage", {})
-            prompt_tokens = usage.get("prompt_tokens", 0)
-            completion_tokens = usage.get("completion_tokens", 0)
-            total_tokens = usage.get("total_tokens", 0)
-            
-            # 调试日志：显示 token 计算来源
-            print(f"[DEBUG] Token calculation - last_user_msg='{last_user_msg[:50]}...', input_text_len={len(last_user_msg)}, prompt_tokens={prompt_tokens}, completion_tokens={completion_tokens}")
+
+            # 从后端响应提取 usage；必要时回退到 analytics(run_id)
+            estimated_usage = openai_response.get("usage", {})
+            estimated_prompt_tokens = estimated_usage.get("prompt_tokens", 0)
+            estimated_completion_tokens = estimated_usage.get("completion_tokens", 0)
+
+            backend_usage = extract_usage(backend_response, source="backend.sync")
+            run_id = extract_run_id(backend_response)
+
+            analytics_usage = None
+            if backend_usage is None or not backend_usage.exact:
+                private_api_key = account_pool.decrypt_private_api_key(account)
+                analytics_usage = await _fetch_analytics_usage(
+                    org_id=account.org_id,
+                    flow_id=account.flow_id,
+                    private_api_key=private_api_key,
+                    run_id=run_id,
+                    fallback_to_latest=False,
+                    retries=2,
+                    delay_seconds=0.4,
+                )
+
+            selected_usage = choose_better_usage(backend_usage, analytics_usage)
+            final_usage = _finalize_usage(
+                preferred_usage=selected_usage,
+                fallback_input_tokens=estimated_prompt_tokens,
+                fallback_output_tokens=estimated_completion_tokens,
+                fallback_source="estimate.openai",
+            )
+
+            prompt_tokens = final_usage.input_tokens
+            completion_tokens = final_usage.output_tokens
+            total_tokens = final_usage.total_tokens
+
+            # 覆盖响应 usage，返回准确口径
+            openai_response["usage"] = {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": total_tokens
+            }
+
+            logger.debug(
+                f"Request {request_id}: usage source={final_usage.source}, run_id={run_id}, "
+                f"tokens in/out/total={prompt_tokens}/{completion_tokens}/{total_tokens}"
+            )
+
             if total_tokens > 0:
                 await account_pool.update_token_usage(
                     session, account.id,
@@ -520,7 +641,7 @@ async def chat_completions(
                 client_ip=client_ip,
                 account_id=account.id,
                 account_name=account.name,
-                model_group=account.model_group,
+                model_group=request.model,
                 model=request.model,
                 api_type="openai",
                 is_stream=False,
@@ -884,7 +1005,7 @@ async def create_response(
             pass
     
     # 7. 转换为后端格式
-    backend_payload = transformer.to_stackai_dict(
+    backend_payload = transformer.to_st_dict(
         unified_request,
         input_mapping=input_mapping,
         user_id="anonymous"
@@ -1046,7 +1167,34 @@ async def create_response(
             
             # 提取内容
             content = response_transformer._extract_content(backend_response)
-            
+
+            fallback_input_tokens = len(str(request.input)) // 4
+            fallback_output_tokens = len(content) // 4
+
+            backend_usage = extract_usage(backend_response, source="backend.responses_sync")
+            run_id = extract_run_id(backend_response)
+
+            analytics_usage = None
+            if backend_usage is None or not backend_usage.exact:
+                private_api_key = account_pool.decrypt_private_api_key(account)
+                analytics_usage = await _fetch_analytics_usage(
+                    org_id=account.org_id,
+                    flow_id=account.flow_id,
+                    private_api_key=private_api_key,
+                    run_id=run_id,
+                    fallback_to_latest=False,
+                    retries=2,
+                    delay_seconds=0.4,
+                )
+
+            selected_usage = choose_better_usage(backend_usage, analytics_usage)
+            final_usage = _finalize_usage(
+                preferred_usage=selected_usage,
+                fallback_input_tokens=fallback_input_tokens,
+                fallback_output_tokens=fallback_output_tokens,
+                fallback_source="estimate.responses",
+            )
+
             # 构建 Responses API 格式的响应
             response_data = {
                 "id": f"resp_{request_id}",
@@ -1061,9 +1209,9 @@ async def create_response(
                     "content": [{"type": "output_text", "text": content}]
                 }],
                 "usage": {
-                    "input_tokens": len(str(request.input)) // 4,
-                    "output_tokens": len(content) // 4,
-                    "total_tokens": (len(str(request.input)) + len(content)) // 4
+                    "input_tokens": final_usage.input_tokens,
+                    "output_tokens": final_usage.output_tokens,
+                    "total_tokens": final_usage.total_tokens
                 }
             }
             
@@ -1104,73 +1252,50 @@ async def update_stream_stats(context: dict):
     """
     from app.models.database import get_session_factory
     from app.services.token_counter import get_token_counter
-    from app.services.analytics import get_analytics_service
     from app.services.call_logger import get_call_logger_service
     
     try:
         elapsed_ms = int((time.time() - context["start_time"]) * 1000)
-        input_tokens = 0
-        output_tokens = 0
-        total_tokens = 0
-        
-        # 方法 1：从 Stack AI Analytics 获取真实 token（使用调用前后差值）
-        # pre_request_tokens 是调用前从 Stack AI 获取的 today_tokens
-        # 现在请求完成后再次获取 today_tokens，差值就是本次请求的 token
-        private_api_key = context.get("private_api_key")
-        analytics_success = False
-        
-        if private_api_key:
-            try:
-                from app.services.analytics import get_analytics_service
-                analytics_service = get_analytics_service()
-                
-                # 等待一小段时间让 Stack AI 更新统计
-                import asyncio
-                await asyncio.sleep(0.5)
-                
-                # 获取请求后的 today_tokens
-                stats = await analytics_service.get_recent_stats(
-                    org_id=context["account_org_id"],
-                    flow_id=context["account_flow_id"],
-                    private_api_key=private_api_key,
-                    days=1
-                )
-                
-                if stats and stats.today_tokens > 0:
-                    # pre_request_tokens 是真正的调用前 today_tokens
-                    pre_tokens = context.get("pre_request_tokens", 0)
-                    current_tokens = stats.today_tokens
-                    
-                    # 只有当 current > pre 时才使用差值
-                    if current_tokens > pre_tokens:
-                        total_tokens = current_tokens - pre_tokens
-                        # 假设输入:输出比例约 1:2
-                        input_tokens = total_tokens // 3
-                        output_tokens = total_tokens - input_tokens
-                        analytics_success = True
-                        print(f"[DEBUG] Analytics: pre={pre_tokens}, current={current_tokens}, delta={total_tokens}")
-            except Exception as e:
-                print(f"[DEBUG] Analytics failed: {e}")
-        
-        # 获取累积的输出内容（用于 output_preview 和 tiktoken 估算）
+        # 获取累积的输出内容（用于 output_preview 和 fallback 估算）
         accumulated_content = "".join(context.get("accumulated_content", []))
-        
-        # 方法 2：如果 Analytics 失败，使用 tiktoken 估算
-        if not analytics_success:
-            
-            token_counter = get_token_counter()
-            
-            # 计算输入 token（只用最后一条用户消息）
-            last_user_msg = context.get("last_user_msg", "")
-            if last_user_msg:
-                input_tokens = token_counter.count(last_user_msg)
-            
-            # 计算输出 token
-            if accumulated_content:
-                output_tokens = token_counter.count(accumulated_content)
-            
-            total_tokens = input_tokens + output_tokens
-            print(f"[DEBUG] Tiktoken fallback: input={input_tokens}, output={output_tokens}, total={total_tokens}")
+
+        # fallback: tiktoken 估算
+        token_counter = get_token_counter()
+        fallback_input_tokens = 0
+        fallback_output_tokens = 0
+        last_user_msg = context.get("last_user_msg", "")
+        if last_user_msg:
+            fallback_input_tokens = token_counter.count(last_user_msg)
+        if accumulated_content:
+            fallback_output_tokens = token_counter.count(accumulated_content)
+
+        # 优先使用流中捕获的 usage（来自后端 SSE 原始 chunk）
+        selected_usage = context.get("st_usage")
+
+        # 如流中没有精确 usage，尝试通过 run_id 从 analytics 获取
+        run_id = context.get("st_run_id")
+        if selected_usage is None or not selected_usage.exact:
+            analytics_usage = await _fetch_analytics_usage(
+                org_id=context["account_org_id"],
+                flow_id=context["account_flow_id"],
+                private_api_key=context.get("private_api_key"),
+                run_id=run_id,
+                fallback_to_latest=False,
+                retries=3,
+                delay_seconds=0.5,
+            )
+            selected_usage = choose_better_usage(selected_usage, analytics_usage)
+
+        final_usage = _finalize_usage(
+            preferred_usage=selected_usage,
+            fallback_input_tokens=fallback_input_tokens,
+            fallback_output_tokens=fallback_output_tokens,
+            fallback_source="estimate.stream",
+        )
+
+        input_tokens = final_usage.input_tokens
+        output_tokens = final_usage.output_tokens
+        total_tokens = final_usage.total_tokens
         
         # 创建新的数据库会话
         session_factory = get_session_factory()
@@ -1231,7 +1356,8 @@ async def update_stream_stats(context: dict):
             
         logger.debug(
             f"Stream stats updated for request {context['request_id']}: "
-            f"tokens={total_tokens} (in={input_tokens}, out={output_tokens}), elapsed={elapsed_ms}ms"
+            f"tokens={total_tokens} (in={input_tokens}, out={output_tokens}), "
+            f"source={final_usage.source}, run_id={context.get('st_run_id')}, elapsed={elapsed_ms}ms"
         )
     except Exception as e:
         logger.error(f"Failed to update stream stats: {e}")

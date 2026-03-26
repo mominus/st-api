@@ -549,7 +549,86 @@ class AccountPoolService:
 
     # ==================== Round-Robin Load Balancing ====================
     # Requirements: 2.3, 2.4, 2.5
-    
+
+    async def _list_model_group_accounts(
+        self,
+        session: AsyncSession,
+        model_group: str
+    ) -> List[STAccount]:
+        """收集模型组关联账号（新路由优先 + 旧字段兜底，去重）。"""
+        routed_result = await session.execute(
+            select(STAccount)
+            .join(
+                AccountModelRoute,
+                AccountModelRoute.account_id == STAccount.id
+            )
+            .where(
+                and_(
+                    AccountModelRoute.model_name == model_group,
+                    AccountModelRoute.enabled == True
+                )
+            )
+            .order_by(
+                AccountModelRoute.priority.asc(),
+                STAccount.id.asc()
+            )
+        )
+        routed_accounts = list(routed_result.scalars().unique().all())
+
+        legacy_result = await session.execute(
+            select(STAccount).where(
+                STAccount.model_group == model_group
+            ).order_by(STAccount.id)
+        )
+
+        accounts: List[STAccount] = []
+        existing_ids = set()
+        for account in routed_accounts:
+            if account.id in existing_ids:
+                continue
+            existing_ids.add(account.id)
+            accounts.append(account)
+        for legacy_account in legacy_result.scalars().all():
+            if legacy_account.id in existing_ids:
+                continue
+            existing_ids.add(legacy_account.id)
+            accounts.append(legacy_account)
+        return accounts
+
+    async def get_model_group_availability(
+        self,
+        session: AsyncSession,
+        model_group: str
+    ) -> Dict[str, Any]:
+        """
+        返回模型组账号可用性快照，用于精确诊断无可用账号原因。
+        """
+        accounts = await self._list_model_group_accounts(session, model_group)
+        status_counts: Dict[str, int] = defaultdict(int)
+        routable_accounts = 0
+        eligible_accounts = 0
+        stale_exhausted_accounts = 0
+
+        for account in accounts:
+            status = str(account.status or "unknown")
+            status_counts[status] += 1
+
+            if status in {"active", "exhausted"}:
+                routable_accounts += 1
+                if account.daily_used < account.daily_quota:
+                    eligible_accounts += 1
+                    if status == "exhausted":
+                        stale_exhausted_accounts += 1
+
+        return {
+            "model_group": model_group,
+            "total_accounts": len(accounts),
+            "routable_accounts": routable_accounts,
+            "eligible_accounts": eligible_accounts,
+            "stale_exhausted_accounts": stale_exhausted_accounts,
+            "status_counts": dict(sorted(status_counts.items())),
+        }
+
     async def get_available_account(
         self,
         session: AsyncSession,
@@ -568,72 +647,95 @@ class AccountPoolService:
         Returns:
             可用的账号对象，如果没有可用账号则返回 None
         """
-        # 优先按新路由表选择账号（支持单账号多模型）
-        routed_result = await session.execute(
-            select(STAccount)
-            .join(
-                AccountModelRoute,
-                AccountModelRoute.account_id == STAccount.id
-            )
-            .where(
-                and_(
-                    AccountModelRoute.model_name == model_group,
-                    AccountModelRoute.enabled == True,
-                    STAccount.status == "active"
-                )
-            )
-            .order_by(
-                AccountModelRoute.priority.asc(),
-                STAccount.id.asc()
-            )
-        )
-        accounts = list(routed_result.scalars().unique().all())
+        accounts = await self._list_model_group_accounts(session, model_group)
 
-        # 旧字段兜底（兼容历史数据，合并未迁移记录）
-        legacy_result = await session.execute(
-            select(STAccount).where(
-                and_(
-                    STAccount.model_group == model_group,
-                    STAccount.status == "active"
-                )
-            ).order_by(STAccount.id)
-        )
-        if accounts:
-            existing_ids = {a.id for a in accounts}
-            for legacy_account in legacy_result.scalars().all():
-                if legacy_account.id not in existing_ids:
-                    accounts.append(legacy_account)
-        else:
-            accounts = list(legacy_result.scalars().all())
-        
         if not accounts:
-            logger.warning(f"No available accounts in model group: {model_group}")
+            logger.warning(
+                "No routed accounts configured in model group: %s",
+                model_group
+            )
             return None
-        
+
+        routable_accounts = [
+            account for account in accounts
+            if account.status in {"active", "exhausted"}
+        ]
+
+        if not routable_accounts:
+            status_counts: Dict[str, int] = defaultdict(int)
+            for account in accounts:
+                key = str(account.status or "unknown")
+                status_counts[key] += 1
+            logger.warning(
+                "No routable accounts in model group '%s' (total=%d, status_counts=%s)",
+                model_group,
+                len(accounts),
+                dict(sorted(status_counts.items())),
+            )
+            return None
+
+        eligible_accounts = [
+            account for account in routable_accounts
+            if account.daily_used < account.daily_quota
+        ]
+
+        # 容错：如果状态是 exhausted 但使用量已回落到配额内，视为陈旧状态并自动恢复。
+        # 这可以避免并发统计延迟导致瞬时“全耗尽”时直接 503。
+        stale_exhausted = [account for account in eligible_accounts if account.status == "exhausted"]
+        if stale_exhausted:
+            now = datetime.utcnow()
+            for account in stale_exhausted:
+                account.status = "active"
+                account.updated_at = now
+            await session.flush()
+            logger.info(
+                "Recovered stale exhausted accounts for model group '%s': recovered=%d",
+                model_group,
+                len(stale_exhausted),
+            )
+
+        if not eligible_accounts:
+            quota_blocked = 0
+            now = datetime.utcnow()
+            for account in routable_accounts:
+                if account.status == "active":
+                    account.status = "exhausted"
+                    account.updated_at = now
+                quota_blocked += 1
+            if quota_blocked:
+                await session.flush()
+            logger.warning(
+                "All routable accounts quota-blocked in model group '%s' (routable=%d, quota_blocked=%d)",
+                model_group,
+                len(routable_accounts),
+                quota_blocked,
+            )
+            return None
+
         # 获取当前轮询索引
         current_index = self._round_robin_index[model_group]
-        
-        # 尝试找到一个可用账号（最多尝试 len(accounts) 次）
-        for _ in range(len(accounts)):
+
+        # 尝试找到一个可用账号（最多尝试 len(eligible_accounts) 次）
+        for _ in range(len(eligible_accounts)):
             # 使用模运算确保索引在有效范围内
-            index = current_index % len(accounts)
-            account = accounts[index]
-            
+            index = current_index % len(eligible_accounts)
+            account = eligible_accounts[index]
+
             # 更新轮询索引
             current_index += 1
             self._round_robin_index[model_group] = current_index
-            
-            # 检查账号是否可用（未耗尽）
-            if account.daily_used < account.daily_quota:
-                # 更新最后使用时间
-                account.last_used_at = datetime.utcnow()
-                await session.commit()
-                
-                logger.debug(f"Selected account {account.id} for group {model_group}")
-                return account
-        
-        # 所有账号都已耗尽
-        logger.warning(f"All accounts exhausted in model group: {model_group}")
+
+            # eligible_accounts 已经过滤过配额，这里直接选择并更新使用时间
+            now = datetime.utcnow()
+            account.last_used_at = now
+            if account.status != "active":
+                account.status = "active"
+                account.updated_at = now
+            await session.commit()
+
+            logger.debug(f"Selected account {account.id} for group {model_group}")
+            return account
+
         return None
     
     def get_round_robin_index(self, model_group: str) -> int:

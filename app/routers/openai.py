@@ -1,84 +1,54 @@
-"""
-OpenAI Compatible Router
-实现 OpenAI API 兼容的路由端点
+"""OpenAI-compatible router (rewritten with unified protocol/runtime core)."""
 
-Requirements: 1.1, 1.4, 1.5
-"""
+from __future__ import annotations
 
 import json
-import uuid
-import time
 import logging
-from typing import Optional, List, Dict, Any, Union
+import re
+import time
+import uuid
+from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Request, Depends, Header, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, Query, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.database import get_session, ModelGroup
-from app.services.transformer import (
-    OpenAIChatRequest, OpenAIMessage, RequestTransformer, get_transformer
-)
-from app.services.api_key import APIKeyService, get_api_key_service
-from app.services.account_pool import AccountPoolService, get_account_pool_service
-from app.services.backend_client import (
-    BackendClient, get_backend_client,
-    BackendClientError, BackendAPIError, BackendConnectionError, BackendTimeoutError
-)
-from app.services.response_transformer import ResponseTransformer, get_response_transformer
-from app.services.error_handler import ErrorHandler, get_error_handler, APIError, ErrorType
-from app.services.logger import LoggerService, get_logger_service
-from app.services.stats import StatsService, get_stats_service
-from app.services.key_info import build_public_key_info_payload
+from app.models.database import get_session
+from app.services.api_key import get_api_key_service
 from app.services.call_logger import get_call_logger_service
-from app.services.st_usage import (
-    STUsage,
-    choose_better_usage,
-    extract_run_id,
-    extract_usage,
-    split_total_with_fallback,
+from app.services.error_handler import APIError, get_error_handler
+from app.services.gateway_runtime import GatewayAuthError, get_gateway_runtime
+from app.services.key_info import build_public_key_info_payload
+from app.services.protocol_bridge import (
+    CanonicalRequest,
+    ParsedOutput,
+    UsageNumbers,
+    get_protocol_bridge,
 )
-from sqlalchemy import select
 
 logger = logging.getLogger(__name__)
 
-# 创建路由器
 router = APIRouter(prefix="/v1", tags=["OpenAI Compatible"])
 
 
-# ============================================================================
-# Request/Response Models
-# ============================================================================
-
 class ChatCompletionRequest(BaseModel):
-    """OpenAI Chat Completion 请求模型"""
-    model: str = Field(..., description="模型名称")
-    messages: List[OpenAIMessage] = Field(..., description="消息列表")
-    stream: bool = Field(default=False, description="是否流式响应")
-    temperature: Optional[float] = Field(default=None, ge=0, le=2, description="温度参数")
-    max_tokens: Optional[int] = Field(default=None, gt=0, description="最大 token 数")
-    top_p: Optional[float] = Field(default=None, ge=0, le=1, description="Top-p 采样")
-    frequency_penalty: Optional[float] = Field(default=None, ge=-2, le=2, description="频率惩罚")
-    presence_penalty: Optional[float] = Field(default=None, ge=-2, le=2, description="存在惩罚")
-    stop: Optional[List[str]] = Field(default=None, description="停止序列")
-    user: Optional[str] = Field(default=None, description="用户标识")
+    model_config = {"extra": "allow"}
+
+    model: str = Field(...)
+    messages: List[Dict[str, Any]] = Field(...)
+    stream: bool = Field(default=False)
 
 
 class ResponsesRequest(BaseModel):
-    """OpenAI Responses API 请求模型 (用于 Codex 等)"""
-    model_config = {"extra": "allow"}  # 允许额外字段
-    
-    model: str = Field(..., description="模型名称")
-    input: Any = Field(..., description="输入内容，可以是字符串或消息数组")
-    stream: bool = Field(default=False, description="是否流式响应")
-    temperature: Optional[float] = Field(default=None, description="温度参数")
-    max_output_tokens: Optional[int] = Field(default=None, description="最大输出 token 数")
-    instructions: Optional[str] = Field(default=None, description="系统指令")
+    model_config = {"extra": "allow"}
+
+    model: str = Field(...)
+    input: Any = Field(...)
+    stream: bool = Field(default=False)
 
 
 class ModelInfo(BaseModel):
-    """模型信息"""
     id: str
     object: str = "model"
     created: int
@@ -86,738 +56,1027 @@ class ModelInfo(BaseModel):
 
 
 class ModelsResponse(BaseModel):
-    """模型列表响应"""
     object: str = "list"
     data: List[ModelInfo]
 
 
-# ============================================================================
-# Helper Functions
-# ============================================================================
-
-def sanitize_api_key(key: str) -> str:
-    """
-    清理 API Key 中可能的 Unicode 连字符变体
-    
-    用户复制粘贴时可能引入这些字符（从 Word、PDF、网页等）
-    EN DASH (U+2013), EM DASH (U+2014), MINUS SIGN (U+2212) -> ASCII hyphen (U+002D)
-    """
-    return key.replace('\u2013', '-').replace('\u2014', '-').replace('\u2212', '-')
+def _openai_error_payload(error_handler, error: APIError) -> Dict[str, Any]:
+    return error_handler.to_openai_error(error)
 
 
-def extract_api_key(authorization: Optional[str]) -> Optional[str]:
-    """
-    从 Authorization header 提取 API Key
-    
-    支持格式:
-    - Bearer sk-xxx
-    - sk-xxx
-    """
-    if not authorization:
-        return None
-    
-    auth = authorization.strip()
-    if auth.lower().startswith("bearer "):
-        key = auth[7:].strip()
-    else:
-        key = auth
-    
-    return sanitize_api_key(key)
-
-
-def extract_api_key_from_headers(
-    authorization: Optional[str],
-    x_api_key: Optional[str] = None
-) -> Optional[str]:
-    """
-    从多个请求头中提取 API Key。
-
-    优先级:
-    1. Authorization: Bearer sk-xxx
-    2. x-api-key: sk-xxx
-    """
-    key = extract_api_key(authorization)
-    if key:
-        return key
-
-    if x_api_key:
-        return sanitize_api_key(x_api_key.strip())
-
-    return None
-
-
-def extract_api_key_from_request(
-    authorization: Optional[str],
-    x_api_key: Optional[str] = None,
-    api_key_query: Optional[str] = None,
-    key_query: Optional[str] = None
-) -> Optional[str]:
-    """
-    从请求头或查询参数中提取 API Key。
-
-    优先级:
-    1. Authorization: Bearer sk-xxx
-    2. x-api-key: sk-xxx
-    3. ?api_key=sk-xxx
-    4. ?key=sk-xxx
-    """
-    key = extract_api_key_from_headers(authorization, x_api_key)
-    if key:
-        return key
-
-    if api_key_query:
-        return sanitize_api_key(api_key_query.strip())
-
-    if key_query:
-        return sanitize_api_key(key_query.strip())
-
-    return None
-
-
-async def validate_api_key_and_model(
-    session: AsyncSession,
-    raw_key: str,
-    model: str,
-    api_key_service: APIKeyService,
-    error_handler: ErrorHandler
-) -> tuple:
-    """
-    验证 API Key 和模型权限
-    
-    Returns:
-        (api_key_obj, error_response) - 如果验证失败，error_response 不为 None
-    """
-    is_valid, error_msg, api_key_obj = await api_key_service.validate_key(
-        session, raw_key, model
+def _openai_error_response(error_handler, error: APIError) -> JSONResponse:
+    return JSONResponse(
+        status_code=error.status_code,
+        content=_openai_error_payload(error_handler, error),
     )
-    
-    if not is_valid:
-        if "not authorized" in (error_msg or "").lower():
-            error = error_handler.create_permission_error(error_msg)
-        elif "quota" in (error_msg or "").lower():
-            error = error_handler.create_quota_exceeded_error(error_msg)
-        elif "expired" in (error_msg or "").lower():
-            error = error_handler.create_authentication_error(error_msg)
-        else:
-            error = error_handler.create_authentication_error(error_msg or "Invalid API key")
-        
-        return None, JSONResponse(
-            status_code=error.status_code,
-            content=error_handler.to_openai_error(error)
-        )
-    
-    return api_key_obj, None
 
 
-def build_backend_payload(
-    user_id: str,
-    messages_context: str,
-    model_name: str,
-    input_mapping: Optional[Dict[str, str]] = None
+def _sse_data(data: Dict[str, Any]) -> str:
+    return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+def _openai_chunk(
+    *,
+    request_id: str,
+    model: str,
+    delta: Dict[str, Any],
+    finish_reason: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """根据输入映射构建后端 payload（支持 model_id -> in-1）。"""
-    payload = {
-        "user_id": user_id,
-        "conversation_id": str(uuid.uuid4())
+    return {
+        "id": f"chatcmpl-{request_id}",
+        "object": "chat.completion.chunk",
+        "created": int(time.time()),
+        "model": model,
+        "choices": [
+            {
+                "index": 0,
+                "delta": delta,
+                "finish_reason": finish_reason,
+            }
+        ],
     }
 
-    user_field = "in-0"
-    if input_mapping and "user_input" in input_mapping:
-        user_field = input_mapping["user_input"]
-    payload[user_field] = messages_context
 
-    model_field = None
-    if input_mapping:
-        model_field = input_mapping.get("model_id") or input_mapping.get("model")
-    if model_field:
-        payload[model_field] = model_name
-
-    return payload
+def _normalize_tool_turn_output(parsed: ParsedOutput, *, tools_declared: bool) -> ParsedOutput:
+    """When tools are declared, suppress assistant prose once tool calls are present."""
+    if tools_declared and parsed.tool_calls:
+        return ParsedOutput(text="", tool_calls=parsed.tool_calls)
+    return parsed
 
 
-def _finalize_usage(
-    preferred_usage: Optional[STUsage],
-    fallback_input_tokens: int,
-    fallback_output_tokens: int,
-    fallback_source: str,
-) -> STUsage:
-    """最终确定计费 usage，避免固定比例拆分。"""
-    if preferred_usage is None:
-        return STUsage(
-            input_tokens=max(0, int(fallback_input_tokens or 0)),
-            output_tokens=max(0, int(fallback_output_tokens or 0)),
-            total_tokens=max(0, int(fallback_input_tokens or 0)) + max(0, int(fallback_output_tokens or 0)),
-            source=fallback_source,
-            exact=False,
-        ).normalized()
+class _ToolAwareTextBuffer:
+    """Incremental text parser that suppresses tool-call payload leakage."""
 
-    preferred = preferred_usage.normalized()
-    if preferred.exact:
-        return preferred
+    JSON_BLOCK_START = "```json"
+    JSON_BLOCK_END = "```"
+    XML_TOOL_START = "<tool_use"
+    XML_TOOL_END = "</tool_use>"
+    BRACKET_TOOL_START = "[tool_call"
 
-    return split_total_with_fallback(
-        preferred,
-        fallback_input_tokens=fallback_input_tokens,
-        fallback_output_tokens=fallback_output_tokens,
+    STATE_TEXT = "text"
+    STATE_JSON = "json"
+    STATE_XML = "xml"
+    STATE_BRACKET = "bracket"
+    STATE_PLAIN_JSON = "plain_json"
+
+    BRACKET_TOOL_CALL_HEADER_PATTERN = re.compile(
+        r"\[tool_call\s+id=([^\s\]]+)\s+name=([^\]]+)\]\s*",
+        re.IGNORECASE,
+    )
+    PLAIN_TOOL_JSON_START_PATTERN = re.compile(
+        r"(^|\n)\s*(\{\s*\"tool\")",
+        re.IGNORECASE,
     )
 
+    def __init__(self, bridge, *, max_buffer_size: int = 65536) -> None:
+        self._bridge = bridge
+        self._max_buffer_size = max_buffer_size
+        self._buffer = ""
+        self._state = self.STATE_TEXT
+        self._tool_detected = False
 
-async def _fetch_analytics_usage(
-    org_id: str,
-    flow_id: str,
-    private_api_key: Optional[str],
-    run_id: Optional[str] = None,
-    fallback_to_latest: bool = False,
-    retries: int = 2,
-    delay_seconds: float = 0.5,
-) -> Optional[STUsage]:
-    """从 ST Analytics 获取 run 级 usage。"""
-    if not private_api_key:
-        return None
+    @property
+    def tool_detected(self) -> bool:
+        return self._tool_detected
 
-    from app.services.analytics import get_analytics_service
-    import asyncio
+    def feed(self, token: str) -> List[str]:
+        if not token:
+            return []
+        if self._tool_detected:
+            return []
+        self._buffer += token
+        return self._drain(finalize=False)
 
-    analytics_service = get_analytics_service()
-    for attempt in range(retries):
-        usage = await analytics_service.get_run_usage(
-            org_id=org_id,
-            flow_id=flow_id,
-            private_api_key=private_api_key,
-            run_id=run_id,
-            fallback_to_latest=fallback_to_latest
-        )
-        if usage is not None:
-            return usage.normalized()
+    def finish(self) -> List[str]:
+        return self._drain(finalize=True)
 
-        if attempt < retries - 1 and delay_seconds > 0:
-            await asyncio.sleep(delay_seconds)
+    def _drain(self, *, finalize: bool) -> List[str]:
+        outputs: List[str] = []
 
-    return None
+        while self._buffer:
+            if self._state == self.STATE_TEXT:
+                if self._tool_detected:
+                    self._buffer = ""
+                    break
+
+                start_pos, start_type = self._find_next_marker(self._buffer)
+                if start_pos != -1:
+                    if start_pos > 0:
+                        text_before = self._buffer[:start_pos]
+                        if text_before:
+                            outputs.append(text_before)
+                    self._buffer = self._buffer[start_pos:]
+                    self._state = start_type
+                    continue
+
+                if finalize:
+                    outputs.append(self._buffer)
+                    self._buffer = ""
+                    break
+
+                tail_len = self._marker_tail_len()
+                if len(self._buffer) <= tail_len:
+                    break
+
+                safe_len = len(self._buffer) - tail_len
+                outputs.append(self._buffer[:safe_len])
+                self._buffer = self._buffer[safe_len:]
+                break
+
+            consumed_and_valid: Optional[tuple[int, bool]]
+            if self._state == self.STATE_JSON:
+                consumed_and_valid = self._consume_json_block()
+            elif self._state == self.STATE_XML:
+                consumed_and_valid = self._consume_xml_block()
+            elif self._state == self.STATE_BRACKET:
+                consumed_and_valid = self._consume_bracket_call()
+            elif self._state == self.STATE_PLAIN_JSON:
+                consumed_and_valid = self._consume_plain_json_tool_call()
+            else:
+                consumed_and_valid = None
+
+            if consumed_and_valid is None:
+                if finalize or len(self._buffer) > self._max_buffer_size:
+                    outputs.append(self._buffer)
+                    self._buffer = ""
+                    self._state = self.STATE_TEXT
+                break
+
+            consumed_len, is_valid_tool = consumed_and_valid
+            segment = self._buffer[:consumed_len]
+            self._buffer = self._buffer[consumed_len:]
+            self._state = self.STATE_TEXT
+
+            if is_valid_tool:
+                self._tool_detected = True
+                self._buffer = ""
+                break
+
+            if segment:
+                outputs.append(segment)
+
+        return outputs
+
+    def _find_next_marker(self, text: str) -> tuple[int, str]:
+        candidates: List[tuple[int, str]] = []
+
+        json_pos = text.find(self.JSON_BLOCK_START)
+        if json_pos != -1:
+            candidates.append((json_pos, self.STATE_JSON))
+
+        xml_pos = text.find(self.XML_TOOL_START)
+        if xml_pos != -1:
+            candidates.append((xml_pos, self.STATE_XML))
+
+        bracket_pos = text.find(self.BRACKET_TOOL_START)
+        if bracket_pos != -1:
+            candidates.append((bracket_pos, self.STATE_BRACKET))
+
+        plain_match = self.PLAIN_TOOL_JSON_START_PATTERN.search(text)
+        if plain_match is not None:
+            candidates.append((plain_match.start(2), self.STATE_PLAIN_JSON))
+
+        if not candidates:
+            return -1, self.STATE_TEXT
+        return min(candidates, key=lambda x: x[0])
+
+    def _marker_tail_len(self) -> int:
+        return max(
+            len(self.JSON_BLOCK_START),
+            len(self.XML_TOOL_START),
+            len(self.BRACKET_TOOL_START),
+            len('{"tool"'),
+        ) - 1
+
+    def _consume_json_block(self) -> Optional[tuple[int, bool]]:
+        search_start = len(self.JSON_BLOCK_START)
+        end_pos = self._buffer.find(self.JSON_BLOCK_END, search_start)
+        if end_pos == -1:
+            return None
+        consumed_len = end_pos + len(self.JSON_BLOCK_END)
+        segment = self._buffer[:consumed_len]
+        return consumed_len, self._is_valid_tool_segment(segment)
+
+    def _consume_xml_block(self) -> Optional[tuple[int, bool]]:
+        end_pos = self._buffer.find(self.XML_TOOL_END)
+        if end_pos == -1:
+            return None
+        consumed_len = end_pos + len(self.XML_TOOL_END)
+        segment = self._buffer[:consumed_len]
+        return consumed_len, self._is_valid_tool_segment(segment)
+
+    def _consume_bracket_call(self) -> Optional[tuple[int, bool]]:
+        header_match = self.BRACKET_TOOL_CALL_HEADER_PATTERN.match(self._buffer)
+        if not header_match:
+            closing = self._buffer.find("]")
+            if closing == -1:
+                return None
+            consumed_len = closing + 1
+            segment = self._buffer[:consumed_len]
+            return consumed_len, self._is_valid_tool_segment(segment)
+
+        rest = self._buffer[header_match.end():]
+        leading_ws = len(rest) - len(rest.lstrip())
+        json_part = rest.lstrip()
+        if not json_part:
+            return None
+
+        decoder = json.JSONDecoder()
+        try:
+            _parsed_obj, end_idx = decoder.raw_decode(json_part)
+        except json.JSONDecodeError:
+            return None
+
+        consumed_len = header_match.end() + leading_ws + end_idx
+        while consumed_len < len(self._buffer) and self._buffer[consumed_len] in " \t\r\n":
+            consumed_len += 1
+
+        segment = self._buffer[:consumed_len]
+        return consumed_len, self._is_valid_tool_segment(segment)
+
+    def _consume_plain_json_tool_call(self) -> Optional[tuple[int, bool]]:
+        decoder = json.JSONDecoder()
+        try:
+            _parsed_obj, end_idx = decoder.raw_decode(self._buffer)
+        except json.JSONDecodeError:
+            return None
+
+        consumed_len = end_idx
+        while consumed_len < len(self._buffer) and self._buffer[consumed_len] in " \t\r\n":
+            consumed_len += 1
+
+        segment = self._buffer[:consumed_len]
+        return consumed_len, self._is_valid_tool_segment(segment)
+
+    def _is_valid_tool_segment(self, segment: str) -> bool:
+        try:
+            parsed = self._bridge.parse_model_output(segment)
+        except Exception:
+            return False
+        return bool(parsed.tool_calls)
 
 
-# ============================================================================
-# Chat Completions Endpoint (Requirement 1.1, 1.4, 1.5)
-# ============================================================================
+def _responses_event(event: str, payload: Dict[str, Any]) -> str:
+    body = {"type": event, **payload}
+    return f"event: {event}\ndata: {json.dumps(body, ensure_ascii=False)}\n\n"
+
+
+async def _persist_stream_success(
+    runtime,
+    session,
+    *,
+    resolved,
+    api_type: str,
+    canonical: CanonicalRequest,
+    output_preview: str,
+    usage: UsageNumbers,
+    start_time: float,
+    client_ip: Optional[str],
+) -> None:
+    await runtime.persist_success(
+        session,
+        resolved=resolved,
+        api_type=api_type,
+        input_preview=canonical.input_preview(),
+        output_preview=output_preview,
+        usage=usage,
+        response_time_ms=runtime.elapsed_ms(start_time),
+        is_stream=True,
+        client_ip=client_ip,
+    )
+
 
 @router.post("/chat/completions")
 async def chat_completions(
-    request: ChatCompletionRequest,
     http_request: Request,
     authorization: Optional[str] = Header(None),
-    session: AsyncSession = Depends(get_session)
+    x_api_key: Optional[str] = Header(None, alias="x-api-key"),
+    session: AsyncSession = Depends(get_session),
 ):
-    """
-    OpenAI 兼容的 Chat Completions 端点
-    
-    - 支持同步和流式响应
-    - 验证 API Key 和模型权限
-    - 将请求转换为后端格式并执行
-    - 将响应转换为 OpenAI 格式返回
-    """
     request_id = uuid.uuid4().hex[:24]
     start_time = time.time()
-    
-    # 调试日志
-    logger.info(f"Request {request_id}: [OPENAI DEBUG] model={request.model}, stream={request.stream}")
-    
-    # 获取服务实例
-    api_key_service = get_api_key_service()
-    account_pool = get_account_pool_service()
-    backend_client = get_backend_client()
-    transformer = get_transformer()
-    response_transformer = get_response_transformer()
+
+    bridge = get_protocol_bridge()
+    runtime = get_gateway_runtime()
     error_handler = get_error_handler()
-    
-    # 1. 提取并验证 API Key
-    raw_key = extract_api_key(authorization)
-    if not raw_key:
-        error = error_handler.create_authentication_error(
-            "Missing API key. Please include 'Authorization: Bearer YOUR_API_KEY' header."
-        )
-        return JSONResponse(
-            status_code=error.status_code,
-            content=error_handler.to_openai_error(error)
-        )
-    
-    # 2. 验证 API Key 和模型权限
-    api_key_obj, error_response = await validate_api_key_and_model(
-        session, raw_key, request.model, api_key_service, error_handler
-    )
-    if error_response:
-        return error_response
-    
-    # 3. 获取可用账号
-    account = await account_pool.get_available_account(session, request.model)
-    if not account:
-        error = error_handler.create_service_unavailable_error(
-            f"No available accounts for model '{request.model}'"
-        )
-        return JSONResponse(
-            status_code=error.status_code,
-            content=error_handler.to_openai_error(error)
-        )
-    
-    # 4. 转换请求格式
-    openai_request = OpenAIChatRequest(
-        model=request.model,
-        messages=request.messages,
-        stream=request.stream,
-        temperature=request.temperature,
-        max_tokens=request.max_tokens
-    )
-    unified_request = transformer.parse_openai_request(openai_request)
-    
-    # 5. 获取模型组的输入映射配置
-    input_mapping = None
-    result = await session.execute(
-        select(ModelGroup).where(ModelGroup.name == request.model)
-    )
-    model_group = result.scalar_one_or_none()
-    if model_group and model_group.input_mapping:
-        try:
-            input_mapping = json.loads(model_group.input_mapping)
-        except json.JSONDecodeError:
-            pass
-    
-    # 6. 转换为后端格式
-    # 使用 format_messages_to_context 直接格式化原始消息，保持正确顺序
-    messages_context = transformer.format_messages_to_context(request.messages)
-    
-    backend_payload = build_backend_payload(
-        user_id=request.user or "anonymous",
-        messages_context=messages_context,
-        model_name=request.model,
-        input_mapping=input_mapping
-    )
-    
-    logger.info(f"Request {request_id}: model={request.model}, stream={request.stream}")
-    
+
     try:
-        # 7. 执行请求（同步或流式）
-        if request.stream:
-            # 流式响应 - 累积内容并在结束后更新统计
-            logger_service = get_logger_service()
-            client_ip = http_request.client.host if http_request.client else None
-            
-            # 保存上下文信息用于流结束后更新统计
-            # 获取账号的 Private API Key（用于从 Backend Analytics 获取真实 token）
-            private_api_key = account_pool.decrypt_private_api_key(account)
-            
-            # 提取输入预览
-            from app.services.call_logger import extract_input_preview
-            input_preview = extract_input_preview(
-                [m.model_dump() if hasattr(m, 'model_dump') else m for m in request.messages],
-                api_type="openai"
-            )
-            
-            # 提取最后一条用户消息（用于 token 计算）
-            last_user_msg = ""
-            for msg in reversed(request.messages):
-                if msg.role == "user":
-                    last_user_msg = msg.content if isinstance(msg.content, str) else str(msg.content)
-                    break
-            
-            stream_context = {
-                "request_id": request_id,
-                "api_key_id": api_key_obj.id if api_key_obj else None,
-                "api_key_name": api_key_obj.name if api_key_obj else None,
-                "api_key_prefix": api_key_obj.key_prefix if api_key_obj else None,
-                "client_ip": client_ip,
-                "model": request.model,
-                "account_id": account.id,
-                "account_name": account.name,
-                "model_group": request.model,
-                "account_org_id": account.org_id,
-                "account_flow_id": account.flow_id,
-                "private_api_key": private_api_key,
-                "start_time": start_time,
-                "accumulated_content": [],
-                "input_preview": input_preview,
-                "last_user_msg": last_user_msg,  # 只用当前消息计算输入 token
-                "st_run_id": None,
-                "st_usage": None,
-            }
-            
-            # [DEBUG] 流式请求调试输出
-            print(f"[DEBUG STREAM] last_user_msg='{last_user_msg[:80] if len(last_user_msg) > 80 else last_user_msg}', len={len(last_user_msg)}")
-            
-            # 流式响应 - 真正的实时流式输出
+        body_json = await http_request.json()
+        # Validation-only parse (keeps extra fields).
+        ChatCompletionRequest(**body_json)
+        canonical = bridge.parse_openai_chat(body_json)
+    except Exception as exc:
+        error = error_handler.create_invalid_request_error(str(exc))
+        return _openai_error_response(error_handler, error)
+
+    raw_key = bridge.extract_api_key(
+        authorization=authorization,
+        x_api_key=x_api_key,
+    )
+
+    client_ip = http_request.client.host if http_request.client else None
+    resolved = None
+
+    try:
+        resolved = await runtime.resolve_request(
+            session,
+            raw_key=raw_key,
+            model=canonical.model,
+            request_id=request_id,
+        )
+
+        prompt_text = bridge.render_prompt(canonical)
+        payload = runtime.build_backend_payload(
+            resolved=resolved,
+            prompt_text=prompt_text,
+            user_id=f"api:{resolved.api_key.key_prefix}",
+        )
+
+        if canonical.stream:
+            stream_gen = await runtime.run_stream(resolved=resolved, payload=payload)
+
             async def generate_stream():
+                raw_tokens: List[str] = []
+                best_usage = None
+                run_id = None
+                parsed = None
+
                 try:
-                    stream_gen = await backend_client.execute_with_account(
-                        account=account,
-                        payload=backend_payload,
-                        stream=True,
-                        account_pool=account_pool
+                    yield _sse_data(
+                        _openai_chunk(
+                            request_id=request_id,
+                            model=canonical.model,
+                            delta={"role": "assistant"},
+                            finish_reason=None,
+                        )
                     )
 
-                    async def tracked_backend_stream():
-                        async for raw_chunk in stream_gen:
-                            run_id = extract_run_id(raw_chunk)
-                            if run_id and not stream_context.get("st_run_id"):
-                                stream_context["st_run_id"] = run_id
+                    if canonical.tools:
+                        visible_text_parts: List[str] = []
+                        tool_aware = _ToolAwareTextBuffer(bridge)
 
-                            usage_candidate = extract_usage(raw_chunk, source="backend.stream")
-                            if usage_candidate is not None:
-                                stream_context["st_usage"] = choose_better_usage(
-                                    stream_context.get("st_usage"),
-                                    usage_candidate
+                        async for raw_chunk in stream_gen:
+                            token, usage_candidate, run_candidate = runtime.parse_stream_chunk(raw_chunk)
+                            if run_candidate and not run_id:
+                                run_id = run_candidate
+                            best_usage = runtime.merge_stream_usage(best_usage, usage_candidate)
+                            if not token:
+                                continue
+                            raw_tokens.append(token)
+                            for visible_text in tool_aware.feed(token):
+                                if not visible_text:
+                                    continue
+                                visible_text_parts.append(visible_text)
+                                yield _sse_data(
+                                    _openai_chunk(
+                                        request_id=request_id,
+                                        model=canonical.model,
+                                        delta={"content": visible_text},
+                                        finish_reason=None,
+                                    )
                                 )
 
-                            yield raw_chunk
+                        for visible_text in tool_aware.finish():
+                            if not visible_text:
+                                continue
+                            visible_text_parts.append(visible_text)
+                            yield _sse_data(
+                                _openai_chunk(
+                                    request_id=request_id,
+                                    model=canonical.model,
+                                    delta={"content": visible_text},
+                                    finish_reason=None,
+                                )
+                            )
 
-                    # 直接转换并输出，同时累积内容
-                    async for chunk in response_transformer.transform_backend_sse_to_openai(
-                        tracked_backend_stream(), request.model, request_id
-                    ):
-                        # 尝试从 chunk 中提取内容用于 token 估算
-                        if chunk.startswith("data: ") and not chunk.startswith("data: [DONE]"):
-                            try:
-                                chunk_data = json.loads(chunk[6:])
-                                content = chunk_data.get("choices", [{}])[0].get("delta", {}).get("content", "")
-                                if content:
-                                    stream_context["accumulated_content"].append(content)
-                            except (json.JSONDecodeError, IndexError, KeyError):
-                                pass
-                        yield chunk
-                    
-                    # 流结束后，异步更新统计
-                    import asyncio
-                    asyncio.create_task(update_stream_stats(stream_context))
-                        
-                except BackendClientError as e:
-                    logger.error(f"Request {request_id}: Backend error - {e.message}")
-                    error = error_handler.from_backend_exception(e)
-                    error_data = error_handler.to_openai_error(error)
-                    yield f"data: {json.dumps(error_data)}\n\n"
-                    yield "data: [DONE]\n\n"
-                except Exception as e:
-                    logger.exception(f"Request {request_id}: Unexpected error")
-                    error_data = error_handler.to_openai_error(
-                        error_handler.create_server_error()
+                        raw_output = "".join(raw_tokens)
+                        parsed = _normalize_tool_turn_output(
+                            bridge.parse_model_output(raw_output),
+                            tools_declared=True,
+                        )
+
+                        if parsed.tool_calls:
+                            for idx, call in enumerate(parsed.tool_calls):
+                                yield _sse_data(
+                                    _openai_chunk(
+                                        request_id=request_id,
+                                        model=canonical.model,
+                                        delta={
+                                            "tool_calls": [
+                                                {
+                                                    "index": idx,
+                                                    "id": call.call_id,
+                                                    "type": "function",
+                                                    "function": {
+                                                        "name": call.name,
+                                                        "arguments": call.arguments_json,
+                                                    },
+                                                }
+                                            ]
+                                        },
+                                        finish_reason=None,
+                                    )
+                                )
+                        elif tool_aware.tool_detected and parsed.text:
+                            streamed_text = "".join(visible_text_parts)
+                            if parsed.text.startswith(streamed_text):
+                                remaining = parsed.text[len(streamed_text):]
+                            else:
+                                remaining = parsed.text
+                            if remaining:
+                                yield _sse_data(
+                                    _openai_chunk(
+                                        request_id=request_id,
+                                        model=canonical.model,
+                                        delta={"content": remaining},
+                                        finish_reason=None,
+                                    )
+                                )
+                        elif parsed.text and not visible_text_parts:
+                            yield _sse_data(
+                                _openai_chunk(
+                                    request_id=request_id,
+                                    model=canonical.model,
+                                    delta={"content": parsed.text},
+                                    finish_reason=None,
+                                )
+                            )
+
+                        finish_reason = "tool_calls" if parsed.tool_calls else "stop"
+                    else:
+                        async for raw_chunk in stream_gen:
+                            token, usage_candidate, run_candidate = runtime.parse_stream_chunk(raw_chunk)
+                            if run_candidate and not run_id:
+                                run_id = run_candidate
+                            best_usage = runtime.merge_stream_usage(best_usage, usage_candidate)
+                            if not token:
+                                continue
+                            raw_tokens.append(token)
+                            yield _sse_data(
+                                _openai_chunk(
+                                    request_id=request_id,
+                                    model=canonical.model,
+                                    delta={"content": token},
+                                    finish_reason=None,
+                                )
+                            )
+
+                        parsed = bridge.parse_model_output("".join(raw_tokens))
+                        finish_reason = "tool_calls" if parsed.tool_calls else "stop"
+                        # If tool calls are unexpectedly returned without tool declaration,
+                        # pass them in final chunk to keep downstream compatibility.
+                        if parsed.tool_calls:
+                            for idx, call in enumerate(parsed.tool_calls):
+                                yield _sse_data(
+                                    _openai_chunk(
+                                        request_id=request_id,
+                                        model=canonical.model,
+                                        delta={
+                                            "tool_calls": [
+                                                {
+                                                    "index": idx,
+                                                    "id": call.call_id,
+                                                    "type": "function",
+                                                    "function": {
+                                                        "name": call.name,
+                                                        "arguments": call.arguments_json,
+                                                    },
+                                                }
+                                            ]
+                                        },
+                                        finish_reason=None,
+                                    )
+                                )
+
+                    yield _sse_data(
+                        _openai_chunk(
+                            request_id=request_id,
+                            model=canonical.model,
+                            delta={},
+                            finish_reason=finish_reason,
+                        )
                     )
-                    yield f"data: {json.dumps(error_data)}\n\n"
                     yield "data: [DONE]\n\n"
-            
+
+                    raw_output = "".join(raw_tokens)
+                    if parsed is None:
+                        parsed = _normalize_tool_turn_output(
+                            bridge.parse_model_output(raw_output),
+                            tools_declared=bool(canonical.tools),
+                        )
+                    usage = runtime.finalize_usage(
+                        preferred_usage=best_usage,
+                        prompt_text=prompt_text,
+                        output_text=raw_output,
+                        fallback_source="estimate.chat_stream",
+                    )
+
+                    await _persist_stream_success(
+                        runtime,
+                        session,
+                        resolved=resolved,
+                        api_type="openai",
+                        canonical=canonical,
+                        output_preview=parsed.text or raw_output,
+                        usage=usage,
+                        start_time=start_time,
+                        client_ip=client_ip,
+                    )
+                except Exception as exc:
+                    logger.exception("OpenAI stream failed")
+                    api_error = runtime.map_backend_exception(exc)
+                    payload = _openai_error_payload(error_handler, api_error)
+                    yield _sse_data({"error": payload["error"]})
+                    yield "data: [DONE]\n\n"
+
+                    await runtime.persist_error(
+                        session,
+                        resolved=resolved,
+                        api_type="openai",
+                        model=canonical.model,
+                        input_preview=canonical.input_preview(),
+                        response_time_ms=runtime.elapsed_ms(start_time),
+                        client_ip=client_ip,
+                        error_message=api_error.message,
+                    )
+
             return StreamingResponse(
                 generate_stream(),
                 media_type="text/event-stream",
                 headers={
                     "Cache-Control": "no-cache",
                     "Connection": "keep-alive",
-                    "X-Request-ID": request_id
-                }
-            )
-        else:
-            # 同步响应
-            backend_response = await backend_client.run_with_account(
-                account=account,
-                payload=backend_payload,
-                account_pool=account_pool
-            )
-            
-            # 转换响应格式
-            # 只用最后一条用户消息计算输入 token（匹配 ST 的计费方式）
-            last_user_msg = ""
-            for msg in reversed(request.messages):
-                if msg.role == "user":
-                    last_user_msg = msg.content if isinstance(msg.content, str) else str(msg.content)
-                    break
-            
-            openai_response = response_transformer.to_openai_response(
-                backend_response, request.model, request_id,
-                input_text=last_user_msg  # 只用当前用户消息计算 prompt_tokens
+                    "X-Request-ID": request_id,
+                },
             )
 
-            # 从后端响应提取 usage；必要时回退到 analytics(run_id)
-            estimated_usage = openai_response.get("usage", {})
-            estimated_prompt_tokens = estimated_usage.get("prompt_tokens", 0)
-            estimated_completion_tokens = estimated_usage.get("completion_tokens", 0)
-
-            backend_usage = extract_usage(backend_response, source="backend.sync")
-            run_id = extract_run_id(backend_response)
-
-            analytics_usage = None
-            if backend_usage is None or not backend_usage.exact:
-                private_api_key = account_pool.decrypt_private_api_key(account)
-                analytics_usage = await _fetch_analytics_usage(
-                    org_id=account.org_id,
-                    flow_id=account.flow_id,
-                    private_api_key=private_api_key,
-                    run_id=run_id,
-                    fallback_to_latest=False,
-                    retries=2,
-                    delay_seconds=0.4,
-                )
-
-            selected_usage = choose_better_usage(backend_usage, analytics_usage)
-            final_usage = _finalize_usage(
-                preferred_usage=selected_usage,
-                fallback_input_tokens=estimated_prompt_tokens,
-                fallback_output_tokens=estimated_completion_tokens,
-                fallback_source="estimate.openai",
-            )
-
-            prompt_tokens = final_usage.input_tokens
-            completion_tokens = final_usage.output_tokens
-            total_tokens = final_usage.total_tokens
-
-            # 覆盖响应 usage，返回准确口径
-            openai_response["usage"] = {
-                "prompt_tokens": prompt_tokens,
-                "completion_tokens": completion_tokens,
-                "total_tokens": total_tokens
-            }
-
-            logger.debug(
-                f"Request {request_id}: usage source={final_usage.source}, run_id={run_id}, "
-                f"tokens in/out/total={prompt_tokens}/{completion_tokens}/{total_tokens}"
-            )
-
-            if total_tokens > 0:
-                await account_pool.update_token_usage(
-                    session, account.id,
-                    prompt_tokens,
-                    completion_tokens
-                )
-            
-            elapsed_ms = int((time.time() - start_time) * 1000)
-            
-            # 记录请求日志
-            logger_service = get_logger_service()
-            client_ip = http_request.client.host if http_request.client else None
-            await logger_service.log_success(
-                session=session,
-                request_id=request_id,
-                api_key_prefix=api_key_obj.key_prefix if api_key_obj else None,
-                client_ip=client_ip,
-                model=request.model,
-                account_id=account.id,
-                input_tokens=prompt_tokens,
-                output_tokens=completion_tokens,
-                response_time_ms=elapsed_ms
-            )
-            
-            # 计算费用
-            from app.services.pricing import get_pricing_service
-            pricing_service = get_pricing_service()
-            _, _, total_cost = pricing_service.calculate(request.model, prompt_tokens, completion_tokens)
-            
-            # 更新 API Key 累计统计（包含费用）
-            if api_key_obj:
-                await api_key_service.update_key_stats(
-                    session, api_key_obj.id, prompt_tokens, completion_tokens, cost=total_cost
-                )
-            
-            # 更新系统累计统计
-            stats_service = get_stats_service()
-            await stats_service.update_system_stats(
-                session, prompt_tokens, completion_tokens
-            )
-            
-            # 记录详细调用日志
-            from app.services.call_logger import get_call_logger_service, extract_input_preview
-            call_logger = get_call_logger_service()
-            
-            # 提取输入预览
-            input_preview = extract_input_preview(
-                [m.model_dump() if hasattr(m, 'model_dump') else m for m in request.messages],
-                api_type="openai"
-            )
-            
-            # 提取输出预览
-            output_preview = ""
-            choices = openai_response.get("choices", [])
-            if choices:
-                message = choices[0].get("message", {})
-                output_preview = message.get("content", "")[:500]
-            
-            await call_logger.log_call(
-                session,
-                api_key_id=api_key_obj.id if api_key_obj else None,
-                api_key_name=api_key_obj.name if api_key_obj else None,
-                api_key_prefix=api_key_obj.key_prefix if api_key_obj else None,
-                client_ip=client_ip,
-                account_id=account.id,
-                account_name=account.name,
-                model_group=request.model,
-                model=request.model,
-                api_type="openai",
-                is_stream=False,
-                input_preview=input_preview,
-                output_preview=output_preview,
-                input_tokens=prompt_tokens,
-                output_tokens=completion_tokens,
-                response_time_ms=elapsed_ms,
-                status="success",
-            )
-            
-            await session.commit()
-            logger.info(f"Request {request_id}: completed in {elapsed_ms}ms")
-            
-            return JSONResponse(
-                content=openai_response,
-                headers={"X-Request-ID": request_id}
-            )
-            
-    except BackendAPIError as e:
-        logger.error(f"Request {request_id}: Backend API error - {e.message}")
-        error = error_handler.parse_backend_error(
-            e.response_data or {}, e.status_code or 502
+        backend_response = await runtime.run_sync(resolved=resolved, payload=payload)
+        raw_output = runtime.extract_content(backend_response)
+        parsed = _normalize_tool_turn_output(
+            bridge.parse_model_output(raw_output),
+            tools_declared=bool(canonical.tools),
         )
-        return JSONResponse(
-            status_code=error.status_code,
-            content=error_handler.to_openai_error(error)
-        )
-    except BackendConnectionError as e:
-        logger.error(f"Request {request_id}: Connection error - {e.message}")
-        error = error_handler.create_backend_error(
-            "Failed to connect to Backend backend"
-        )
-        return JSONResponse(
-            status_code=error.status_code,
-            content=error_handler.to_openai_error(error)
-        )
-    except BackendTimeoutError as e:
-        logger.error(f"Request {request_id}: Timeout - {e.message}")
-        error = error_handler.create_backend_error(
-            "Request to Backend backend timed out"
-        )
-        return JSONResponse(
-            status_code=error.status_code,
-            content=error_handler.to_openai_error(error)
-        )
-    except Exception as e:
-        logger.exception(f"Request {request_id}: Unexpected error")
-        error = error_handler.create_server_error()
-        return JSONResponse(
-            status_code=error.status_code,
-            content=error_handler.to_openai_error(error)
+        usage = runtime.usage_from_sync(
+            backend_response=backend_response,
+            prompt_text=prompt_text,
+            output_text=raw_output,
         )
 
+        response_data = bridge.to_openai_chat_response(
+            model=canonical.model,
+            request_id=request_id,
+            parsed=parsed,
+            usage=usage,
+        )
 
-# ============================================================================
-# Models Endpoint (Requirement 1.1)
-# ============================================================================
+        await runtime.persist_success(
+            session,
+            resolved=resolved,
+            api_type="openai",
+            input_preview=canonical.input_preview(),
+            output_preview=parsed.text or raw_output,
+            usage=usage,
+            response_time_ms=runtime.elapsed_ms(start_time),
+            is_stream=False,
+            client_ip=client_ip,
+        )
+
+        return JSONResponse(content=response_data, headers={"X-Request-ID": request_id})
+
+    except GatewayAuthError as exc:
+        return _openai_error_response(error_handler, exc.error)
+    except Exception as exc:
+        logger.exception("OpenAI chat request failed")
+        api_error = runtime.map_backend_exception(exc)
+
+        await runtime.persist_error(
+            session,
+            resolved=resolved,
+            api_type="openai",
+            model=canonical.model,
+            input_preview=canonical.input_preview(),
+            response_time_ms=runtime.elapsed_ms(start_time),
+            client_ip=client_ip,
+            error_message=api_error.message,
+        )
+        return _openai_error_response(error_handler, api_error)
+
+
+@router.post("/responses")
+async def create_response(
+    http_request: Request,
+    authorization: Optional[str] = Header(None),
+    x_api_key: Optional[str] = Header(None, alias="x-api-key"),
+    session: AsyncSession = Depends(get_session),
+):
+    request_id = uuid.uuid4().hex[:24]
+    start_time = time.time()
+
+    bridge = get_protocol_bridge()
+    runtime = get_gateway_runtime()
+    error_handler = get_error_handler()
+
+    try:
+        body_json = await http_request.json()
+        ResponsesRequest(**body_json)
+        canonical = bridge.parse_openai_responses(body_json)
+    except Exception as exc:
+        error = error_handler.create_invalid_request_error(str(exc))
+        return _openai_error_response(error_handler, error)
+
+    raw_key = bridge.extract_api_key(
+        authorization=authorization,
+        x_api_key=x_api_key,
+    )
+
+    client_ip = http_request.client.host if http_request.client else None
+    resolved = None
+
+    try:
+        resolved = await runtime.resolve_request(
+            session,
+            raw_key=raw_key,
+            model=canonical.model,
+            request_id=request_id,
+        )
+
+        prompt_text = bridge.render_prompt(canonical)
+        payload = runtime.build_backend_payload(
+            resolved=resolved,
+            prompt_text=prompt_text,
+            user_id=f"api:{resolved.api_key.key_prefix}",
+        )
+
+        if canonical.stream:
+            stream_gen = await runtime.run_stream(resolved=resolved, payload=payload)
+
+            async def generate_stream():
+                raw_tokens: List[str] = []
+                best_usage = None
+                run_id = None
+                parsed = None
+
+                message_id = f"msg_{request_id}"
+
+                try:
+                    yield _responses_event(
+                        "response.created",
+                        {
+                            "response": {
+                                "id": f"resp_{request_id}",
+                                "object": "response",
+                                "created_at": int(time.time()),
+                                "status": "in_progress",
+                                "model": canonical.model,
+                                "output": [],
+                            }
+                        },
+                    )
+
+                    if canonical.tools:
+                        text_output_index = 0
+                        yield _responses_event(
+                            "response.output_item.added",
+                            {
+                                "output_index": text_output_index,
+                                "item": {
+                                    "id": message_id,
+                                    "type": "message",
+                                    "role": "assistant",
+                                    "content": [],
+                                },
+                            },
+                        )
+                        yield _responses_event(
+                            "response.content_part.added",
+                            {
+                                "output_index": text_output_index,
+                                "item_id": message_id,
+                                "content_index": 0,
+                                "part": {"type": "output_text", "text": ""},
+                            },
+                        )
+
+                        visible_text_parts: List[str] = []
+                        tool_aware = _ToolAwareTextBuffer(bridge)
+
+                        async for raw_chunk in stream_gen:
+                            token, usage_candidate, run_candidate = runtime.parse_stream_chunk(raw_chunk)
+                            if run_candidate and not run_id:
+                                run_id = run_candidate
+                            best_usage = runtime.merge_stream_usage(best_usage, usage_candidate)
+                            if not token:
+                                continue
+                            raw_tokens.append(token)
+                            for visible_text in tool_aware.feed(token):
+                                if not visible_text:
+                                    continue
+                                visible_text_parts.append(visible_text)
+                                yield _responses_event(
+                                    "response.output_text.delta",
+                                    {
+                                        "output_index": text_output_index,
+                                        "item_id": message_id,
+                                        "content_index": 0,
+                                        "delta": visible_text,
+                                    },
+                                )
+
+                        for visible_text in tool_aware.finish():
+                            if not visible_text:
+                                continue
+                            visible_text_parts.append(visible_text)
+                            yield _responses_event(
+                                "response.output_text.delta",
+                                {
+                                    "output_index": text_output_index,
+                                    "item_id": message_id,
+                                    "content_index": 0,
+                                    "delta": visible_text,
+                                },
+                            )
+
+                        raw_output = "".join(raw_tokens)
+                        parsed = _normalize_tool_turn_output(
+                            bridge.parse_model_output(raw_output),
+                            tools_declared=True,
+                        )
+
+                        final_visible_text = "".join(visible_text_parts)
+                        if tool_aware.tool_detected and not parsed.tool_calls and parsed.text:
+                            if parsed.text.startswith(final_visible_text):
+                                final_visible_text += parsed.text[len(final_visible_text):]
+                            else:
+                                final_visible_text = parsed.text
+
+                        yield _responses_event(
+                            "response.output_text.done",
+                            {
+                                "output_index": text_output_index,
+                                "item_id": message_id,
+                                "content_index": 0,
+                                "text": final_visible_text,
+                            },
+                        )
+
+                        for idx, call in enumerate(parsed.tool_calls):
+                            output_index = text_output_index + 1 + idx
+                            yield _responses_event(
+                                "response.output_item.added",
+                                {
+                                    "output_index": output_index,
+                                    "item": {
+                                        "id": f"fc_{call.call_id}",
+                                        "type": "function_call",
+                                        "call_id": call.call_id,
+                                        "name": call.name,
+                                        "arguments": "",
+                                    },
+                                },
+                            )
+                            yield _responses_event(
+                                "response.function_call_arguments.delta",
+                                {
+                                    "output_index": output_index,
+                                    "item_id": f"fc_{call.call_id}",
+                                    "delta": call.arguments_json,
+                                },
+                            )
+                            yield _responses_event(
+                                "response.function_call_arguments.done",
+                                {
+                                    "output_index": output_index,
+                                    "item_id": f"fc_{call.call_id}",
+                                    "arguments": call.arguments_json,
+                                },
+                            )
+                    else:
+                        yield _responses_event(
+                            "response.output_item.added",
+                            {
+                                "output_index": 0,
+                                "item": {
+                                    "id": message_id,
+                                    "type": "message",
+                                    "role": "assistant",
+                                    "content": [],
+                                },
+                            },
+                        )
+                        yield _responses_event(
+                            "response.content_part.added",
+                            {
+                                "output_index": 0,
+                                "item_id": message_id,
+                                "content_index": 0,
+                                "part": {"type": "output_text", "text": ""},
+                            },
+                        )
+
+                        async for raw_chunk in stream_gen:
+                            token, usage_candidate, run_candidate = runtime.parse_stream_chunk(raw_chunk)
+                            if run_candidate and not run_id:
+                                run_id = run_candidate
+                            best_usage = runtime.merge_stream_usage(best_usage, usage_candidate)
+                            if not token:
+                                continue
+                            raw_tokens.append(token)
+                            yield _responses_event(
+                                "response.output_text.delta",
+                                {
+                                    "output_index": 0,
+                                    "item_id": message_id,
+                                    "content_index": 0,
+                                    "delta": token,
+                                },
+                            )
+
+                        final_text = "".join(raw_tokens)
+                        yield _responses_event(
+                            "response.output_text.done",
+                            {
+                                "output_index": 0,
+                                "item_id": message_id,
+                                "content_index": 0,
+                                "text": final_text,
+                            },
+                        )
+
+                    raw_output = "".join(raw_tokens)
+                    if parsed is None:
+                        parsed = _normalize_tool_turn_output(
+                            bridge.parse_model_output(raw_output),
+                            tools_declared=bool(canonical.tools),
+                        )
+                    usage = runtime.finalize_usage(
+                        preferred_usage=best_usage,
+                        prompt_text=prompt_text,
+                        output_text=raw_output,
+                        fallback_source="estimate.responses_stream",
+                    )
+
+                    completed = bridge.to_openai_responses_response(
+                        model=canonical.model,
+                        request_id=request_id,
+                        parsed=parsed,
+                        usage=usage,
+                    )
+                    yield _responses_event("response.completed", {"response": completed})
+
+                    await _persist_stream_success(
+                        runtime,
+                        session,
+                        resolved=resolved,
+                        api_type="openai",
+                        canonical=canonical,
+                        output_preview=parsed.text or raw_output,
+                        usage=usage,
+                        start_time=start_time,
+                        client_ip=client_ip,
+                    )
+                except Exception as exc:
+                    logger.exception("OpenAI responses stream failed")
+                    api_error = runtime.map_backend_exception(exc)
+                    yield _responses_event(
+                        "error",
+                        {
+                            "error": _openai_error_payload(error_handler, api_error)["error"],
+                        },
+                    )
+
+                    await runtime.persist_error(
+                        session,
+                        resolved=resolved,
+                        api_type="openai",
+                        model=canonical.model,
+                        input_preview=canonical.input_preview(),
+                        response_time_ms=runtime.elapsed_ms(start_time),
+                        client_ip=client_ip,
+                        error_message=api_error.message,
+                    )
+
+            return StreamingResponse(
+                generate_stream(),
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "Connection": "keep-alive",
+                    "X-Request-ID": request_id,
+                },
+            )
+
+        backend_response = await runtime.run_sync(resolved=resolved, payload=payload)
+        raw_output = runtime.extract_content(backend_response)
+        parsed = _normalize_tool_turn_output(
+            bridge.parse_model_output(raw_output),
+            tools_declared=bool(canonical.tools),
+        )
+        usage = runtime.usage_from_sync(
+            backend_response=backend_response,
+            prompt_text=prompt_text,
+            output_text=raw_output,
+        )
+
+        response_data = bridge.to_openai_responses_response(
+            model=canonical.model,
+            request_id=request_id,
+            parsed=parsed,
+            usage=usage,
+        )
+
+        await runtime.persist_success(
+            session,
+            resolved=resolved,
+            api_type="openai",
+            input_preview=canonical.input_preview(),
+            output_preview=parsed.text or raw_output,
+            usage=usage,
+            response_time_ms=runtime.elapsed_ms(start_time),
+            is_stream=False,
+            client_ip=client_ip,
+        )
+
+        return JSONResponse(content=response_data, headers={"X-Request-ID": request_id})
+
+    except GatewayAuthError as exc:
+        return _openai_error_response(error_handler, exc.error)
+    except Exception as exc:
+        logger.exception("OpenAI responses request failed")
+        api_error = runtime.map_backend_exception(exc)
+
+        await runtime.persist_error(
+            session,
+            resolved=resolved,
+            api_type="openai",
+            model=canonical.model,
+            input_preview=canonical.input_preview(),
+            response_time_ms=runtime.elapsed_ms(start_time),
+            client_ip=client_ip,
+            error_message=api_error.message,
+        )
+        return _openai_error_response(error_handler, api_error)
+
 
 @router.get("/models", response_model=ModelsResponse)
 async def list_models(
     authorization: Optional[str] = Header(None),
-    session: AsyncSession = Depends(get_session)
+    x_api_key: Optional[str] = Header(None, alias="x-api-key"),
+    session: AsyncSession = Depends(get_session),
 ):
-    """
-    列出可用的模型
-    
-    必须提供有效的 API Key 才能访问
-    """
-    api_key_service = get_api_key_service()
+    bridge = get_protocol_bridge()
     error_handler = get_error_handler()
-    
-    # 必须提供有效的 API Key
-    raw_key = extract_api_key(authorization)
+    api_key_service = get_api_key_service()
+
+    raw_key = bridge.extract_api_key(authorization=authorization, x_api_key=x_api_key)
     if not raw_key:
-        error = error_handler.create_authentication_error()
-        return JSONResponse(
-            status_code=error.status_code,
-            content=error_handler.to_openai_error(error)
-        )
-    
-    is_valid, error_msg, api_key_obj = await api_key_service.validate_key(
-        session, raw_key
-    )
-    if not is_valid:
-        error = error_handler.create_authentication_error()
-        return JSONResponse(
-            status_code=error.status_code,
-            content=error_handler.to_openai_error(error)
-        )
-    
-    # 获取该 Key 授权的模型列表
-    allowed_models = api_key_service.get_model_groups(api_key_obj)
-    
-    # 获取所有模型组
-    result = await session.execute(select(ModelGroup))
-    model_groups = list(result.scalars().all())
-    
-    # 构建模型列表
-    models = []
-    current_time = int(time.time())
-    
-    for group in model_groups:
-        # 只返回授权的模型
-        if allowed_models is not None and group.name not in allowed_models:
-            continue
-        
-        models.append(ModelInfo(
-            id=group.name,
-            object="model",
-            created=int(group.created_at.timestamp()) if group.created_at else current_time,
-            owned_by="organization"
-        ))
-    
-    return ModelsResponse(
-        object="list",
-        data=models
-    )
+        error = error_handler.create_authentication_error("Missing API key")
+        return _openai_error_response(error_handler, error)
+
+    api_key_obj = await api_key_service.get_key_by_raw(session, raw_key)
+    if api_key_obj is None or api_key_obj.status == "revoked":
+        error = error_handler.create_authentication_error("Invalid API key")
+        return _openai_error_response(error_handler, error)
+
+    now = int(time.time())
+    models = [
+        ModelInfo(id=model_name, created=now)
+        for model_name in api_key_service.get_model_groups(api_key_obj)
+    ]
+
+    return ModelsResponse(data=models)
 
 
 @router.get("/models/{model_id}")
 async def get_model(
     model_id: str,
     authorization: Optional[str] = Header(None),
-    session: AsyncSession = Depends(get_session)
+    x_api_key: Optional[str] = Header(None, alias="x-api-key"),
+    session: AsyncSession = Depends(get_session),
 ):
-    """
-    获取单个模型的详细信息
-    
-    必须提供有效的 API Key 才能访问
-    """
-    api_key_service = get_api_key_service()
+    bridge = get_protocol_bridge()
     error_handler = get_error_handler()
-    
-    # 必须提供有效的 API Key
-    raw_key = extract_api_key(authorization)
+    api_key_service = get_api_key_service()
+
+    raw_key = bridge.extract_api_key(authorization=authorization, x_api_key=x_api_key)
     if not raw_key:
-        error = error_handler.create_authentication_error()
-        return JSONResponse(
-            status_code=error.status_code,
-            content=error_handler.to_openai_error(error)
-        )
-    
-    is_valid, error_msg, api_key_obj = await api_key_service.validate_key(
-        session, raw_key
-    )
-    if not is_valid:
-        error = error_handler.create_authentication_error()
-        return JSONResponse(
-            status_code=error.status_code,
-            content=error_handler.to_openai_error(error)
-        )
-    
-    # 查找模型组
-    result = await session.execute(
-        select(ModelGroup).where(ModelGroup.name == model_id)
-    )
-    model_group = result.scalar_one_or_none()
-    
-    if not model_group:
-        # 不暴露模型是否存在，统一返回 401
-        error = error_handler.create_authentication_error()
-        return JSONResponse(
-            status_code=error.status_code,
-            content=error_handler.to_openai_error(error)
-        )
-    
-    current_time = int(time.time())
+        error = error_handler.create_authentication_error("Missing API key")
+        return _openai_error_response(error_handler, error)
+
+    api_key_obj = await api_key_service.get_key_by_raw(session, raw_key)
+    if api_key_obj is None or api_key_obj.status == "revoked":
+        error = error_handler.create_authentication_error("Invalid API key")
+        return _openai_error_response(error_handler, error)
+
+    allowed_models = set(api_key_service.get_model_groups(api_key_obj))
+    if model_id not in allowed_models:
+        error = error_handler.create_not_found_error(f"Model '{model_id}' not found")
+        return _openai_error_response(error_handler, error)
+
     return {
-        "id": model_group.name,
+        "id": model_id,
         "object": "model",
-        "created": int(model_group.created_at.timestamp()) if model_group.created_at else current_time,
+        "created": int(time.time()),
         "owned_by": "organization",
-        "permission": [],
-        "root": model_group.name,
-        "parent": None
     }
 
 
@@ -825,41 +1084,30 @@ async def get_model(
 async def get_current_key_info(
     authorization: Optional[str] = Header(None),
     x_api_key: Optional[str] = Header(None, alias="x-api-key"),
-    api_key: Optional[str] = Query(None, description="API Key，支持浏览器地址栏查询"),
-    key: Optional[str] = Query(None, description="API Key，api_key 的简写"),
-    session: AsyncSession = Depends(get_session)
+    api_key_query: Optional[str] = Query(None, alias="api_key"),
+    key_query: Optional[str] = Query(None, alias="key"),
+    session: AsyncSession = Depends(get_session),
 ):
-    """
-    获取当前 API Key 的模型权限、额度和使用情况。
-
-    支持:
-    - Authorization: Bearer sk-xxx
-    - x-api-key: sk-xxx
-    - /v1/key/info?api_key=sk-xxx
-    - /v1/key/info?key=sk-xxx
-    """
-    api_key_service = get_api_key_service()
-    account_pool = get_account_pool_service()
-    call_logger = get_call_logger_service()
+    bridge = get_protocol_bridge()
     error_handler = get_error_handler()
+    api_key_service = get_api_key_service()
+    call_logger = get_call_logger_service()
+    runtime = get_gateway_runtime()
 
-    raw_key = extract_api_key_from_request(authorization, x_api_key, api_key, key)
+    raw_key = bridge.extract_api_key(
+        authorization=authorization,
+        x_api_key=x_api_key,
+        api_key_query=api_key_query,
+        key_query=key_query,
+    )
     if not raw_key:
-        error = error_handler.create_authentication_error(
-            "Missing API key. Please include Authorization, x-api-key, api_key, or key."
-        )
-        return JSONResponse(
-            status_code=error.status_code,
-            content=error_handler.to_openai_error(error)
-        )
+        error = error_handler.create_authentication_error("Missing API key")
+        return _openai_error_response(error_handler, error)
 
     api_key_obj = await api_key_service.get_key_by_raw(session, raw_key)
     if api_key_obj is None or api_key_obj.status == "revoked":
         error = error_handler.create_authentication_error("Invalid API key")
-        return JSONResponse(
-            status_code=error.status_code,
-            content=error_handler.to_openai_error(error)
-        )
+        return _openai_error_response(error_handler, error)
 
     allowed_models = api_key_service.get_model_groups(api_key_obj)
     usage_by_model = await call_logger.get_api_key_usage_by_model(
@@ -868,496 +1116,15 @@ async def get_current_key_info(
         allowed_models=allowed_models,
         since=api_key_obj.created_at,
     )
-    models: List[Dict[str, Any]] = []
 
-    if allowed_models:
-        for model_name in allowed_models:
-            models.append({
+    models: List[Dict[str, Any]] = []
+    for model_name in allowed_models:
+        models.append(
+            {
                 "id": model_name,
-                "accounts": await account_pool.get_accounts_by_model_group(session, model_name),
+                "accounts": await runtime.account_pool.get_accounts_by_model_group(session, model_name),
                 "usage": usage_by_model.get(model_name),
-            })
+            }
+        )
 
     return build_public_key_info_payload(api_key_obj, models)
-
-
-# ============================================================================
-# Responses API Endpoint (for Codex compatibility)
-# ============================================================================
-
-@router.post("/responses")
-async def create_response(
-    http_request: Request,
-    authorization: Optional[str] = Header(None),
-    session: AsyncSession = Depends(get_session)
-):
-    """
-    OpenAI Responses API 端点 (用于 Codex 等工具)
-    
-    将 Responses API 请求转换为内部格式处理
-    """
-    request_id = uuid.uuid4().hex[:24]
-    start_time = time.time()
-    
-    # 获取服务实例
-    api_key_service = get_api_key_service()
-    account_pool = get_account_pool_service()
-    backend_client = get_backend_client()
-    transformer = get_transformer()
-    response_transformer = get_response_transformer()
-    error_handler = get_error_handler()
-    
-    # 解析请求体
-    try:
-        body = await http_request.body()
-        body_json = json.loads(body)
-        request = ResponsesRequest(**body_json)
-    except json.JSONDecodeError as e:
-        return JSONResponse(
-            status_code=400,
-            content={"error": {"message": f"Invalid JSON: {e}", "type": "invalid_request_error"}}
-        )
-    except Exception as e:
-        return JSONResponse(
-            status_code=422,
-            content={"error": {"message": f"Validation error: {e}", "type": "invalid_request_error"}}
-        )
-    
-    # 1. 提取并验证 API Key
-    raw_key = extract_api_key(authorization)
-    if not raw_key:
-        error = error_handler.create_authentication_error(
-            "Missing API key. Please include 'Authorization: Bearer YOUR_API_KEY' header."
-        )
-        return JSONResponse(
-            status_code=error.status_code,
-            content=error_handler.to_openai_error(error)
-        )
-    
-    # 2. 验证 API Key 和模型权限
-    api_key_obj, error_response = await validate_api_key_and_model(
-        session, raw_key, request.model, api_key_service, error_handler
-    )
-    if error_response:
-        return error_response
-    
-    # 3. 获取可用账号
-    account = await account_pool.get_available_account(session, request.model)
-    if not account:
-        error = error_handler.create_service_unavailable_error(
-            f"No available accounts for model '{request.model}'"
-        )
-        return JSONResponse(
-            status_code=error.status_code,
-            content=error_handler.to_openai_error(error)
-        )
-    
-    # 4. 将 Responses API 格式转换为 messages 格式
-    messages = []
-    
-    # 添加系统指令
-    if request.instructions:
-        messages.append(OpenAIMessage(role="system", content=request.instructions))
-    
-    # 处理 input 字段
-    if isinstance(request.input, str):
-        messages.append(OpenAIMessage(role="user", content=request.input))
-    elif isinstance(request.input, list):
-        for item in request.input:
-            if isinstance(item, dict):
-                role = item.get("role", "user")
-                content = item.get("content", "")
-                if isinstance(content, list):
-                    # 处理多部分内容
-                    text_parts = []
-                    for part in content:
-                        if isinstance(part, dict) and part.get("type") == "input_text":
-                            text_parts.append(part.get("text", ""))
-                        elif isinstance(part, dict) and part.get("type") == "text":
-                            text_parts.append(part.get("text", ""))
-                        elif isinstance(part, str):
-                            text_parts.append(part)
-                    content = "\n".join(text_parts)
-                messages.append(OpenAIMessage(role=role, content=content))
-            elif isinstance(item, str):
-                messages.append(OpenAIMessage(role="user", content=item))
-    
-    # 5. 转换请求格式
-    openai_request = OpenAIChatRequest(
-        model=request.model,
-        messages=messages,
-        stream=request.stream,
-        temperature=request.temperature,
-        max_tokens=request.max_output_tokens
-    )
-    unified_request = transformer.parse_openai_request(openai_request)
-    
-    # 6. 获取模型组的输入映射配置
-    input_mapping = None
-    result = await session.execute(
-        select(ModelGroup).where(ModelGroup.name == request.model)
-    )
-    model_group = result.scalar_one_or_none()
-    if model_group and model_group.input_mapping:
-        try:
-            input_mapping = json.loads(model_group.input_mapping)
-        except json.JSONDecodeError:
-            pass
-    
-    # 7. 转换为后端格式
-    backend_payload = transformer.to_st_dict(
-        unified_request,
-        input_mapping=input_mapping,
-        user_id="anonymous"
-    )
-    
-    logger.info(f"Responses API Request {request_id}: model={request.model}, stream={request.stream}")
-    
-    try:
-        if request.stream:
-            # 流式响应
-            async def generate_stream():
-                try:
-                    stream_gen = await backend_client.execute_with_account(
-                        account=account,
-                        payload=backend_payload,
-                        stream=True,
-                        account_pool=account_pool
-                    )
-                    
-                    # 发送 response.created 事件
-                    created_event = {
-                        "type": "response.created",
-                        "response": {
-                            "id": f"resp_{request_id}",
-                            "object": "response",
-                            "created_at": int(time.time()),
-                            "status": "in_progress",
-                            "model": request.model,
-                            "output": []
-                        }
-                    }
-                    yield f"event: response.created\ndata: {json.dumps(created_event)}\n\n"
-                    
-                    # 发送 response.output_item.added 事件
-                    item_added = {
-                        "type": "response.output_item.added",
-                        "output_index": 0,
-                        "item": {
-                            "type": "message",
-                            "id": f"msg_{request_id}",
-                            "role": "assistant",
-                            "content": []
-                        }
-                    }
-                    yield f"event: response.output_item.added\ndata: {json.dumps(item_added)}\n\n"
-                    
-                    # 发送 response.content_part.added 事件
-                    content_added = {
-                        "type": "response.content_part.added",
-                        "item_id": f"msg_{request_id}",
-                        "output_index": 0,
-                        "content_index": 0,
-                        "part": {"type": "output_text", "text": ""}
-                    }
-                    yield f"event: response.content_part.added\ndata: {json.dumps(content_added)}\n\n"
-                    
-                    # 流式输出内容
-                    full_text = ""
-                    async for raw_chunk in stream_gen:
-                        token = response_transformer._parse_backend_sse(raw_chunk)
-                        if token:
-                            full_text += token
-                            delta_event = {
-                                "type": "response.output_text.delta",
-                                "item_id": f"msg_{request_id}",
-                                "output_index": 0,
-                                "content_index": 0,
-                                "delta": token
-                            }
-                            yield f"event: response.output_text.delta\ndata: {json.dumps(delta_event)}\n\n"
-                    
-                    # 发送 response.output_text.done 事件
-                    text_done = {
-                        "type": "response.output_text.done",
-                        "item_id": f"msg_{request_id}",
-                        "output_index": 0,
-                        "content_index": 0,
-                        "text": full_text
-                    }
-                    yield f"event: response.output_text.done\ndata: {json.dumps(text_done)}\n\n"
-                    
-                    # 发送 response.content_part.done 事件
-                    content_done = {
-                        "type": "response.content_part.done",
-                        "item_id": f"msg_{request_id}",
-                        "output_index": 0,
-                        "content_index": 0,
-                        "part": {"type": "output_text", "text": full_text}
-                    }
-                    yield f"event: response.content_part.done\ndata: {json.dumps(content_done)}\n\n"
-                    
-                    # 发送 response.output_item.done 事件
-                    item_done = {
-                        "type": "response.output_item.done",
-                        "output_index": 0,
-                        "item": {
-                            "type": "message",
-                            "id": f"msg_{request_id}",
-                            "role": "assistant",
-                            "content": [{"type": "output_text", "text": full_text}]
-                        }
-                    }
-                    yield f"event: response.output_item.done\ndata: {json.dumps(item_done)}\n\n"
-                    
-                    # 发送 response.completed 事件
-                    completed_event = {
-                        "type": "response.completed",
-                        "response": {
-                            "id": f"resp_{request_id}",
-                            "object": "response",
-                            "created_at": int(time.time()),
-                            "status": "completed",
-                            "model": request.model,
-                            "output": [{
-                                "type": "message",
-                                "id": f"msg_{request_id}",
-                                "role": "assistant",
-                                "content": [{"type": "output_text", "text": full_text}]
-                            }]
-                        }
-                    }
-                    yield f"event: response.completed\ndata: {json.dumps(completed_event)}\n\n"
-                    
-                except BackendClientError as e:
-                    logger.error(f"Responses API Request {request_id}: Backend error - {e.message}")
-                    error_event = {
-                        "type": "error",
-                        "error": error_handler.to_openai_error(
-                            error_handler.from_backend_exception(e)
-                        )["error"]
-                    }
-                    yield f"event: error\ndata: {json.dumps(error_event)}\n\n"
-                except Exception as e:
-                    logger.exception(f"Responses API Request {request_id}: Error")
-                    error_event = {
-                        "type": "error",
-                        "error": error_handler.to_openai_error(
-                            error_handler.create_server_error()
-                        )["error"]
-                    }
-                    yield f"event: error\ndata: {json.dumps(error_event)}\n\n"
-            
-            return StreamingResponse(
-                generate_stream(),
-                media_type="text/event-stream",
-                headers={
-                    "Cache-Control": "no-cache",
-                    "Connection": "keep-alive",
-                    "X-Request-ID": request_id
-                }
-            )
-        else:
-            # 同步响应
-            backend_response = await backend_client.run_with_account(
-                account=account,
-                payload=backend_payload,
-                account_pool=account_pool
-            )
-            
-            # 提取内容
-            content = response_transformer._extract_content(backend_response)
-
-            fallback_input_tokens = len(str(request.input)) // 4
-            fallback_output_tokens = len(content) // 4
-
-            backend_usage = extract_usage(backend_response, source="backend.responses_sync")
-            run_id = extract_run_id(backend_response)
-
-            analytics_usage = None
-            if backend_usage is None or not backend_usage.exact:
-                private_api_key = account_pool.decrypt_private_api_key(account)
-                analytics_usage = await _fetch_analytics_usage(
-                    org_id=account.org_id,
-                    flow_id=account.flow_id,
-                    private_api_key=private_api_key,
-                    run_id=run_id,
-                    fallback_to_latest=False,
-                    retries=2,
-                    delay_seconds=0.4,
-                )
-
-            selected_usage = choose_better_usage(backend_usage, analytics_usage)
-            final_usage = _finalize_usage(
-                preferred_usage=selected_usage,
-                fallback_input_tokens=fallback_input_tokens,
-                fallback_output_tokens=fallback_output_tokens,
-                fallback_source="estimate.responses",
-            )
-
-            # 构建 Responses API 格式的响应
-            response_data = {
-                "id": f"resp_{request_id}",
-                "object": "response",
-                "created_at": int(time.time()),
-                "status": "completed",
-                "model": request.model,
-                "output": [{
-                    "type": "message",
-                    "id": f"msg_{request_id}",
-                    "role": "assistant",
-                    "content": [{"type": "output_text", "text": content}]
-                }],
-                "usage": {
-                    "input_tokens": final_usage.input_tokens,
-                    "output_tokens": final_usage.output_tokens,
-                    "total_tokens": final_usage.total_tokens
-                }
-            }
-            
-            return JSONResponse(
-                content=response_data,
-                headers={"X-Request-ID": request_id}
-            )
-            
-    except BackendClientError as e:
-        logger.error(f"Responses API Request {request_id}: Backend error - {e.message}")
-        error = error_handler.from_backend_exception(e)
-        return JSONResponse(
-            status_code=error.status_code,
-            content=error_handler.to_openai_error(error)
-        )
-    except Exception as e:
-        logger.exception(f"Responses API Request {request_id}: Unexpected error")
-        error = error_handler.create_server_error()
-        return JSONResponse(
-            status_code=error.status_code,
-            content=error_handler.to_openai_error(error)
-        )
-
-
-# ============================================================================
-# Stream Stats Update Helper
-# ============================================================================
-
-async def update_stream_stats(context: dict):
-    """
-    流式响应结束后更新统计
-    
-    优先从 Backend Analytics 获取真实的 token 数据，
-    如果无法获取则使用 tiktoken 估算。
-    
-    Args:
-        context: 包含请求上下文信息的字典
-    """
-    from app.models.database import get_session_factory
-    from app.services.token_counter import get_token_counter
-    from app.services.call_logger import get_call_logger_service
-    
-    try:
-        elapsed_ms = int((time.time() - context["start_time"]) * 1000)
-        # 获取累积的输出内容（用于 output_preview 和 fallback 估算）
-        accumulated_content = "".join(context.get("accumulated_content", []))
-
-        # fallback: tiktoken 估算
-        token_counter = get_token_counter()
-        fallback_input_tokens = 0
-        fallback_output_tokens = 0
-        last_user_msg = context.get("last_user_msg", "")
-        if last_user_msg:
-            fallback_input_tokens = token_counter.count(last_user_msg)
-        if accumulated_content:
-            fallback_output_tokens = token_counter.count(accumulated_content)
-
-        # 优先使用流中捕获的 usage（来自后端 SSE 原始 chunk）
-        selected_usage = context.get("st_usage")
-
-        # 如流中没有精确 usage，尝试通过 run_id 从 analytics 获取
-        run_id = context.get("st_run_id")
-        if selected_usage is None or not selected_usage.exact:
-            analytics_usage = await _fetch_analytics_usage(
-                org_id=context["account_org_id"],
-                flow_id=context["account_flow_id"],
-                private_api_key=context.get("private_api_key"),
-                run_id=run_id,
-                fallback_to_latest=False,
-                retries=3,
-                delay_seconds=0.5,
-            )
-            selected_usage = choose_better_usage(selected_usage, analytics_usage)
-
-        final_usage = _finalize_usage(
-            preferred_usage=selected_usage,
-            fallback_input_tokens=fallback_input_tokens,
-            fallback_output_tokens=fallback_output_tokens,
-            fallback_source="estimate.stream",
-        )
-
-        input_tokens = final_usage.input_tokens
-        output_tokens = final_usage.output_tokens
-        total_tokens = final_usage.total_tokens
-        
-        # 创建新的数据库会话
-        session_factory = get_session_factory()
-        async with session_factory() as session:
-            # 记录请求日志
-            logger_service = get_logger_service()
-            await logger_service.log_success(
-                session=session,
-                request_id=context["request_id"],
-                api_key_prefix=context["api_key_prefix"],
-                client_ip=context["client_ip"],
-                model=context["model"],
-                account_id=context["account_id"],
-                input_tokens=input_tokens,
-                output_tokens=output_tokens,
-                response_time_ms=elapsed_ms
-            )
-            
-            # 计算费用
-            from app.services.pricing import get_pricing_service
-            pricing_service = get_pricing_service()
-            _, _, total_cost = pricing_service.calculate(context["model"], input_tokens, output_tokens)
-            
-            # 更新 API Key 累计统计（包含费用）
-            if context["api_key_id"]:
-                api_key_service = get_api_key_service()
-                await api_key_service.update_key_stats(
-                    session, context["api_key_id"], input_tokens, output_tokens, cost=total_cost
-                )
-            
-            # 更新系统累计统计
-            stats_service = get_stats_service()
-            await stats_service.update_system_stats(session, input_tokens, output_tokens)
-            
-            # 记录详细调用日志
-            call_logger = get_call_logger_service()
-            await call_logger.log_call(
-                session,
-                api_key_id=context.get("api_key_id"),
-                api_key_name=context.get("api_key_name"),
-                api_key_prefix=context.get("api_key_prefix"),
-                client_ip=context.get("client_ip"),
-                account_id=context.get("account_id"),
-                account_name=context.get("account_name"),
-                model_group=context.get("model_group"),
-                model=context.get("model"),
-                api_type="openai",
-                is_stream=True,
-                input_preview=context.get("input_preview"),
-                output_preview=accumulated_content[:500] if accumulated_content else None,
-                input_tokens=input_tokens,
-                output_tokens=output_tokens,
-                response_time_ms=elapsed_ms,
-                status="success",
-            )
-            
-            await session.commit()
-            
-        logger.debug(
-            f"Stream stats updated for request {context['request_id']}: "
-            f"tokens={total_tokens} (in={input_tokens}, out={output_tokens}), "
-            f"source={final_usage.source}, run_id={context.get('st_run_id')}, elapsed={elapsed_ms}ms"
-        )
-    except Exception as e:
-        logger.error(f"Failed to update stream stats: {e}")

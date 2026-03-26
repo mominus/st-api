@@ -868,7 +868,8 @@ class ResponseTransformer:
         model: str,
         request_id: Optional[str] = None,
         tool_parser: Optional["ToolParser"] = None,
-        max_buffer_size: int = 65536
+        max_buffer_size: int = 65536,
+        stop_after_first_tool_call: bool = True,
     ) -> AsyncGenerator[str, None]:
         """
         将后端 SSE 流转换为带有 tool_use 检测的 Anthropic SSE 格式
@@ -895,6 +896,7 @@ class ResponseTransformer:
         STATE_TEXT = 0           # 普通文本状态
         STATE_BUFFERING_JSON = 1 # 缓冲 JSON 代码块状态
         STATE_BUFFERING_XML = 2  # 缓冲 XML tool_use 标签状态
+        STATE_BUFFERING_BRACKET = 3  # 缓冲 [tool_call ...] 语法状态
         
         state = STATE_TEXT
         content_index = 0
@@ -904,18 +906,27 @@ class ResponseTransformer:
         current_block_started = False
         current_block_type = "text"  # "text" or "tool_use"
         has_tool_calls = False
+        terminate_stream_early = False
+        # Claude Code 官方体验里，工具调用轮次应尽量避免输出长篇中间草稿。
+        # 一旦检测到 tool_use，就抑制后续文本增量，只保留工具事件本身。
+        suppress_intermediate_tool_text = True
         
         # 标记
         JSON_BLOCK_START = "```json"
         JSON_BLOCK_END = "```"
         XML_TOOL_START = "<tool_use"
         XML_TOOL_END = "</tool_use>"
+        BRACKET_TOOL_START = "[tool_call"
         
         # XML tool_use 正则
         import re
         XML_TOOL_USE_PATTERN = re.compile(
             r'<tool_use\s+id="([^"]+)"\s+name="([^"]+)">(.*?)</tool_use>',
             re.DOTALL
+        )
+        BRACKET_TOOL_CALL_HEADER_PATTERN = re.compile(
+            r"\[tool_call\s+id=([^\s\]]+)\s+name=([^\]]+)\]\s*",
+            re.IGNORECASE,
         )
         
         def emit_message_start() -> str:
@@ -1070,6 +1081,50 @@ class ResponseTransformer:
             if tool_parser.validate_tool_call(parsed_call):
                 return parsed_call, tool_id
             return None, None
+
+        def parse_bracket_tool_call(buffer_content: str):
+            """从 [tool_call ...] + JSON 参数格式解析工具调用。"""
+            if tool_parser is None:
+                return None, None, 0, False
+
+            header_match = BRACKET_TOOL_CALL_HEADER_PATTERN.match(buffer_content)
+            if not header_match:
+                closing = buffer_content.find("]")
+                if closing == -1:
+                    return None, None, 0, False
+                # 头部格式不合法，标记本段可消费并回退为普通文本。
+                return None, None, closing + 1, True
+
+            tool_id = header_match.group(1)
+            tool_name = header_match.group(2).strip()
+            rest = buffer_content[header_match.end():]
+            leading_ws = len(rest) - len(rest.lstrip())
+            json_part = rest.lstrip()
+            if not json_part:
+                return None, None, 0, False
+
+            decoder = json.JSONDecoder()
+            try:
+                parsed_obj, end_idx = decoder.raw_decode(json_part)
+            except json.JSONDecodeError:
+                return None, None, 0, False
+
+            arguments = parsed_obj if isinstance(parsed_obj, dict) else {}
+
+            from .tool_parser import ParsedToolCall
+            parsed_call = ParsedToolCall(
+                tool_name=tool_name,
+                arguments=arguments,
+                raw_json=json.dumps(arguments, ensure_ascii=False, separators=(",", ":")),
+            )
+
+            consumed_len = header_match.end() + leading_ws + end_idx
+            while consumed_len < len(buffer_content) and buffer_content[consumed_len] in " \t\r\n":
+                consumed_len += 1
+
+            if tool_parser.validate_tool_call(parsed_call):
+                return parsed_call, tool_id, consumed_len, True
+            return None, tool_id, consumed_len, True
         
         # 处理流
         async for raw_data in backend_stream:
@@ -1082,48 +1137,54 @@ class ResponseTransformer:
             
             while buffer:
                 if state == STATE_TEXT:
-                    # 检查是否有 JSON 代码块或 XML tool_use 开始标记
+                    # 检查是否有 JSON 代码块、XML tool_use 或 bracket tool_call 开始标记
                     json_start_pos = buffer.find(JSON_BLOCK_START)
                     xml_start_pos = buffer.find(XML_TOOL_START)
-                    
-                    # 确定哪个标记先出现
+                    bracket_start_pos = buffer.find(BRACKET_TOOL_START)
+
+                    candidates = []
+                    if json_start_pos != -1:
+                        candidates.append((json_start_pos, "json"))
+                    if xml_start_pos != -1:
+                        candidates.append((xml_start_pos, "xml"))
+                    if bracket_start_pos != -1:
+                        candidates.append((bracket_start_pos, "bracket"))
+
                     start_pos = -1
                     start_type = None
-                    
-                    if json_start_pos != -1 and xml_start_pos != -1:
-                        if json_start_pos < xml_start_pos:
-                            start_pos = json_start_pos
-                            start_type = "json"
-                        else:
-                            start_pos = xml_start_pos
-                            start_type = "xml"
-                    elif json_start_pos != -1:
-                        start_pos = json_start_pos
-                        start_type = "json"
-                    elif xml_start_pos != -1:
-                        start_pos = xml_start_pos
-                        start_type = "xml"
+                    if candidates:
+                        start_pos, start_type = min(candidates, key=lambda x: x[0])
                     
                     if start_pos != -1:
                         # 找到开始标记
                         # 先输出开始标记之前的文本
                         if start_pos > 0:
                             text_before = buffer[:start_pos]
-                            event = await ensure_message_started()
-                            if event:
-                                yield event
-                            event = await start_text_block()
-                            if event:
-                                yield event
-                            yield emit_text_delta(content_index, text_before)
+                            if not (has_tool_calls and suppress_intermediate_tool_text):
+                                event = await ensure_message_started()
+                                if event:
+                                    yield event
+                                event = await start_text_block()
+                                if event:
+                                    yield event
+                                yield emit_text_delta(content_index, text_before)
                         
                         # 移除已处理的文本
                         buffer = buffer[start_pos:]
-                        state = STATE_BUFFERING_JSON if start_type == "json" else STATE_BUFFERING_XML
+                        if start_type == "json":
+                            state = STATE_BUFFERING_JSON
+                        elif start_type == "xml":
+                            state = STATE_BUFFERING_XML
+                        else:
+                            state = STATE_BUFFERING_BRACKET
                     else:
                         # 没有找到开始标记
                         # 检查缓冲区末尾是否可能是不完整的开始标记
-                        potential_start_len = max(len(JSON_BLOCK_START), len(XML_TOOL_START)) - 1
+                        potential_start_len = max(
+                            len(JSON_BLOCK_START),
+                            len(XML_TOOL_START),
+                            len(BRACKET_TOOL_START),
+                        ) - 1
                         
                         if len(buffer) <= potential_start_len:
                             # 缓冲区太短，等待更多数据
@@ -1133,13 +1194,14 @@ class ResponseTransformer:
                         safe_len = len(buffer) - potential_start_len
                         if safe_len > 0:
                             text_to_output = buffer[:safe_len]
-                            event = await ensure_message_started()
-                            if event:
-                                yield event
-                            event = await start_text_block()
-                            if event:
-                                yield event
-                            yield emit_text_delta(content_index, text_to_output)
+                            if not (has_tool_calls and suppress_intermediate_tool_text):
+                                event = await ensure_message_started()
+                                if event:
+                                    yield event
+                                event = await start_text_block()
+                                if event:
+                                    yield event
+                                yield emit_text_delta(content_index, text_to_output)
                             buffer = buffer[safe_len:]
                         break
                 
@@ -1176,28 +1238,32 @@ class ResponseTransformer:
                             yield emit_block_stop(content_index)
                             content_index += 1
                             current_block_started = False
+                            if stop_after_first_tool_call:
+                                terminate_stream_early = True
                         else:
                             # 不是有效的工具调用，作为普通文本输出
                             full_block = buffer[:end_pos + len(JSON_BLOCK_END)]
-                            event = await ensure_message_started()
-                            if event:
-                                yield event
-                            event = await start_text_block()
-                            if event:
-                                yield event
-                            yield emit_text_delta(content_index, full_block)
+                            if not (has_tool_calls and suppress_intermediate_tool_text):
+                                event = await ensure_message_started()
+                                if event:
+                                    yield event
+                                event = await start_text_block()
+                                if event:
+                                    yield event
+                                yield emit_text_delta(content_index, full_block)
                         
                         buffer = buffer[end_pos + len(JSON_BLOCK_END):]
                         state = STATE_TEXT
                     else:
                         if len(buffer) > max_buffer_size:
-                            event = await ensure_message_started()
-                            if event:
-                                yield event
-                            event = await start_text_block()
-                            if event:
-                                yield event
-                            yield emit_text_delta(content_index, buffer)
+                            if not (has_tool_calls and suppress_intermediate_tool_text):
+                                event = await ensure_message_started()
+                                if event:
+                                    yield event
+                                event = await start_text_block()
+                                if event:
+                                    yield event
+                                yield emit_text_delta(content_index, buffer)
                             buffer = ""
                             state = STATE_TEXT
                         break
@@ -1235,51 +1301,116 @@ class ResponseTransformer:
                             yield emit_block_stop(content_index)
                             content_index += 1
                             current_block_started = False
+                            if stop_after_first_tool_call:
+                                terminate_stream_early = True
                         else:
                             # 不是有效的工具调用，作为普通文本输出
-                            event = await ensure_message_started()
-                            if event:
-                                yield event
-                            event = await start_text_block()
-                            if event:
-                                yield event
-                            yield emit_text_delta(content_index, xml_content)
+                            if not (has_tool_calls and suppress_intermediate_tool_text):
+                                event = await ensure_message_started()
+                                if event:
+                                    yield event
+                                event = await start_text_block()
+                                if event:
+                                    yield event
+                                yield emit_text_delta(content_index, xml_content)
                         
                         buffer = buffer[end_pos + len(XML_TOOL_END):]
                         state = STATE_TEXT
                     else:
                         if len(buffer) > max_buffer_size:
-                            event = await ensure_message_started()
-                            if event:
-                                yield event
-                            event = await start_text_block()
-                            if event:
-                                yield event
-                            yield emit_text_delta(content_index, buffer)
+                            if not (has_tool_calls and suppress_intermediate_tool_text):
+                                event = await ensure_message_started()
+                                if event:
+                                    yield event
+                                event = await start_text_block()
+                                if event:
+                                    yield event
+                                yield emit_text_delta(content_index, buffer)
                             buffer = ""
                             state = STATE_TEXT
                         break
+
+                elif state == STATE_BUFFERING_BRACKET:
+                    parsed_call, original_id, consumed_len, is_complete = parse_bracket_tool_call(buffer)
+
+                    if is_complete and consumed_len > 0:
+                        bracket_content = buffer[:consumed_len]
+                        if parsed_call is not None:
+                            has_tool_calls = True
+
+                            event = await end_current_block()
+                            if event:
+                                yield event
+
+                            event = await ensure_message_started()
+                            if event:
+                                yield event
+
+                            tool_use_id = original_id if original_id else tool_parser.generate_tool_use_id()
+                            yield emit_tool_use_block_start(content_index, tool_use_id, parsed_call.tool_name)
+
+                            input_json = json.dumps(parsed_call.arguments)
+                            yield emit_tool_use_delta(content_index, input_json)
+
+                            yield emit_block_stop(content_index)
+                            content_index += 1
+                            current_block_started = False
+                            if stop_after_first_tool_call:
+                                terminate_stream_early = True
+                        else:
+                            # 无法识别为有效工具调用，回退为普通文本
+                            if not (has_tool_calls and suppress_intermediate_tool_text):
+                                event = await ensure_message_started()
+                                if event:
+                                    yield event
+                                event = await start_text_block()
+                                if event:
+                                    yield event
+                                yield emit_text_delta(content_index, bracket_content)
+
+                        buffer = buffer[consumed_len:]
+                        state = STATE_TEXT
+                    else:
+                        if len(buffer) > max_buffer_size:
+                            if not (has_tool_calls and suppress_intermediate_tool_text):
+                                event = await ensure_message_started()
+                                if event:
+                                    yield event
+                                event = await start_text_block()
+                                if event:
+                                    yield event
+                                yield emit_text_delta(content_index, buffer)
+                            buffer = ""
+                            state = STATE_TEXT
+                        break
+                if terminate_stream_early:
+                    buffer = ""
+                    break
+            if terminate_stream_early:
+                break
         
         # 处理剩余缓冲区
-        if buffer:
-            if state in (STATE_BUFFERING_JSON, STATE_BUFFERING_XML):
+        if buffer and not terminate_stream_early:
+            if state in (STATE_BUFFERING_JSON, STATE_BUFFERING_XML, STATE_BUFFERING_BRACKET):
                 # 代码块未完成，作为普通文本输出
-                event = await ensure_message_started()
-                if event:
-                    yield event
-                event = await start_text_block()
-                if event:
-                    yield event
-                yield emit_text_delta(content_index, buffer)
+                if not (has_tool_calls and suppress_intermediate_tool_text):
+                    event = await ensure_message_started()
+                    if event:
+                        yield event
+                    event = await start_text_block()
+                    if event:
+                        yield event
+                    yield emit_text_delta(content_index, buffer)
             elif state == STATE_TEXT:
                 # 普通文本
-                event = await ensure_message_started()
-                if event:
-                    yield event
-                event = await start_text_block()
-                if event:
-                    yield event
-                yield emit_text_delta(content_index, buffer)
+                if not (has_tool_calls and suppress_intermediate_tool_text):
+                    event = await ensure_message_started()
+                    if event:
+                        yield event
+                    event = await start_text_block()
+                    if event:
+                        yield event
+                    yield emit_text_delta(content_index, buffer)
         
         # 确保当前块已关闭
         event = await end_current_block()

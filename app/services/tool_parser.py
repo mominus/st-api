@@ -71,6 +71,13 @@ class ToolParser:
         r'<tool_use\s+id="([^"]+)"\s+name="([^"]+)">(.*?)</tool_use>',
         re.DOTALL
     )
+
+    # 匹配 bracket 工具调用头
+    # 匹配 [tool_call id=... name=ToolName] 格式
+    BRACKET_TOOL_CALL_HEADER_PATTERN = re.compile(
+        r"\[tool_call\s+id=([^\s\]]+)\s+name=([^\]]+)\]\s*",
+        re.IGNORECASE,
+    )
     
     # 工具调用 ID 前缀
     TOOL_USE_ID_PREFIX = "toolu_"
@@ -107,6 +114,12 @@ class ToolParser:
         if xml_result.has_tool_calls:
             logger.debug(f"Parsed {len(xml_result.tool_calls)} tool calls from XML format")
             return xml_result
+
+        # 然后尝试 bracket 格式
+        bracket_result = self._parse_bracket_format(content)
+        if bracket_result.has_tool_calls:
+            logger.debug(f"Parsed {len(bracket_result.tool_calls)} tool calls from bracket format")
+            return bracket_result
         
         # 然后尝试 JSON 代码块格式
         json_result = self._parse_json_format(content)
@@ -179,6 +192,66 @@ class ToolParser:
         result.tool_calls = tool_calls
         result.has_tool_calls = len(tool_calls) > 0
         
+        return result
+
+    def _parse_bracket_format(self, content: str) -> ParseResult:
+        """
+        解析 bracket 格式的工具调用
+
+        格式:
+        [tool_call id=toolu_xxx name=ToolName]
+        {"arg":"value"}
+        """
+        result = ParseResult()
+        matches = list(self.BRACKET_TOOL_CALL_HEADER_PATTERN.finditer(content))
+        if not matches:
+            return result
+
+        decoder = json.JSONDecoder()
+        tool_calls: List[ParsedToolCall] = []
+        result.text_before = content[:matches[0].start()].rstrip()
+        trailing_after_last = ""
+
+        for idx, match in enumerate(matches):
+            tool_id = match.group(1)
+            tool_name = match.group(2).strip()
+            next_start = matches[idx + 1].start() if idx + 1 < len(matches) else len(content)
+
+            segment = content[match.end():next_start]
+            stripped_segment = segment.lstrip()
+            trailing = ""
+            arguments: Dict[str, Any] = {}
+
+            if stripped_segment:
+                try:
+                    parsed_obj, end_idx = decoder.raw_decode(stripped_segment)
+                    if isinstance(parsed_obj, dict):
+                        arguments = parsed_obj
+                    trailing = stripped_segment[end_idx:]
+                except json.JSONDecodeError:
+                    # 允许参数解析失败，仍保留工具调用本体，避免 tool_call 文本外泄
+                    trailing = stripped_segment
+
+            parsed_call = ParsedToolCall(
+                tool_name=tool_name,
+                arguments=arguments,
+                raw_json=json.dumps(arguments, ensure_ascii=False, separators=(",", ":")),
+            )
+
+            if self._is_valid_tool_call(parsed_call):
+                parsed_call.raw_json = f"bracket_id:{tool_id}"
+                tool_calls.append(parsed_call)
+            else:
+                logger.warning(f"Invalid bracket tool call: {tool_name}")
+
+            if idx == len(matches) - 1:
+                trailing_after_last = trailing
+
+        result.tool_calls = tool_calls
+        result.has_tool_calls = len(tool_calls) > 0
+        if trailing_after_last and trailing_after_last.strip():
+            result.text_after = trailing_after_last.lstrip()
+
         return result
     
     def _parse_json_format(self, content: str) -> ParseResult:

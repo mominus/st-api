@@ -41,7 +41,7 @@
 
 | 变量名 | 值 | 说明 |
 |--------|-----|------|
-| `DATABASE_URL` | `sqlite+aiosqlite:///data/api_service.db` | SQLite 数据库路径（注意：使用 /data 绝对路径） |
+| `DATABASE_URL` | `sqlite+aiosqlite:////data/api_service.db` | SQLite 数据库路径（注意：使用 /data 绝对路径） |
 | `JWT_SECRET_KEY` | 随机字符串 | 生成：`openssl rand -hex 32` |
 | `ENCRYPTION_KEY` | Fernet 密钥 | 生成：见下方命令 |
 | `ADMIN_USERNAME` | `admin` | 管理员用户名 |
@@ -157,7 +157,7 @@ curl https://你的用户名-st-api.hf.space/health
 
 **环境变量配置**：
 ```
-DATABASE_URL=sqlite+aiosqlite:///data/api_service.db
+DATABASE_URL=sqlite+aiosqlite:////data/api_service.db
 LOG_FILE=/data/api_service.log
 ```
 

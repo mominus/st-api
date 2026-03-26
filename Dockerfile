@@ -20,8 +20,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY app/ ./app/
 COPY run.py .
 
-# 创建数据目录
-RUN mkdir -p /app/data && chmod 777 /app/data
+# 创建数据目录（HF Persistent Storage 挂载点）
+RUN mkdir -p /data && chmod 777 /data
 
 # 设置权限
 RUN chmod -R 755 /app
@@ -29,8 +29,8 @@ RUN chmod -R 755 /app
 # HF Spaces 使用 7860 端口
 ENV PORT=7860
 ENV HOST=0.0.0.0
-ENV DATABASE_URL=sqlite+aiosqlite:///./data/api_service.db
-ENV LOG_FILE=./data/api_service.log
+ENV DATABASE_URL=sqlite+aiosqlite:////data/api_service.db
+ENV LOG_FILE=/data/api_service.log
 
 # 暴露端口
 EXPOSE 7860

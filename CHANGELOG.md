@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## v1.2.0 - 2026-03-26
+
+- cc内置工具的全面支持
+- cli工具调用增加 bracket 风格
+- Cherry Studio MCP支持
 ## v1.1.1 - 2026-03-24
 
 - 单账号多模型路由(与v1.1.0版本一致)

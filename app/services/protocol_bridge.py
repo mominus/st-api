@@ -750,14 +750,14 @@ class ProtocolBridge:
             if isinstance(function_call, dict):
                 name = str(function_call.get("name") or "tool")
                 args = function_call.get("args") or {}
-                chunks.append(f"[tool_call name={name}]\n{json.dumps(args, ensure_ascii=False, separators=(",", ":"))}")
+                chunks.append(f"[tool_call name={name}]\n{json.dumps(args, ensure_ascii=False, separators=(',', ':'))}")
                 continue
 
             function_response = part.get("functionResponse") or part.get("function_response")
             if isinstance(function_response, dict):
                 name = str(function_response.get("name") or "tool")
                 response = function_response.get("response") or {}
-                chunks.append(f"[tool_result name={name}]\n{json.dumps(response, ensure_ascii=False, separators=(",", ":"))}")
+                chunks.append(f"[tool_result name={name}]\n{json.dumps(response, ensure_ascii=False, separators=(',', ':'))}")
                 continue
 
             chunks.append(self._flatten_openai_content(part))

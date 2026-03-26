@@ -98,31 +98,80 @@ function closeMobileMenu() {
 
 async function apiCall(endpoint, options = {}) {
     const url = `${API_BASE}${endpoint}`;
-    const headers = {
+    const method = (options.method || 'GET').toUpperCase();
+    const retryableMethods = ['PUT', 'DELETE', 'PATCH'];
+    const baseHeaders = {
         'Content-Type': 'application/json',
         ...options.headers
     };
     
     if (authToken) {
-        headers['Authorization'] = `Bearer ${authToken}`;
+        baseHeaders['Authorization'] = `Bearer ${authToken}`;
+    }
+
+    const buildFetchOptions = (requestMethod, extraHeaders = {}) => {
+        return {
+            ...options,
+            method: requestMethod,
+            headers: {
+                ...baseHeaders,
+                ...extraHeaders
+            }
+        };
+    };
+
+    const parseJsonSafe = (rawText) => {
+        if (!rawText || !rawText.trim()) {
+            return {};
+        }
+        try {
+            return JSON.parse(rawText);
+        } catch {
+            return null;
+        }
+    };
+
+    const isLikelyHtml = (response, rawText) => {
+        const contentType = (response.headers.get('content-type') || '').toLowerCase();
+        const text = (rawText || '').trimStart().toLowerCase();
+        return (
+            contentType.includes('text/html') ||
+            text.startsWith('<!doctype html') ||
+            text.startsWith('<html')
+        );
     }
     
     try {
-        const response = await fetch(url, {
-            ...options,
-            headers
-        });
+        let response = await fetch(url, buildFetchOptions(method));
+        let rawText = await response.text();
+        let data = parseJsonSafe(rawText);
+
+        // 某些代理环境会拦截 PUT/DELETE/PATCH 并返回 HTML 页面。
+        // 这里自动降级为 POST + X-HTTP-Method-Override 重试一次。
+        if (retryableMethods.includes(method) && isLikelyHtml(response, rawText)) {
+            response = await fetch(
+                url,
+                buildFetchOptions('POST', { 'X-HTTP-Method-Override': method })
+            );
+            rawText = await response.text();
+            data = parseJsonSafe(rawText);
+        }
         
         if (response.status === 401) {
             // Token 过期，退出登录
             handleLogout();
             throw new Error('登录已过期，请重新登录');
         }
-        
-        const data = await response.json();
-        
+
+        if (data === null) {
+            if (isLikelyHtml(response, rawText)) {
+                throw new Error('服务端返回了 HTML 页面，请检查 HF 网关/路由配置');
+            }
+            throw new Error(`服务端返回了非 JSON 响应（${response.status}）`);
+        }
+
         if (!response.ok) {
-            throw new Error(data.detail || data.message || '请求失败');
+            throw new Error(data.detail || data.message || `请求失败（${response.status}）`);
         }
         
         return data;

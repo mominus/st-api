@@ -117,6 +117,27 @@ async def verify_worker_proxy_secret(request: Request, call_next):
     return await call_next(request)
 
 
+# 管理后台方法覆盖中间件
+@app.middleware("http")
+async def support_admin_method_override(request: Request, call_next):
+    """
+    兼容某些代理环境（如部分 Spaces 网关）对 PUT/DELETE/PATCH 的限制：
+    允许前端通过 POST + X-HTTP-Method-Override 访问管理后台接口。
+    """
+    if request.method == "POST":
+        path = request.url.path
+        if path.startswith("/api/admin/"):
+            override = (
+                request.headers.get("x-http-method-override")
+                or request.query_params.get("_method")
+                or ""
+            ).strip().upper()
+            if override in {"PUT", "DELETE", "PATCH"}:
+                request.scope["method"] = override
+
+    return await call_next(request)
+
+
 # 请求日志中间件（带性能统计）
 @app.middleware("http")
 async def log_requests(request: Request, call_next):

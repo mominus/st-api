@@ -78,6 +78,20 @@ class ToolParser:
         r"\[tool_call\s+id=([^\s\]]+)\s+name=([^\]]+)\]\s*",
         re.IGNORECASE,
     )
+
+    # 匹配 Claude Code 常见的 WebSearch 函数式调用
+    # 示例: WebSearch("latest ai news")
+    LEGACY_WEBSEARCH_CALL_PATTERN = re.compile(
+        r"\bWeb\s*Search\s*\(\s*(?P<query>\"[^\"\n]*\"|'[^'\n]*'|[^)\n]+?)\s*\)",
+        re.IGNORECASE,
+    )
+
+    # 匹配 Claude Code WebSearch 回退语句
+    # 示例: Perform a web search for the query: today news
+    LEGACY_WEBSEARCH_PHRASE_PATTERN = re.compile(
+        r"^\s*(?:[-*]\s*)?Perform a web search for the query:\s*(?P<query>.+?)\s*$",
+        re.IGNORECASE | re.MULTILINE,
+    )
     
     # 工具调用 ID 前缀
     TOOL_USE_ID_PREFIX = "toolu_"
@@ -120,6 +134,12 @@ class ToolParser:
         if bracket_result.has_tool_calls:
             logger.debug(f"Parsed {len(bracket_result.tool_calls)} tool calls from bracket format")
             return bracket_result
+
+        # 然后尝试 Claude Code WebSearch 回退格式
+        legacy_websearch_result = self._parse_legacy_websearch_format(content)
+        if legacy_websearch_result.has_tool_calls:
+            logger.debug("Parsed WebSearch tool call from legacy fallback format")
+            return legacy_websearch_result
         
         # 然后尝试 JSON 代码块格式
         json_result = self._parse_json_format(content)
@@ -229,8 +249,16 @@ class ToolParser:
                         arguments = parsed_obj
                     trailing = stripped_segment[end_idx:]
                 except json.JSONDecodeError:
-                    # 允许参数解析失败，仍保留工具调用本体，避免 tool_call 文本外泄
-                    trailing = stripped_segment
+                    # 兼容 WebSearch 非 JSON 参数写法:
+                    # [tool_call ... name=WebSearch]
+                    # Perform a web search for the query: ...
+                    legacy_query = self._extract_legacy_websearch_query(stripped_segment)
+                    if tool_name.lower() == "websearch" and legacy_query:
+                        arguments = {"query": legacy_query}
+                        trailing = ""
+                    else:
+                        # 允许参数解析失败，仍保留工具调用本体，避免 tool_call 文本外泄
+                        trailing = stripped_segment
 
             parsed_call = ParsedToolCall(
                 tool_name=tool_name,
@@ -253,6 +281,72 @@ class ToolParser:
             result.text_after = trailing_after_last.lstrip()
 
         return result
+
+    def _parse_legacy_websearch_format(self, content: str) -> ParseResult:
+        """
+        解析 Claude Code WebSearch 常见回退格式。
+
+        支持:
+        1) WebSearch("query") / Web Search("query")
+        2) Perform a web search for the query: query text
+        """
+        result = ParseResult()
+
+        call_match = self.LEGACY_WEBSEARCH_CALL_PATTERN.search(content)
+        phrase_match = self.LEGACY_WEBSEARCH_PHRASE_PATTERN.search(content)
+
+        picked = None
+        if call_match and phrase_match:
+            picked = call_match if call_match.start() <= phrase_match.start() else phrase_match
+        else:
+            picked = call_match or phrase_match
+
+        if not picked:
+            return result
+
+        query = self._normalize_legacy_query(picked.group("query"))
+        if not query:
+            return result
+
+        parsed_call = ParsedToolCall(
+            tool_name="WebSearch",
+            arguments={"query": query},
+            raw_json=json.dumps({"query": query}, ensure_ascii=False, separators=(",", ":")),
+        )
+
+        if not self._is_valid_tool_call(parsed_call):
+            return result
+
+        result.text_before = content[:picked.start()].rstrip()
+        result.tool_calls = [parsed_call]
+        result.has_tool_calls = True
+        result.text_after = content[picked.end():].lstrip()
+        return result
+
+    @staticmethod
+    def _normalize_legacy_query(raw_query: str) -> str:
+        query = (raw_query or "").strip()
+        if len(query) >= 2 and query[0] == query[-1] and query[0] in {"'", '"'}:
+            query = query[1:-1].strip()
+        return query
+
+    def _extract_legacy_websearch_query(self, content: str) -> Optional[str]:
+        if not content:
+            return None
+
+        call_match = self.LEGACY_WEBSEARCH_CALL_PATTERN.search(content)
+        if call_match:
+            query = self._normalize_legacy_query(call_match.group("query"))
+            if query:
+                return query
+
+        phrase_match = self.LEGACY_WEBSEARCH_PHRASE_PATTERN.search(content)
+        if phrase_match:
+            query = self._normalize_legacy_query(phrase_match.group("query"))
+            if query:
+                return query
+
+        return None
     
     def _parse_json_format(self, content: str) -> ParseResult:
         """
@@ -295,7 +389,10 @@ class ToolParser:
                 else:
                     logger.warning(f"Invalid tool call: {json_str}")
             else:
-                logger.warning(f"Failed to parse JSON block: {json_str}")
+                if self._looks_like_tool_json_block(json_str):
+                    logger.warning(f"Failed to parse JSON block: {json_str}")
+                else:
+                    logger.debug("Ignoring non-tool JSON block in model output")
             
             last_end = match.end()
         
@@ -306,6 +403,26 @@ class ToolParser:
         result.has_tool_calls = len(tool_calls) > 0
         
         return result
+
+    @staticmethod
+    def _looks_like_tool_json_block(json_str: str) -> bool:
+        """
+        判断 JSON 代码块是否“看起来像”工具调用。
+
+        非工具 JSON（如标题/元信息块）不应打印 warning，避免日志噪音。
+        """
+        compact = (json_str or "").strip()
+        if not compact:
+            return False
+        lowered = compact.lower()
+        return (
+            '"tool"' in lowered
+            or "'tool'" in lowered
+            or '"arguments"' in lowered
+            or "'arguments'" in lowered
+            or "[tool_call" in lowered
+            or "<tool_use" in lowered
+        )
     
     def _parse_json_block(self, json_str: str) -> Optional[ParsedToolCall]:
         """

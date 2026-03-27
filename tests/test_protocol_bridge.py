@@ -4,6 +4,11 @@ import asyncio
 from app.services.protocol_bridge import UsageNumbers, get_protocol_bridge
 from app.services.response_transformer import get_response_transformer
 from app.services.tool_parser import ToolParser
+from app.services.web_search_fallback import (
+    SearchResult,
+    WebSearchFallbackService,
+    extract_legacy_web_search_query,
+)
 
 
 bridge = get_protocol_bridge()
@@ -103,6 +108,43 @@ def test_parse_multiple_bracket_tool_calls():
     assert parsed.tool_calls[1].arguments["file_path"] == "src/b.js"
     assert parsed.tool_calls[2].arguments["file_path"] == "src/c.js"
     assert "让我读取核心源码文件" in parsed.text
+
+
+def test_parse_legacy_websearch_function_call_roundtrip():
+    parsed = bridge.parse_model_output(
+        'WebSearch("今日新闻 2026年3月27日")'
+    )
+
+    assert parsed.has_tool_calls is True
+    assert len(parsed.tool_calls) == 1
+    assert parsed.tool_calls[0].name == "WebSearch"
+    assert parsed.tool_calls[0].arguments["query"] == "今日新闻 2026年3月27日"
+    assert parsed.text == ""
+
+
+def test_parse_legacy_websearch_phrase_roundtrip():
+    parsed = bridge.parse_model_output(
+        "Perform a web search for the query: top news today March 27 2026"
+    )
+
+    assert parsed.has_tool_calls is True
+    assert len(parsed.tool_calls) == 1
+    assert parsed.tool_calls[0].name == "WebSearch"
+    assert parsed.tool_calls[0].arguments["query"] == "top news today March 27 2026"
+    assert parsed.text == ""
+
+
+def test_parse_bracket_websearch_with_legacy_phrase_arguments():
+    parsed = bridge.parse_model_output(
+        "[tool_call id=toolu_legacy_ws name=WebSearch]\n"
+        "Perform a web search for the query: 今日新闻 2026年3月27日"
+    )
+
+    assert parsed.has_tool_calls is True
+    assert len(parsed.tool_calls) == 1
+    assert parsed.tool_calls[0].name == "WebSearch"
+    assert parsed.tool_calls[0].arguments["query"] == "今日新闻 2026年3月27日"
+    assert parsed.text == ""
 
 
 def test_anthropic_response_with_tool_use_blocks():
@@ -441,3 +483,63 @@ def test_parse_anthropic_mixed_tool_message_drops_verbose_preface():
     assert assistant_texts
     assert "初步分析" not in assistant_texts[0]
     assert "[tool_call id=toolu_1 name=Explore]" in assistant_texts[0]
+
+
+def test_extract_legacy_web_search_query():
+    text = "Perform a web search for the query: 今日新闻 2026年3月27日"
+    assert extract_legacy_web_search_query(text) == "今日新闻 2026年3月27日"
+
+
+def test_extract_legacy_web_search_query_with_quotes():
+    text = 'Perform a web search for the query: "top news today"'
+    assert extract_legacy_web_search_query(text) == "top news today"
+
+
+def test_extract_legacy_web_search_query_invalid():
+    assert extract_legacy_web_search_query("Please help me search web") is None
+
+
+def test_web_search_fallback_formats_results(monkeypatch):
+    service = WebSearchFallbackService()
+
+    async def fake_google(query: str, max_results: int):
+        return [
+            SearchResult(title="Result A", url="https://a.example.com", source="A News"),
+            SearchResult(title="Result B", url="https://b.example.com", source="B News"),
+        ]
+
+    async def fake_duck(query: str, max_results: int):
+        return []
+
+    monkeypatch.setattr(service, "_search_google_news_rss", fake_google)
+    monkeypatch.setattr(service, "_search_duckduckgo_instant", fake_duck)
+
+    text = asyncio.run(service.search("test query", max_results=5))
+    assert "1. Result A (A News) - https://a.example.com" in text
+    assert "2. Result B (B News) - https://b.example.com" in text
+
+
+def test_web_search_fallback_uses_duckduckgo_when_google_empty(monkeypatch):
+    service = WebSearchFallbackService()
+
+    async def fake_google(query: str, max_results: int):
+        return []
+
+    async def fake_duck(query: str, max_results: int):
+        return [SearchResult(title="Duck Result", url="https://duck.example.com", source="DuckDuckGo")]
+
+    monkeypatch.setattr(service, "_search_google_news_rss", fake_google)
+    monkeypatch.setattr(service, "_search_duckduckgo_instant", fake_duck)
+
+    text = asyncio.run(service.search("test query", max_results=5))
+    assert "Duck Result" in text
+    assert "https://duck.example.com" in text
+
+
+def test_non_tool_json_block_does_not_create_tool_call():
+    parsed = bridge.parse_model_output(
+        """```json
+{"title":"使用WebSearch获取今日新闻"}
+```"""
+    )
+    assert parsed.has_tool_calls is False

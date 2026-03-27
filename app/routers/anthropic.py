@@ -19,6 +19,10 @@ from app.services.gateway_runtime import GatewayAuthError, get_gateway_runtime
 from app.services.protocol_bridge import CanonicalRequest, UsageNumbers, get_protocol_bridge
 from app.services.response_transformer import get_response_transformer
 from app.services.tool_parser import ToolParser
+from app.services.web_search_fallback import (
+    extract_legacy_web_search_query,
+    get_web_search_fallback_service,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -296,6 +300,154 @@ async def create_message(
             model=canonical.model,
             request_id=request_id,
         )
+
+        latest_user_text = ""
+        for msg in reversed(canonical.messages):
+            if msg.role == "user" and (msg.content or "").strip():
+                latest_user_text = msg.content.strip()
+                break
+
+        legacy_web_search_query = extract_legacy_web_search_query(latest_user_text)
+        if legacy_web_search_query:
+            web_search = get_web_search_fallback_service()
+            search_text = await web_search.search(legacy_web_search_query)
+            server_tool_use_usage = {
+                "web_search_requests": 1,
+                "web_fetch_requests": 0,
+            }
+            usage = runtime.finalize_usage(
+                preferred_usage=None,
+                prompt_text=latest_user_text,
+                output_text=search_text,
+                fallback_source="estimate.web_search_fallback",
+            )
+
+            if canonical.stream:
+                async def generate_legacy_search_stream():
+                    try:
+                        yield _anthropic_event(
+                            "message_start",
+                            {
+                                "type": "message_start",
+                                "message": {
+                                    "id": f"msg_{request_id}",
+                                    "type": "message",
+                                    "role": "assistant",
+                                    "content": [],
+                                    "model": canonical.model,
+                                    "stop_reason": None,
+                                    "stop_sequence": None,
+                                    "usage": {
+                                        "input_tokens": 0,
+                                        "output_tokens": 0,
+                                        "server_tool_use": server_tool_use_usage,
+                                    },
+                                },
+                            },
+                        )
+                        yield _anthropic_event(
+                            "content_block_start",
+                            {
+                                "type": "content_block_start",
+                                "index": 0,
+                                "content_block": {"type": "text", "text": ""},
+                            },
+                        )
+                        if search_text:
+                            yield _anthropic_event(
+                                "content_block_delta",
+                                {
+                                    "type": "content_block_delta",
+                                    "index": 0,
+                                    "delta": {"type": "text_delta", "text": search_text},
+                                },
+                            )
+                        yield _anthropic_event(
+                            "content_block_stop",
+                            {"type": "content_block_stop", "index": 0},
+                        )
+                        yield _anthropic_event(
+                            "message_delta",
+                            {
+                                "type": "message_delta",
+                                "delta": {"stop_reason": "end_turn", "stop_sequence": None},
+                                "usage": {
+                                    "output_tokens": usage.output_tokens,
+                                    "server_tool_use": server_tool_use_usage,
+                                },
+                            },
+                        )
+                        yield _anthropic_event("message_stop", {"type": "message_stop"})
+
+                        await _persist_stream_success(
+                            runtime,
+                            session,
+                            resolved=resolved,
+                            canonical=canonical,
+                            output_preview=search_text,
+                            usage=usage,
+                            start_time=start_time,
+                            client_ip=client_ip,
+                        )
+                    except Exception as exc:
+                        logger.exception("Legacy web search stream failed")
+                        api_error = runtime.map_backend_exception(exc)
+                        yield _anthropic_event(
+                            "error",
+                            {
+                                "type": "error",
+                                "error": _anthropic_error_payload(error_handler, api_error)["error"],
+                            },
+                        )
+
+                        await runtime.persist_error(
+                            session,
+                            resolved=resolved,
+                            api_type="anthropic",
+                            model=canonical.model,
+                            input_preview=canonical.input_preview(),
+                            response_time_ms=runtime.elapsed_ms(start_time),
+                            client_ip=client_ip,
+                            error_message=api_error.message,
+                        )
+
+                return StreamingResponse(
+                    generate_legacy_search_stream(),
+                    media_type="text/event-stream",
+                    headers={
+                        "Cache-Control": "no-cache",
+                        "Connection": "keep-alive",
+                        "X-Request-ID": request_id,
+                    },
+                )
+
+            response_data = {
+                "id": f"msg_{request_id}",
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "text", "text": search_text}],
+                "model": canonical.model,
+                "stop_reason": "end_turn",
+                "stop_sequence": None,
+                "usage": {
+                    "input_tokens": usage.input_tokens,
+                    "output_tokens": usage.output_tokens,
+                    "server_tool_use": server_tool_use_usage,
+                },
+            }
+
+            await runtime.persist_success(
+                session,
+                resolved=resolved,
+                api_type="anthropic",
+                input_preview=canonical.input_preview(),
+                output_preview=search_text,
+                usage=usage,
+                response_time_ms=runtime.elapsed_ms(start_time),
+                is_stream=False,
+                client_ip=client_ip,
+            )
+            return JSONResponse(content=response_data, headers={"X-Request-ID": request_id})
 
         prompt_text = bridge.render_prompt(canonical)
         payload = runtime.build_backend_payload(

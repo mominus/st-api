@@ -679,36 +679,12 @@ class AccountPoolService:
             if account.daily_used < account.daily_quota
         ]
 
-        # 容错：如果状态是 exhausted 但使用量已回落到配额内，视为陈旧状态并自动恢复。
-        # 这可以避免并发统计延迟导致瞬时“全耗尽”时直接 503。
-        stale_exhausted = [account for account in eligible_accounts if account.status == "exhausted"]
-        if stale_exhausted:
-            now = datetime.utcnow()
-            for account in stale_exhausted:
-                account.status = "active"
-                account.updated_at = now
-            await session.flush()
-            logger.info(
-                "Recovered stale exhausted accounts for model group '%s': recovered=%d",
-                model_group,
-                len(stale_exhausted),
-            )
-
         if not eligible_accounts:
-            quota_blocked = 0
-            now = datetime.utcnow()
-            for account in routable_accounts:
-                if account.status == "active":
-                    account.status = "exhausted"
-                    account.updated_at = now
-                quota_blocked += 1
-            if quota_blocked:
-                await session.flush()
             logger.warning(
                 "All routable accounts quota-blocked in model group '%s' (routable=%d, quota_blocked=%d)",
                 model_group,
                 len(routable_accounts),
-                quota_blocked,
+                len(routable_accounts),
             )
             return None
 
@@ -725,13 +701,8 @@ class AccountPoolService:
             current_index += 1
             self._round_robin_index[model_group] = current_index
 
-            # eligible_accounts 已经过滤过配额，这里直接选择并更新使用时间
-            now = datetime.utcnow()
-            account.last_used_at = now
-            if account.status != "active":
-                account.status = "active"
-                account.updated_at = now
-            # 选择账号阶段不提前提交，统一交给外层请求事务收口。
+            # 账号选择阶段保持纯读，避免在高并发下放大 SQLite 写锁竞争。
+            # 状态与使用时间统一在请求收口（persist_success -> update_token_usage）时落库。
 
             logger.debug(f"Selected account {account.id} for group {model_group}")
             return account
@@ -816,12 +787,17 @@ class AccountPoolService:
         
         total_tokens = input_tokens + output_tokens
         account.daily_used += total_tokens
-        account.updated_at = datetime.utcnow()
+        now = datetime.utcnow()
+        account.last_used_at = now
+        account.updated_at = now
         
         # 检查是否达到配额
         if account.daily_used >= account.daily_quota:
             account.status = "exhausted"
             logger.info(f"Account {account_id} reached quota limit")
+        elif account.status == "exhausted":
+            # 容错：陈旧 exhausted 状态在成功请求后自动恢复
+            account.status = "active"
         
         # 记录到历史表
         await self._record_usage_history(

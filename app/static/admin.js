@@ -343,6 +343,7 @@ let analyticsCache = {};
 let monitorInterval = null;
 let isSilentSyncRunning = false;
 let isManualSyncRunning = false;
+const DASHBOARD_AUTO_SYNC_ENABLED = false;
 const DASHBOARD_AUTO_SYNC_INTERVAL_MS = 120000; // 2 分钟
 const DASHBOARD_SYNC_WINDOW_SIZE = 120;
 const DASHBOARD_SYNC_STALE_PRIORITY_SIZE = 80;
@@ -396,7 +397,13 @@ function startMonitorAutoSync() {
     // 清除旧的定时器
     if (monitorInterval) {
         clearInterval(monitorInterval);
+        monitorInterval = null;
     }
+
+    if (!DASHBOARD_AUTO_SYNC_ENABLED) {
+        return;
+    }
+
     // 自动同步（默认每 2 分钟一次）
     monitorInterval = setInterval(() => {
         if (currentPage === 'dashboard' && !isSilentSyncRunning && !isManualSyncRunning) {
@@ -542,6 +549,10 @@ async function batchSyncAccounts(accountIds, options = {}) {
 
 // 静默同步（不显示提示，使用缓存的账号数据）
 async function syncAllAccountsSilent() {
+    if (!DASHBOARD_AUTO_SYNC_ENABLED) {
+        return;
+    }
+
     if (isSilentSyncRunning || isManualSyncRunning) {
         return;
     }
@@ -596,7 +607,7 @@ async function loadMonitorTable() {
         
         // 为有 Private API Key 的账户获取分析数据
         const accountsWithKey = accounts.filter(a => a.has_private_key);
-        if (accountsWithKey.length > 0) {
+        if (DASHBOARD_AUTO_SYNC_ENABLED && accountsWithKey.length > 0) {
             try {
                 const initialWindowIds = buildSyncWindowAccountIds(accountsWithKey);
                 await batchSyncAccounts(

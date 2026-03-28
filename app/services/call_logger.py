@@ -10,13 +10,15 @@ from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from typing import Optional, List, Dict, Any
 
-from sqlalchemy import select, desc
+from sqlalchemy import select, desc, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.database import CallLog, get_session_factory
 from app.services.pricing import get_pricing_service
 
 logger = logging.getLogger(__name__)
+
+MAX_CALL_LOG_ENTRIES = 100
 
 
 def _normalize_cost(value: str) -> str:
@@ -166,6 +168,43 @@ def extract_input_preview(messages: list, api_type: str = "openai") -> str:
 
 class CallLoggerService:
     """调用日志服务"""
+
+    async def cleanup_excess_logs(
+        self,
+        session: AsyncSession,
+        max_logs: int = MAX_CALL_LOG_ENTRIES,
+    ) -> int:
+        """
+        自动清理超出限制的旧日志，仅保留最近 max_logs 条。
+        """
+        if max_logs <= 0:
+            return 0
+
+        keep_ids_result = await session.execute(
+            select(CallLog.id)
+            .order_by(desc(CallLog.timestamp), desc(CallLog.id))
+            .limit(max_logs)
+        )
+        keep_ids = [row[0] for row in keep_ids_result.all()]
+
+        if not keep_ids:
+            return 0
+
+        delete_query = delete(CallLog).where(CallLog.id.not_in(keep_ids))
+        result = await session.execute(delete_query)
+
+        deleted_count = result.rowcount if isinstance(result.rowcount, int) else 0
+        if deleted_count < 0:
+            deleted_count = 0
+
+        if deleted_count:
+            logger.info(
+                "Auto cleaned up %s old call logs, kept latest %s",
+                deleted_count,
+                max_logs,
+            )
+
+        return deleted_count
     
     async def log_call(
         self,
@@ -231,6 +270,8 @@ class CallLoggerService:
             )
             
             session.add(log_entry)
+            await session.flush()
+            await self.cleanup_excess_logs(session, max_logs=MAX_CALL_LOG_ENTRIES)
             # 不在这里 commit，让调用方控制事务
             
             return log_entry
@@ -345,7 +386,7 @@ class CallLoggerService:
         Returns:
             删除的日志数量
         """
-        from sqlalchemy import delete, func
+        from sqlalchemy import func
         
         # 先统计要删除的数量
         count_query = select(func.count(CallLog.id)).where(CallLog.timestamp <= before_date)

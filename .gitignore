@@ -68,3 +68,4 @@ test_*.py
 !tests/test_upstream_sanitizer.py
 !tests/test_account_pool_selection.py
 !tests/test_gateway_runtime_routing.py
+!tests/test_call_logger_cleanup.py

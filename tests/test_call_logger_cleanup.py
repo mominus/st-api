@@ -80,9 +80,13 @@ def test_cleanup_excess_logs_deletes_rows_outside_recent_window():
     asyncio.run(_run())
 
 
-def test_log_call_triggers_auto_cleanup_with_100_limit():
+def test_log_call_triggers_cleanup_when_threshold_reached():
     async def _run():
-        service = CallLoggerService()
+        service = CallLoggerService(
+            auto_cleanup=True,
+            cleanup_every_n_writes=1,
+            cleanup_min_interval_seconds=0,
+        )
         session = _LogCallSession()
         cleanup_mock = AsyncMock(return_value=0)
         service.cleanup_excess_logs = cleanup_mock

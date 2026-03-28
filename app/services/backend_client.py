@@ -3,6 +3,7 @@ Backend Client Service
 与后端 API 通信的客户端，支持同步和流式请求
 """
 
+import asyncio
 import os
 import logging
 from typing import Optional, Dict, Any, AsyncGenerator
@@ -69,6 +70,64 @@ class BackendClient:
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self.stream_timeout = stream_timeout
+        self.connect_timeout = float(os.getenv("HTTP_CONNECT_TIMEOUT", "10.0"))
+        self.http_max_connections = int(os.getenv("HTTP_MAX_CONNECTIONS", "100"))
+        self.http_max_keepalive = int(os.getenv("HTTP_MAX_KEEPALIVE", "20"))
+
+        self._client: Optional[httpx.AsyncClient] = None
+        self._client_lock: Optional[asyncio.Lock] = None
+        self._loop_id: Optional[int] = None
+
+    def _ensure_runtime_state(self) -> None:
+        """确保当前事件循环下的锁和客户端状态可用。"""
+        loop_id = id(asyncio.get_running_loop())
+        if self._loop_id != loop_id:
+            # 跨事件循环时丢弃旧客户端引用，避免 loop 绑定问题。
+            self._client = None
+            self._client_lock = asyncio.Lock()
+            self._loop_id = loop_id
+
+    async def _get_client(self) -> httpx.AsyncClient:
+        self._ensure_runtime_state()
+        if self._client is None or self._client.is_closed:
+            assert self._client_lock is not None
+            async with self._client_lock:
+                if self._client is None or self._client.is_closed:
+                    self._client = httpx.AsyncClient(
+                        limits=httpx.Limits(
+                            max_connections=self.http_max_connections,
+                            max_keepalive_connections=min(
+                                self.http_max_keepalive,
+                                self.http_max_connections
+                            ),
+                        )
+                    )
+                    logger.info(
+                        "Backend HTTP client initialized: max_connections=%s, max_keepalive=%s",
+                        self.http_max_connections,
+                        min(self.http_max_keepalive, self.http_max_connections),
+                    )
+        return self._client
+
+    def _sync_timeout(self) -> httpx.Timeout:
+        return httpx.Timeout(
+            timeout=self.timeout,
+            connect=self.connect_timeout,
+        )
+
+    def _stream_timeout(self) -> httpx.Timeout:
+        return httpx.Timeout(
+            connect=self.connect_timeout,
+            read=self.stream_timeout,
+            write=self.timeout,
+            pool=self.timeout,
+        )
+
+    async def close(self) -> None:
+        if self._client and not self._client.is_closed:
+            await self._client.aclose()
+            logger.info("Backend HTTP client closed")
+        self._client = None
 
     def _build_run_url(self, org_id: str, flow_id: str) -> str:
         return f"{self.base_url}/inference/v0/run/{org_id}/{flow_id}"
@@ -104,26 +163,31 @@ class BackendClient:
         logger.debug(f"Sending sync request to backend: {url}")
         
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                response = await client.post(url, headers=headers, json=payload)
+            client = await self._get_client()
+            response = await client.post(
+                url,
+                headers=headers,
+                json=payload,
+                timeout=self._sync_timeout(),
+            )
+            
+            if response.status_code >= 400:
+                error_data = None
+                try:
+                    error_data = response.json()
+                except Exception:
+                    error_data = {"raw": response.text}
                 
-                if response.status_code >= 400:
-                    error_data = None
-                    try:
-                        error_data = response.json()
-                    except Exception:
-                        error_data = {"raw": response.text}
-                    
-                    logger.error(f"Backend API error: status={response.status_code}")
-                    raise BackendAPIError(
-                        message=f"Backend API returned error: {response.status_code}",
-                        status_code=response.status_code,
-                        response_data=error_data
-                    )
-                
-                result = response.json()
-                logger.debug(f"Backend sync response received: {len(str(result))} bytes")
-                return result
+                logger.error(f"Backend API error: status={response.status_code}")
+                raise BackendAPIError(
+                    message=f"Backend API returned error: {response.status_code}",
+                    status_code=response.status_code,
+                    response_data=error_data
+                )
+            
+            result = response.json()
+            logger.debug(f"Backend sync response received: {len(str(result))} bytes")
+            return result
                 
         except httpx.ConnectError as e:
             logger.error(f"Failed to connect to backend: {e}")
@@ -170,37 +234,43 @@ class BackendClient:
         logger.debug(f"Sending stream request to backend: {url}")
         
         try:
-            async with httpx.AsyncClient(timeout=self.stream_timeout) as client:
-                async with client.stream("POST", url, headers=headers, json=payload) as response:
-                    if response.status_code >= 400:
-                        error_body = await response.aread()
-                        error_data = None
-                        try:
-                            error_data = {"raw": error_body.decode("utf-8")}
-                        except Exception:
-                            error_data = {"raw": str(error_body)}
-                        
-                        logger.error(f"Backend API error: status={response.status_code}")
-                        raise BackendAPIError(
-                            message=f"Backend API returned error: {response.status_code}",
-                            status_code=response.status_code,
-                            response_data=error_data
-                        )
+            client = await self._get_client()
+            async with client.stream(
+                "POST",
+                url,
+                headers=headers,
+                json=payload,
+                timeout=self._stream_timeout(),
+            ) as response:
+                if response.status_code >= 400:
+                    error_body = await response.aread()
+                    error_data = None
+                    try:
+                        error_data = {"raw": error_body.decode("utf-8")}
+                    except Exception:
+                        error_data = {"raw": str(error_body)}
                     
-                    buffer = ""
-                    async for chunk in response.aiter_text():
-                        buffer += chunk
-                        
-                        while "\n" in buffer:
-                            line, buffer = buffer.split("\n", 1)
-                            line = line.strip()
-                            if line:
-                                yield line
+                    logger.error(f"Backend API error: status={response.status_code}")
+                    raise BackendAPIError(
+                        message=f"Backend API returned error: {response.status_code}",
+                        status_code=response.status_code,
+                        response_data=error_data
+                    )
+                
+                buffer = ""
+                async for chunk in response.aiter_text():
+                    buffer += chunk
                     
-                    if buffer.strip():
-                        yield buffer.strip()
-                    
-                    logger.debug("Backend stream completed")
+                    while "\n" in buffer:
+                        line, buffer = buffer.split("\n", 1)
+                        line = line.strip()
+                        if line:
+                            yield line
+                
+                if buffer.strip():
+                    yield buffer.strip()
+                
+                logger.debug("Backend stream completed")
                     
         except httpx.ConnectError as e:
             logger.error(f"Failed to connect to backend: {e}")
@@ -311,6 +381,14 @@ def init_backend_client(
         stream_timeout=stream_timeout
     )
     return _backend_client
+
+
+async def close_backend_client() -> None:
+    """关闭全局后端客户端连接池。"""
+    global _backend_client
+    if _backend_client is not None:
+        await _backend_client.close()
+        _backend_client = None
 
 
 # 兼容旧名称的别名

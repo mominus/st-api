@@ -731,7 +731,7 @@ class AccountPoolService:
             if account.status != "active":
                 account.status = "active"
                 account.updated_at = now
-            await session.commit()
+            # 选择账号阶段不提前提交，统一交给外层请求事务收口。
 
             logger.debug(f"Selected account {account.id} for group {model_group}")
             return account

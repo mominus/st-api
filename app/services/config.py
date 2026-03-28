@@ -146,6 +146,24 @@ class ConfigService:
     def cors(self) -> CorsConfig:
         """获取 CORS 配置"""
         return self._config.cors
+
+    def _parse_jwt_expire_hours(self, value: Any) -> int:
+        """解析并校验 JWT 过期小时数，非法值回退到 24 小时。"""
+        try:
+            hours = int(value)
+        except (TypeError, ValueError):
+            logger.warning(
+                f"Invalid JWT_EXPIRE_HOURS value '{value}', fallback to 24"
+            )
+            return 24
+
+        if hours <= 0:
+            logger.warning(
+                f"JWT_EXPIRE_HOURS must be > 0, got {hours}, fallback to 24"
+            )
+            return 24
+
+        return hours
     
     def load_from_env(self) -> None:
         """从环境变量加载配置"""
@@ -165,7 +183,9 @@ class ConfigService:
             "JWT_SECRET_KEY", 
             "your-super-secret-jwt-key-change-this-in-production"
         )
-        self._config.security.jwt_expire_hours = int(os.getenv("JWT_EXPIRE_HOURS", "24"))
+        self._config.security.jwt_expire_hours = self._parse_jwt_expire_hours(
+            os.getenv("JWT_EXPIRE_HOURS", "24")
+        )
         self._config.security.encryption_key = os.getenv(
             "ENCRYPTION_KEY", 
             ""
@@ -258,7 +278,9 @@ class ConfigService:
             if "jwt_secret_key" in sec:
                 self._config.security.jwt_secret_key = sec["jwt_secret_key"]
             if "jwt_expire_hours" in sec:
-                self._config.security.jwt_expire_hours = int(sec["jwt_expire_hours"])
+                self._config.security.jwt_expire_hours = self._parse_jwt_expire_hours(
+                    sec["jwt_expire_hours"]
+                )
             if "encryption_key" in sec:
                 self._config.security.encryption_key = sec["encryption_key"]
         

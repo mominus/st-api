@@ -4,6 +4,9 @@
 记录 API 调用的详细信息，包括输入输出预览和费用计算
 """
 
+import asyncio
+import os
+import time
 import uuid
 import logging
 from datetime import datetime
@@ -18,7 +21,15 @@ from app.services.pricing import get_pricing_service
 
 logger = logging.getLogger(__name__)
 
-MAX_CALL_LOG_ENTRIES = 100
+MAX_CALL_LOG_ENTRIES = int(os.getenv("MAX_CALL_LOG_ENTRIES", "100"))
+CALL_LOG_AUTO_CLEANUP = os.getenv("CALL_LOG_AUTO_CLEANUP", "true").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+CALL_LOG_CLEANUP_EVERY_N_WRITES = int(os.getenv("CALL_LOG_CLEANUP_EVERY_N_WRITES", "200"))
+CALL_LOG_CLEANUP_MIN_INTERVAL_SECONDS = float(os.getenv("CALL_LOG_CLEANUP_MIN_INTERVAL_SECONDS", "30"))
 
 
 def _normalize_cost(value: str) -> str:
@@ -169,6 +180,63 @@ def extract_input_preview(messages: list, api_type: str = "openai") -> str:
 class CallLoggerService:
     """调用日志服务"""
 
+    def __init__(
+        self,
+        *,
+        auto_cleanup: Optional[bool] = None,
+        cleanup_every_n_writes: Optional[int] = None,
+        cleanup_min_interval_seconds: Optional[float] = None,
+    ):
+        self.auto_cleanup = CALL_LOG_AUTO_CLEANUP if auto_cleanup is None else bool(auto_cleanup)
+        self.cleanup_every_n_writes = max(
+            1,
+            int(
+                CALL_LOG_CLEANUP_EVERY_N_WRITES
+                if cleanup_every_n_writes is None
+                else cleanup_every_n_writes
+            ),
+        )
+        self.cleanup_min_interval_seconds = max(
+            0.0,
+            float(
+                CALL_LOG_CLEANUP_MIN_INTERVAL_SECONDS
+                if cleanup_min_interval_seconds is None
+                else cleanup_min_interval_seconds
+            ),
+        )
+        self._writes_since_cleanup = 0
+        self._last_cleanup_ts = 0.0
+        self._cleanup_lock = asyncio.Lock()
+
+    def _should_trigger_cleanup(self) -> bool:
+        if not self.auto_cleanup or MAX_CALL_LOG_ENTRIES <= 0:
+            return False
+        if self._writes_since_cleanup < self.cleanup_every_n_writes:
+            return False
+        if (time.monotonic() - self._last_cleanup_ts) < self.cleanup_min_interval_seconds:
+            return False
+        return True
+
+    async def maybe_cleanup(self, session: AsyncSession) -> int:
+        """根据写入阈值和时间间隔执行清理，避免每请求清理。"""
+        if not self.auto_cleanup or MAX_CALL_LOG_ENTRIES <= 0:
+            return 0
+
+        self._writes_since_cleanup += 1
+        if not self._should_trigger_cleanup():
+            return 0
+
+        if self._cleanup_lock.locked():
+            return 0
+
+        async with self._cleanup_lock:
+            if not self._should_trigger_cleanup():
+                return 0
+            deleted = await self.cleanup_excess_logs(session, max_logs=MAX_CALL_LOG_ENTRIES)
+            self._writes_since_cleanup = 0
+            self._last_cleanup_ts = time.monotonic()
+            return deleted
+
     async def cleanup_excess_logs(
         self,
         session: AsyncSession,
@@ -271,7 +339,7 @@ class CallLoggerService:
             
             session.add(log_entry)
             await session.flush()
-            await self.cleanup_excess_logs(session, max_logs=MAX_CALL_LOG_ENTRIES)
+            await self.maybe_cleanup(session)
             # 不在这里 commit，让调用方控制事务
             
             return log_entry

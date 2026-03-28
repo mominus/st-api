@@ -158,9 +158,15 @@ async function apiCall(endpoint, options = {}) {
         }
         
         if (response.status === 401) {
-            // Token 过期，退出登录
-            handleLogout();
-            throw new Error('登录已过期，请重新登录');
+            const backendMessage = data && (data.detail || data.message);
+            const isLoginEndpoint = endpoint === '/auth/login';
+
+            if (!isLoginEndpoint && authToken) {
+                // 已登录状态下 token 失效，执行退出
+                handleLogout();
+            }
+
+            throw new Error(backendMessage || '登录已过期，请重新登录');
         }
 
         if (data === null) {

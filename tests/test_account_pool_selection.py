@@ -69,7 +69,7 @@ def test_get_available_account_recovers_stale_exhausted_status():
     assert stale.status == "active"
     assert stale.last_used_at is not None
     assert session.flush_calls >= 1
-    assert session.commit_calls == 1
+    assert session.commit_calls == 0
 
 
 def test_get_available_account_returns_none_when_no_active_or_recoverable():

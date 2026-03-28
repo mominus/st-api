@@ -10,6 +10,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import random
 import time
 import uuid
 from dataclasses import dataclass
@@ -38,6 +40,27 @@ from app.services.token_counter import TokenCounter, get_token_counter
 
 logger = logging.getLogger(__name__)
 ACCOUNT_SELECT_RETRY_DELAY_SECONDS = 0.08
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    return os.getenv(name, str(default)).strip().lower() in {"1", "true", "yes", "on"}
+
+
+ENABLE_REQUEST_LOG_PERSIST = _env_bool("ENABLE_REQUEST_LOG_PERSIST", True)
+ENABLE_CALL_LOG_PERSIST = _env_bool("ENABLE_CALL_LOG_PERSIST", True)
+ENABLE_SYSTEM_STATS_PERSIST = _env_bool("ENABLE_SYSTEM_STATS_PERSIST", True)
+CALL_LOG_SAMPLE_RATE = min(
+    1.0,
+    max(0.0, float(os.getenv("CALL_LOG_SAMPLE_RATE", "1.0"))),
+)
+
+
+def _should_persist_call_log() -> bool:
+    if not ENABLE_CALL_LOG_PERSIST:
+        return False
+    if CALL_LOG_SAMPLE_RATE >= 1.0:
+        return True
+    return random.random() < CALL_LOG_SAMPLE_RATE
 
 
 @dataclass
@@ -361,43 +384,46 @@ class GatewayRuntime:
                 total_cost,
             )
 
-            await self.logger_service.log_success(
-                session,
-                request_id=resolved.request_id,
-                api_key_prefix=resolved.api_key.key_prefix,
-                client_ip=client_ip,
-                model=resolved.model,
-                account_id=resolved.account.id,
-                input_tokens=usage.input_tokens,
-                output_tokens=usage.output_tokens,
-                response_time_ms=response_time_ms,
-            )
+            if ENABLE_REQUEST_LOG_PERSIST:
+                await self.logger_service.log_success(
+                    session,
+                    request_id=resolved.request_id,
+                    api_key_prefix=resolved.api_key.key_prefix,
+                    client_ip=client_ip,
+                    model=resolved.model,
+                    account_id=resolved.account.id,
+                    input_tokens=usage.input_tokens,
+                    output_tokens=usage.output_tokens,
+                    response_time_ms=response_time_ms,
+                )
 
-            await self.call_logger.log_call(
-                session,
-                api_key_id=resolved.api_key.id,
-                api_key_name=resolved.api_key.name,
-                api_key_prefix=resolved.api_key.key_prefix,
-                client_ip=client_ip,
-                account_id=resolved.account.id,
-                account_name=resolved.account.name,
-                model_group=resolved.model,
-                model=resolved.model,
-                api_type=api_type,
-                is_stream=is_stream,
-                input_preview=input_preview,
-                output_preview=output_preview,
-                input_tokens=usage.input_tokens,
-                output_tokens=usage.output_tokens,
-                response_time_ms=response_time_ms,
-                status="success",
-            )
+            if _should_persist_call_log():
+                await self.call_logger.log_call(
+                    session,
+                    api_key_id=resolved.api_key.id,
+                    api_key_name=resolved.api_key.name,
+                    api_key_prefix=resolved.api_key.key_prefix,
+                    client_ip=client_ip,
+                    account_id=resolved.account.id,
+                    account_name=resolved.account.name,
+                    model_group=resolved.model,
+                    model=resolved.model,
+                    api_type=api_type,
+                    is_stream=is_stream,
+                    input_preview=input_preview,
+                    output_preview=output_preview,
+                    input_tokens=usage.input_tokens,
+                    output_tokens=usage.output_tokens,
+                    response_time_ms=response_time_ms,
+                    status="success",
+                )
 
-            await self.stats_service.update_system_stats(
-                session,
-                usage.input_tokens,
-                usage.output_tokens,
-            )
+            if ENABLE_SYSTEM_STATS_PERSIST:
+                await self.stats_service.update_system_stats(
+                    session,
+                    usage.input_tokens,
+                    usage.output_tokens,
+                )
 
             await session.commit()
         except Exception:
@@ -424,40 +450,42 @@ class GatewayRuntime:
             api_key_id = resolved.api_key.id if resolved else None
             api_key_name = resolved.api_key.name if resolved else None
 
-            await self.logger_service.log_request(
-                session,
-                request_id=request_id,
-                api_key_prefix=api_key_prefix,
-                client_ip=client_ip,
-                model=model,
-                account_id=account_id,
-                input_tokens=0,
-                output_tokens=0,
-                response_time_ms=response_time_ms,
-                status="error",
-                error_message=error_message,
-            )
+            if ENABLE_REQUEST_LOG_PERSIST:
+                await self.logger_service.log_request(
+                    session,
+                    request_id=request_id,
+                    api_key_prefix=api_key_prefix,
+                    client_ip=client_ip,
+                    model=model,
+                    account_id=account_id,
+                    input_tokens=0,
+                    output_tokens=0,
+                    response_time_ms=response_time_ms,
+                    status="error",
+                    error_message=error_message,
+                )
 
-            await self.call_logger.log_call(
-                session,
-                api_key_id=api_key_id,
-                api_key_name=api_key_name,
-                api_key_prefix=api_key_prefix,
-                client_ip=client_ip,
-                account_id=account_id,
-                account_name=account_name,
-                model_group=model,
-                model=model,
-                api_type=api_type,
-                is_stream=False,
-                input_preview=input_preview,
-                output_preview="",
-                input_tokens=0,
-                output_tokens=0,
-                response_time_ms=response_time_ms,
-                status="error",
-                error_message=error_message,
-            )
+            if _should_persist_call_log():
+                await self.call_logger.log_call(
+                    session,
+                    api_key_id=api_key_id,
+                    api_key_name=api_key_name,
+                    api_key_prefix=api_key_prefix,
+                    client_ip=client_ip,
+                    account_id=account_id,
+                    account_name=account_name,
+                    model_group=model,
+                    model=model,
+                    api_type=api_type,
+                    is_stream=False,
+                    input_preview=input_preview,
+                    output_preview="",
+                    input_tokens=0,
+                    output_tokens=0,
+                    response_time_ms=response_time_ms,
+                    status="error",
+                    error_message=error_message,
+                )
 
             await session.commit()
         except Exception:

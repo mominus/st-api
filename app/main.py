@@ -22,6 +22,7 @@ import secrets
 
 from app.routers import openai_router, anthropic_router, gemini_router, admin_router
 from app.models.database import init_database, close_database
+from app.services.backend_client import close_backend_client
 from app.services.auth import get_auth_service
 from app import __version__ as APP_VERSION
 import logging
@@ -62,6 +63,7 @@ async def lifespan(app: FastAPI):
     
     yield
     # 关闭时：清理数据库连接
+    await close_backend_client()
     await close_database()
 
 

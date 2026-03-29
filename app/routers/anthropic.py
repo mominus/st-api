@@ -290,7 +290,11 @@ async def create_message(
         x_api_key=x_api_key,
     )
 
-    client_ip = http_request.client.host if http_request.client else None
+    fallback_client_ip = http_request.client.host if http_request.client else None
+    client_ip = runtime.resolve_client_ip(
+        headers=http_request.headers,
+        fallback_client_ip=fallback_client_ip,
+    )
     resolved = None
 
     try:
@@ -450,10 +454,24 @@ async def create_message(
             return JSONResponse(content=response_data, headers={"X-Request-ID": request_id})
 
         prompt_text = bridge.render_prompt(canonical)
+        session_hint = runtime.resolve_session_hint(
+            headers=http_request.headers,
+            payload=body_json,
+            allow_user_field=True,
+        )
+        user_agent = http_request.headers.get("user-agent")
+        backend_user_id = runtime.resolve_backend_user_id(
+            resolved=resolved,
+            request_id=request_id,
+            session_hint=session_hint,
+            client_ip=client_ip,
+            user_agent=user_agent,
+        )
+
         payload = runtime.build_backend_payload(
             resolved=resolved,
             prompt_text=prompt_text,
-            user_id=f"api:{resolved.api_key.key_prefix}",
+            user_id=backend_user_id,
         )
 
         if canonical.stream:

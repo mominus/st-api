@@ -1,0 +1,65 @@
+{
+  "started_at_utc": "20260328T183537Z",
+  "config": {
+    "base_url": "http://127.0.0.1:18080",
+    "model": "claude-opus-4-6",
+    "sessions": 60,
+    "turns": 3,
+    "concurrency": 140,
+    "stream_ratio": 0.75,
+    "max_history_messages": 20,
+    "max_tokens": 180,
+    "request_timeout_seconds": 30.0
+  },
+  "summary": {
+    "total_requests": 180,
+    "success_requests": 177,
+    "failed_requests": 3,
+    "success_rate": 0.9833,
+    "max_turn_depth_observed": 3
+  },
+  "latency_ms": {
+    "min": 3056,
+    "max": 43587,
+    "mean": 15544.96,
+    "p50": 15412.0,
+    "p95": 23931.0,
+    "p99": 31566.0
+  },
+  "status_code_distribution": {
+    "200": 180
+  },
+  "request_mode_distribution": {
+    "non_stream": 40,
+    "stream": 140
+  },
+  "error_type_distribution": {
+    "rate_limit_error": 3
+  },
+  "failure_samples": [
+    {
+      "session_id": "tenantA-user-0015",
+      "turn": 0,
+      "stream": true,
+      "status_code": 200,
+      "error_type": "rate_limit_error",
+      "error_message": "Upstream account daily token quota exceeded"
+    },
+    {
+      "session_id": "tenantA-user-0049",
+      "turn": 0,
+      "stream": true,
+      "status_code": 200,
+      "error_type": "rate_limit_error",
+      "error_message": "Upstream account daily token quota exceeded"
+    },
+    {
+      "session_id": "tenantA-user-0053",
+      "turn": 0,
+      "stream": true,
+      "status_code": 200,
+      "error_type": "rate_limit_error",
+      "error_message": "Upstream account daily token quota exceeded"
+    }
+  ]
+}

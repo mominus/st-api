@@ -102,7 +102,11 @@ async def generate_content(
         key_query=key_query,
     )
 
-    client_ip = http_request.client.host if http_request.client else None
+    fallback_client_ip = http_request.client.host if http_request.client else None
+    client_ip = runtime.resolve_client_ip(
+        headers=http_request.headers,
+        fallback_client_ip=fallback_client_ip,
+    )
     resolved = None
 
     try:
@@ -114,10 +118,24 @@ async def generate_content(
         )
 
         prompt_text = bridge.render_prompt(canonical)
+        session_hint = runtime.resolve_session_hint(
+            headers=http_request.headers,
+            payload=body_json,
+            allow_user_field=True,
+        )
+        user_agent = http_request.headers.get("user-agent")
+        backend_user_id = runtime.resolve_backend_user_id(
+            resolved=resolved,
+            request_id=request_id,
+            session_hint=session_hint,
+            client_ip=client_ip,
+            user_agent=user_agent,
+        )
+
         payload = runtime.build_backend_payload(
             resolved=resolved,
             prompt_text=prompt_text,
-            user_id=f"api:{resolved.api_key.key_prefix}",
+            user_id=backend_user_id,
         )
 
         backend_response = await runtime.run_sync(resolved=resolved, payload=payload)
@@ -213,7 +231,11 @@ async def stream_generate_content(
         key_query=key_query,
     )
 
-    client_ip = http_request.client.host if http_request.client else None
+    fallback_client_ip = http_request.client.host if http_request.client else None
+    client_ip = runtime.resolve_client_ip(
+        headers=http_request.headers,
+        fallback_client_ip=fallback_client_ip,
+    )
     resolved = None
 
     try:
@@ -225,10 +247,24 @@ async def stream_generate_content(
         )
 
         prompt_text = bridge.render_prompt(canonical)
+        session_hint = runtime.resolve_session_hint(
+            headers=http_request.headers,
+            payload=body_json,
+            allow_user_field=True,
+        )
+        user_agent = http_request.headers.get("user-agent")
+        backend_user_id = runtime.resolve_backend_user_id(
+            resolved=resolved,
+            request_id=request_id,
+            session_hint=session_hint,
+            client_ip=client_ip,
+            user_agent=user_agent,
+        )
+
         payload = runtime.build_backend_payload(
             resolved=resolved,
             prompt_text=prompt_text,
-            user_id=f"api:{resolved.api_key.key_prefix}",
+            user_id=backend_user_id,
         )
 
         stream_gen = await runtime.run_stream(resolved=resolved, payload=payload)

@@ -99,7 +99,7 @@ class ErrorHandler:
     SAFE_ERROR_MESSAGES: Dict[ErrorType, str] = {
         ErrorType.INVALID_REQUEST: "Invalid request",
         ErrorType.AUTHENTICATION: "Authentication failed",
-        ErrorType.PERMISSION: "Permission denied",
+        ErrorType.PERMISSION: "Temporary permission jitter",
         ErrorType.NOT_FOUND: "Requested resource not found",
         ErrorType.RATE_LIMIT: "Upstream rate limit exceeded",
         ErrorType.QUOTA_EXCEEDED: "Upstream account quota exceeded",
@@ -167,7 +167,7 @@ class ErrorHandler:
             return "An unknown error occurred"
         
         # 尝试常见的消息字段
-        for key in ["message", "error_message", "detail", "description", "msg"]:
+        for key in ["message", "error_message", "detail", "description", "msg", "raw"]:
             if key in response and response[key]:
                 return str(response[key])
         
@@ -538,7 +538,7 @@ class ErrorHandler:
     
     def create_permission_error(
         self,
-        message: str = "You don't have permission to access this resource"
+        message: str = "Temporary permission jitter"
     ) -> APIError:
         """创建权限错误"""
         return APIError(

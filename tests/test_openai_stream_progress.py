@@ -14,6 +14,7 @@ class _FakeRequest:
     def __init__(self, payload):
         self._payload = payload
         self.client = _FakeClient()
+        self.headers = {}
 
     async def json(self):
         return self._payload
@@ -57,6 +58,25 @@ class _FakeBridge:
 class _FakeRuntime:
     def __init__(self, stream_tokens):
         self._stream_tokens = stream_tokens
+
+    @staticmethod
+    def resolve_client_ip(*, headers, fallback_client_ip):
+        return fallback_client_ip
+
+    @staticmethod
+    def resolve_session_hint(*, headers, payload=None, allow_user_field=True):
+        return None
+
+    @staticmethod
+    def resolve_backend_user_id(
+        *,
+        resolved,
+        request_id,
+        session_hint,
+        client_ip,
+        user_agent,
+    ):
+        return f"api:{resolved.api_key.key_prefix}:{request_id}"
 
     async def resolve_request(self, _session, *, raw_key, model, request_id=None):
         assert raw_key == "sk-test"

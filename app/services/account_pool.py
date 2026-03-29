@@ -736,7 +736,8 @@ class AccountPoolService:
     async def mark_account_exhausted(
         self,
         session: AsyncSession,
-        account_id: str
+        account_id: str,
+        enforce_quota_block: bool = True,
     ) -> bool:
         """
         标记账号配额耗尽
@@ -753,6 +754,10 @@ class AccountPoolService:
             return False
         
         account.status = "exhausted"
+        if enforce_quota_block and account.daily_used < account.daily_quota:
+            # Prevent immediate re-selection when upstream already reports quota exceeded
+            # but local counters are still lagging.
+            account.daily_used = account.daily_quota
         account.updated_at = datetime.utcnow()
         await session.flush()
         

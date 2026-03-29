@@ -27,6 +27,42 @@ A unified API gateway service with OpenAI, Anthropic, and Gemini compatible endp
 - `GET /v1/key/info` - Query models, status, usage, and available tokens for the current API key
 - `GET /health` - Health check
 
+## Session Isolation (Important)
+
+When multiple end users share one API key, clients should pass a stable session identity.  
+Otherwise the gateway falls back to request-level isolation (safe but no cross-request memory).
+
+Supported ways:
+
+- Header: `X-ST-Session-ID: <tenant_or_user_session_id>` (recommended)
+- Header: `X-Session-ID: <tenant_or_user_session_id>`
+- OpenAI body: `user`
+- Any protocol body: `metadata.user_id` (or `metadata.user`)
+
+Examples:
+
+```bash
+curl -X POST "https://api.example.com/v1/chat/completions" \
+  -H "Authorization: Bearer sk-xxx" \
+  -H "Content-Type: application/json" \
+  -H "X-ST-Session-ID: tenantA:user42" \
+  -d '{
+    "model":"claude-opus-4-6",
+    "messages":[{"role":"user","content":"hello"}]
+  }'
+```
+
+```bash
+curl -X POST "https://api.example.com/v1/messages" \
+  -H "x-api-key: sk-xxx" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model":"claude-opus-4-6",
+    "messages":[{"role":"user","content":"hello"}],
+    "metadata":{"user_id":"tenantA:user42"}
+  }'
+```
+
 ## API Key Model Info
 
 Use `GET /v1/key/info` to query the current key's available models and each model's current status, unavailable reasons, used tokens, and available tokens.
@@ -76,6 +112,46 @@ Example response:
 | `ADMIN_PASSWORD` | Admin password |
 | `ADMIN_PATH` | Hidden admin panel path |
 | `PROXY_SHARED_SECRET` | Shared secret between Cloudflare Worker and source site (`x-proxy-secret` validation for `/v1/*` and `/v1beta/*`) |
+
+## PostgreSQL Profile (2c/4g + 47 Connections)
+
+SQLite is still supported. To switch to PostgreSQL, only change `DATABASE_URL` and pool-related env vars.
+
+Recommended start values for `2c/4g` app + managed PostgreSQL (`connection_limit=47`):
+
+```env
+DATABASE_URL=postgresql+asyncpg://USER:PASSWORD@HOST:25060/defaultdb?ssl=require
+UVICORN_WORKERS=2
+MAX_CONCURRENT_REQUESTS=60
+MAX_CONCURRENT_DB_OPS=30
+REQUEST_QUEUE_TIMEOUT_SECONDS=8
+HTTP_MAX_CONNECTIONS=160
+HTTP_MAX_CONNECTIONS_PER_HOST=40
+HTTP_MAX_KEEPALIVE=40
+DB_POOL_SIZE=8
+DB_MAX_OVERFLOW=2
+DB_POOL_TIMEOUT=5
+DB_POOL_RECYCLE=1800
+DB_CONNECTION_LIMIT=47
+DB_CONNECTION_RESERVE=6
+APP_INSTANCE_COUNT=1
+```
+
+Optional PostgreSQL timeout settings:
+
+```env
+POSTGRES_CONNECT_TIMEOUT_SECONDS=8
+POSTGRES_COMMAND_TIMEOUT_SECONDS=30
+POSTGRES_STATEMENT_TIMEOUT_MS=30000
+POSTGRES_LOCK_TIMEOUT_MS=5000
+POSTGRES_APPLICATION_NAME=st-api
+```
+
+Pool budget quick check:
+
+```bash
+python scripts/check_pg_pool_budget.py
+```
 
 ## Release Management
 

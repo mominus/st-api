@@ -15,12 +15,13 @@ logger = logging.getLogger(__name__)
 
 # 延迟导入 tiktoken，避免启动时加载
 _encoding = None
+_encoding_initialized = False
 
 
 def _get_encoding():
     """获取 tiktoken 编码器（延迟加载）"""
-    global _encoding
-    if _encoding is None:
+    global _encoding, _encoding_initialized
+    if not _encoding_initialized:
         try:
             import tiktoken
             # cl100k_base 是 GPT-4, GPT-3.5-turbo, text-embedding-ada-002 使用的编码
@@ -33,6 +34,8 @@ def _get_encoding():
         except Exception as e:
             logger.error(f"Failed to load tiktoken: {e}")
             _encoding = None
+        finally:
+            _encoding_initialized = True
     return _encoding
 
 

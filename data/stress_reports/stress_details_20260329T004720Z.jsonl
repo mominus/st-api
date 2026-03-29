@@ -1,0 +1,480 @@
+{"session_id": "tenantA-user-0000", "turn": 0, "stream": false, "ok": false, "status_code": 503, "latency_ms": 2697, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0001", "turn": 0, "stream": true, "ok": false, "status_code": 503, "latency_ms": 3328, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0002", "turn": 0, "stream": false, "ok": false, "status_code": 503, "latency_ms": 2448, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0003", "turn": 0, "stream": true, "ok": false, "status_code": 503, "latency_ms": 2671, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0004", "turn": 0, "stream": false, "ok": false, "status_code": 503, "latency_ms": 2685, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0005", "turn": 0, "stream": true, "ok": false, "status_code": 503, "latency_ms": 2214, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0006", "turn": 0, "stream": false, "ok": false, "status_code": 503, "latency_ms": 2972, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0007", "turn": 0, "stream": true, "ok": false, "status_code": 503, "latency_ms": 3325, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0008", "turn": 0, "stream": true, "ok": false, "status_code": 503, "latency_ms": 4579, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0009", "turn": 0, "stream": true, "ok": false, "status_code": 503, "latency_ms": 3021, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0010", "turn": 0, "stream": false, "ok": false, "status_code": 503, "latency_ms": 4616, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0011", "turn": 0, "stream": true, "ok": false, "status_code": 503, "latency_ms": 2846, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0012", "turn": 0, "stream": false, "ok": false, "status_code": 503, "latency_ms": 4375, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0013", "turn": 0, "stream": false, "ok": false, "status_code": 503, "latency_ms": 4310, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0014", "turn": 0, "stream": false, "ok": false, "status_code": 503, "latency_ms": 4582, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0015", "turn": 0, "stream": false, "ok": false, "status_code": 503, "latency_ms": 4746, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0016", "turn": 0, "stream": false, "ok": false, "status_code": 503, "latency_ms": 5130, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0017", "turn": 0, "stream": false, "ok": false, "status_code": 503, "latency_ms": 5047, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0018", "turn": 0, "stream": true, "ok": false, "status_code": 503, "latency_ms": 5569, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0019", "turn": 0, "stream": true, "ok": false, "status_code": 503, "latency_ms": 6134, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0020", "turn": 0, "stream": true, "ok": false, "status_code": 503, "latency_ms": 5568, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0021", "turn": 0, "stream": true, "ok": false, "status_code": 503, "latency_ms": 6237, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0022", "turn": 0, "stream": false, "ok": false, "status_code": 503, "latency_ms": 6341, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0023", "turn": 0, "stream": false, "ok": false, "status_code": 503, "latency_ms": 6341, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0024", "turn": 0, "stream": true, "ok": false, "status_code": 503, "latency_ms": 6402, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0025", "turn": 0, "stream": false, "ok": false, "status_code": 503, "latency_ms": 6506, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0026", "turn": 0, "stream": false, "ok": false, "status_code": 500, "latency_ms": 9504, "error_type": "api_error", "error_message": "Internal server error", "response_chars": 0}
+{"session_id": "tenantA-user-0027", "turn": 0, "stream": true, "ok": false, "status_code": 500, "latency_ms": 9610, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0028", "turn": 0, "stream": true, "ok": false, "status_code": 500, "latency_ms": 9665, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0029", "turn": 0, "stream": true, "ok": false, "status_code": 500, "latency_ms": 10305, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0030", "turn": 0, "stream": true, "ok": false, "status_code": 500, "latency_ms": 10626, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0031", "turn": 0, "stream": true, "ok": false, "status_code": 500, "latency_ms": 10483, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0032", "turn": 0, "stream": true, "ok": false, "status_code": 500, "latency_ms": 10602, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0033", "turn": 0, "stream": false, "ok": false, "status_code": 500, "latency_ms": 10639, "error_type": "api_error", "error_message": "Internal server error", "response_chars": 0}
+{"session_id": "tenantA-user-0034", "turn": 0, "stream": false, "ok": false, "status_code": 500, "latency_ms": 11366, "error_type": "api_error", "error_message": "Internal server error", "response_chars": 0}
+{"session_id": "tenantA-user-0035", "turn": 0, "stream": true, "ok": false, "status_code": 500, "latency_ms": 11366, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0036", "turn": 0, "stream": true, "ok": false, "status_code": 500, "latency_ms": 11263, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0037", "turn": 0, "stream": true, "ok": false, "status_code": 500, "latency_ms": 11304, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0038", "turn": 0, "stream": false, "ok": false, "status_code": 500, "latency_ms": 10157, "error_type": "api_error", "error_message": "Internal server error", "response_chars": 0}
+{"session_id": "tenantA-user-0039", "turn": 0, "stream": true, "ok": false, "status_code": 500, "latency_ms": 10156, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0040", "turn": 0, "stream": true, "ok": false, "status_code": 500, "latency_ms": 10155, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0041", "turn": 0, "stream": false, "ok": false, "status_code": 500, "latency_ms": 10149, "error_type": "api_error", "error_message": "Internal server error", "response_chars": 0}
+{"session_id": "tenantA-user-0042", "turn": 0, "stream": false, "ok": false, "status_code": 500, "latency_ms": 10150, "error_type": "api_error", "error_message": "Internal server error", "response_chars": 0}
+{"session_id": "tenantA-user-0043", "turn": 0, "stream": false, "ok": false, "status_code": 500, "latency_ms": 10153, "error_type": "api_error", "error_message": "Internal server error", "response_chars": 0}
+{"session_id": "tenantA-user-0044", "turn": 0, "stream": false, "ok": false, "status_code": 500, "latency_ms": 10158, "error_type": "api_error", "error_message": "Internal server error", "response_chars": 0}
+{"session_id": "tenantA-user-0045", "turn": 0, "stream": true, "ok": false, "status_code": 500, "latency_ms": 10159, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0046", "turn": 0, "stream": true, "ok": false, "status_code": 500, "latency_ms": 10156, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0047", "turn": 0, "stream": true, "ok": false, "status_code": 500, "latency_ms": 10155, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0048", "turn": 0, "stream": true, "ok": false, "status_code": 500, "latency_ms": 10154, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0049", "turn": 0, "stream": false, "ok": false, "status_code": 500, "latency_ms": 10156, "error_type": "api_error", "error_message": "Internal server error", "response_chars": 0}
+{"session_id": "tenantA-user-0050", "turn": 0, "stream": true, "ok": false, "status_code": 500, "latency_ms": 10155, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0051", "turn": 0, "stream": true, "ok": false, "status_code": 500, "latency_ms": 10147, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0052", "turn": 0, "stream": true, "ok": false, "status_code": 500, "latency_ms": 10148, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0053", "turn": 0, "stream": true, "ok": false, "status_code": 500, "latency_ms": 10156, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0054", "turn": 0, "stream": true, "ok": false, "status_code": 500, "latency_ms": 10156, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0055", "turn": 0, "stream": false, "ok": false, "status_code": 500, "latency_ms": 10146, "error_type": "api_error", "error_message": "Internal server error", "response_chars": 0}
+{"session_id": "tenantA-user-0056", "turn": 0, "stream": true, "ok": false, "status_code": 500, "latency_ms": 10152, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0057", "turn": 0, "stream": false, "ok": false, "status_code": 500, "latency_ms": 10147, "error_type": "api_error", "error_message": "Internal server error", "response_chars": 0}
+{"session_id": "tenantA-user-0058", "turn": 0, "stream": false, "ok": false, "status_code": 500, "latency_ms": 10152, "error_type": "api_error", "error_message": "Internal server error", "response_chars": 0}
+{"session_id": "tenantA-user-0059", "turn": 0, "stream": false, "ok": false, "status_code": 500, "latency_ms": 10154, "error_type": "api_error", "error_message": "Internal server error", "response_chars": 0}
+{"session_id": "tenantA-user-0060", "turn": 0, "stream": false, "ok": false, "status_code": 503, "latency_ms": 4723, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0061", "turn": 0, "stream": true, "ok": false, "status_code": 503, "latency_ms": 4651, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0062", "turn": 0, "stream": true, "ok": false, "status_code": 503, "latency_ms": 4973, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0063", "turn": 0, "stream": true, "ok": false, "status_code": 503, "latency_ms": 4959, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0064", "turn": 0, "stream": true, "ok": false, "status_code": 503, "latency_ms": 5301, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0065", "turn": 0, "stream": true, "ok": false, "status_code": 503, "latency_ms": 5216, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0066", "turn": 0, "stream": true, "ok": false, "status_code": 503, "latency_ms": 5125, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0067", "turn": 0, "stream": false, "ok": false, "status_code": 503, "latency_ms": 5079, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0068", "turn": 0, "stream": true, "ok": false, "status_code": 503, "latency_ms": 4869, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0069", "turn": 0, "stream": true, "ok": false, "status_code": 503, "latency_ms": 4944, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0070", "turn": 0, "stream": false, "ok": false, "status_code": 503, "latency_ms": 4498, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0071", "turn": 0, "stream": true, "ok": false, "status_code": 503, "latency_ms": 4692, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0072", "turn": 0, "stream": false, "ok": false, "status_code": 503, "latency_ms": 5139, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0073", "turn": 0, "stream": false, "ok": false, "status_code": 503, "latency_ms": 5134, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0074", "turn": 0, "stream": false, "ok": false, "status_code": 503, "latency_ms": 5234, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0075", "turn": 0, "stream": true, "ok": false, "status_code": 503, "latency_ms": 5131, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0076", "turn": 0, "stream": true, "ok": false, "status_code": 503, "latency_ms": 4799, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0077", "turn": 0, "stream": true, "ok": false, "status_code": 500, "latency_ms": 6342, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0078", "turn": 0, "stream": false, "ok": false, "status_code": 503, "latency_ms": 6466, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0079", "turn": 0, "stream": true, "ok": false, "status_code": 503, "latency_ms": 6466, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0000", "turn": 1, "stream": true, "ok": false, "status_code": 503, "latency_ms": 1697, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0001", "turn": 1, "stream": true, "ok": false, "status_code": 503, "latency_ms": 1863, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0002", "turn": 1, "stream": true, "ok": false, "status_code": 503, "latency_ms": 2151, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0003", "turn": 1, "stream": true, "ok": false, "status_code": 503, "latency_ms": 1744, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0004", "turn": 1, "stream": true, "ok": false, "status_code": 503, "latency_ms": 1675, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0005", "turn": 1, "stream": false, "ok": false, "status_code": 500, "latency_ms": 10283, "error_type": "api_error", "error_message": "Internal server error", "response_chars": 0}
+{"session_id": "tenantA-user-0006", "turn": 1, "stream": true, "ok": false, "status_code": 503, "latency_ms": 1987, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0007", "turn": 1, "stream": true, "ok": false, "status_code": 503, "latency_ms": 1678, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0008", "turn": 1, "stream": true, "ok": false, "status_code": 503, "latency_ms": 6494, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0009", "turn": 1, "stream": false, "ok": false, "status_code": 503, "latency_ms": 4056, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0010", "turn": 1, "stream": true, "ok": false, "status_code": 503, "latency_ms": 1837, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0011", "turn": 1, "stream": true, "ok": false, "status_code": 500, "latency_ms": 10281, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0012", "turn": 1, "stream": true, "ok": false, "status_code": 503, "latency_ms": 1983, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0013", "turn": 1, "stream": true, "ok": false, "status_code": 503, "latency_ms": 3714, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0014", "turn": 1, "stream": false, "ok": false, "status_code": 503, "latency_ms": 5234, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0015", "turn": 1, "stream": true, "ok": false, "status_code": 500, "latency_ms": 10794, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0016", "turn": 1, "stream": true, "ok": false, "status_code": 503, "latency_ms": 3433, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0017", "turn": 1, "stream": true, "ok": false, "status_code": 503, "latency_ms": 1699, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0018", "turn": 1, "stream": false, "ok": false, "status_code": 503, "latency_ms": 3545, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0019", "turn": 1, "stream": true, "ok": false, "status_code": 500, "latency_ms": 10233, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0020", "turn": 1, "stream": true, "ok": false, "status_code": 503, "latency_ms": 6115, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0021", "turn": 1, "stream": false, "ok": false, "status_code": 503, "latency_ms": 5184, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0022", "turn": 1, "stream": false, "ok": false, "status_code": 500, "latency_ms": 10230, "error_type": "api_error", "error_message": "Internal server error", "response_chars": 0}
+{"session_id": "tenantA-user-0023", "turn": 1, "stream": true, "ok": false, "status_code": 503, "latency_ms": 3461, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0024", "turn": 1, "stream": true, "ok": false, "status_code": 503, "latency_ms": 3428, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0025", "turn": 1, "stream": true, "ok": false, "status_code": 500, "latency_ms": 9833, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0026", "turn": 1, "stream": true, "ok": false, "status_code": 503, "latency_ms": 5250, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0027", "turn": 1, "stream": false, "ok": false, "status_code": 503, "latency_ms": 3807, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0028", "turn": 1, "stream": true, "ok": false, "status_code": 500, "latency_ms": 10226, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0029", "turn": 1, "stream": false, "ok": false, "status_code": 500, "latency_ms": 10260, "error_type": "api_error", "error_message": "Internal server error", "response_chars": 0}
+{"session_id": "tenantA-user-0030", "turn": 1, "stream": true, "ok": false, "status_code": 500, "latency_ms": 9891, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0031", "turn": 1, "stream": true, "ok": false, "status_code": 503, "latency_ms": 3452, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0032", "turn": 1, "stream": true, "ok": false, "status_code": 500, "latency_ms": 10224, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0033", "turn": 1, "stream": true, "ok": false, "status_code": 500, "latency_ms": 10150, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0034", "turn": 1, "stream": true, "ok": false, "status_code": 503, "latency_ms": 5352, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0035", "turn": 1, "stream": false, "ok": false, "status_code": 500, "latency_ms": 10232, "error_type": "api_error", "error_message": "Internal server error", "response_chars": 0}
+{"session_id": "tenantA-user-0036", "turn": 1, "stream": false, "ok": false, "status_code": 500, "latency_ms": 11109, "error_type": "api_error", "error_message": "Internal server error", "response_chars": 0}
+{"session_id": "tenantA-user-0037", "turn": 1, "stream": true, "ok": false, "status_code": 500, "latency_ms": 10229, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0038", "turn": 1, "stream": true, "ok": false, "status_code": 503, "latency_ms": 4305, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0039", "turn": 1, "stream": true, "ok": false, "status_code": 500, "latency_ms": 10256, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0040", "turn": 1, "stream": true, "ok": false, "status_code": 500, "latency_ms": 10254, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0041", "turn": 1, "stream": true, "ok": false, "status_code": 503, "latency_ms": 4029, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0042", "turn": 1, "stream": true, "ok": false, "status_code": 503, "latency_ms": 5757, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0043", "turn": 1, "stream": true, "ok": false, "status_code": 500, "latency_ms": 9796, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0044", "turn": 1, "stream": false, "ok": false, "status_code": 500, "latency_ms": 10805, "error_type": "api_error", "error_message": "Internal server error", "response_chars": 0}
+{"session_id": "tenantA-user-0045", "turn": 1, "stream": true, "ok": false, "status_code": 500, "latency_ms": 10217, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0046", "turn": 1, "stream": false, "ok": false, "status_code": 503, "latency_ms": 5564, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0047", "turn": 1, "stream": true, "ok": false, "status_code": 500, "latency_ms": 9958, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0048", "turn": 1, "stream": false, "ok": false, "status_code": 500, "latency_ms": 10221, "error_type": "api_error", "error_message": "Internal server error", "response_chars": 0}
+{"session_id": "tenantA-user-0049", "turn": 1, "stream": true, "ok": false, "status_code": 500, "latency_ms": 10246, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0050", "turn": 1, "stream": true, "ok": false, "status_code": 503, "latency_ms": 5164, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0051", "turn": 1, "stream": false, "ok": false, "status_code": 500, "latency_ms": 11279, "error_type": "api_error", "error_message": "Internal server error", "response_chars": 0}
+{"session_id": "tenantA-user-0052", "turn": 1, "stream": false, "ok": false, "status_code": 500, "latency_ms": 10520, "error_type": "api_error", "error_message": "Internal server error", "response_chars": 0}
+{"session_id": "tenantA-user-0053", "turn": 1, "stream": true, "ok": false, "status_code": 500, "latency_ms": 10246, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0054", "turn": 1, "stream": true, "ok": false, "status_code": 500, "latency_ms": 10244, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0055", "turn": 1, "stream": true, "ok": false, "status_code": 500, "latency_ms": 10209, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0056", "turn": 1, "stream": true, "ok": false, "status_code": 503, "latency_ms": 6089, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0057", "turn": 1, "stream": false, "ok": false, "status_code": 500, "latency_ms": 10206, "error_type": "api_error", "error_message": "Internal server error", "response_chars": 0}
+{"session_id": "tenantA-user-0058", "turn": 1, "stream": true, "ok": false, "status_code": 500, "latency_ms": 10947, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0059", "turn": 1, "stream": true, "ok": false, "status_code": 500, "latency_ms": 10843, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0060", "turn": 1, "stream": true, "ok": false, "status_code": 503, "latency_ms": 5283, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0061", "turn": 1, "stream": true, "ok": false, "status_code": 503, "latency_ms": 5278, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0062", "turn": 1, "stream": false, "ok": false, "status_code": 503, "latency_ms": 5318, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0063", "turn": 1, "stream": false, "ok": false, "status_code": 503, "latency_ms": 5353, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0064", "turn": 1, "stream": false, "ok": false, "status_code": 503, "latency_ms": 5442, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0065", "turn": 1, "stream": false, "ok": false, "status_code": 503, "latency_ms": 5643, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0066", "turn": 1, "stream": true, "ok": false, "status_code": 503, "latency_ms": 5891, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0067", "turn": 1, "stream": false, "ok": false, "status_code": 503, "latency_ms": 6212, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0068", "turn": 1, "stream": true, "ok": false, "status_code": 503, "latency_ms": 6212, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0069", "turn": 1, "stream": true, "ok": false, "status_code": 503, "latency_ms": 6197, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0070", "turn": 1, "stream": true, "ok": false, "status_code": 503, "latency_ms": 5279, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0071", "turn": 1, "stream": true, "ok": false, "status_code": 503, "latency_ms": 5267, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0072", "turn": 1, "stream": false, "ok": false, "status_code": 503, "latency_ms": 5313, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0073", "turn": 1, "stream": true, "ok": false, "status_code": 503, "latency_ms": 5375, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0074", "turn": 1, "stream": false, "ok": false, "status_code": 503, "latency_ms": 5452, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0075", "turn": 1, "stream": true, "ok": false, "status_code": 503, "latency_ms": 5644, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0076", "turn": 1, "stream": true, "ok": false, "status_code": 503, "latency_ms": 5897, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0077", "turn": 1, "stream": true, "ok": false, "status_code": 503, "latency_ms": 6226, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0078", "turn": 1, "stream": true, "ok": false, "status_code": 503, "latency_ms": 6222, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0079", "turn": 1, "stream": false, "ok": false, "status_code": 503, "latency_ms": 5873, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0000", "turn": 2, "stream": false, "ok": false, "status_code": 503, "latency_ms": 1761, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0001", "turn": 2, "stream": false, "ok": false, "status_code": 503, "latency_ms": 1992, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0002", "turn": 2, "stream": true, "ok": false, "status_code": 503, "latency_ms": 2720, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0003", "turn": 2, "stream": true, "ok": false, "status_code": 503, "latency_ms": 1685, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0004", "turn": 2, "stream": true, "ok": false, "status_code": 503, "latency_ms": 1973, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0005", "turn": 2, "stream": false, "ok": false, "status_code": 500, "latency_ms": 9812, "error_type": "api_error", "error_message": "Internal server error", "response_chars": 0}
+{"session_id": "tenantA-user-0006", "turn": 2, "stream": false, "ok": false, "status_code": 503, "latency_ms": 1705, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0007", "turn": 2, "stream": true, "ok": false, "status_code": 503, "latency_ms": 1793, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0008", "turn": 2, "stream": true, "ok": false, "status_code": 500, "latency_ms": 10319, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0009", "turn": 2, "stream": true, "ok": false, "status_code": 500, "latency_ms": 9883, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0010", "turn": 2, "stream": false, "ok": false, "status_code": 503, "latency_ms": 2536, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0011", "turn": 2, "stream": true, "ok": false, "status_code": 500, "latency_ms": 10278, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0012", "turn": 2, "stream": true, "ok": false, "status_code": 503, "latency_ms": 1700, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0013", "turn": 2, "stream": true, "ok": false, "status_code": 503, "latency_ms": 3859, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0014", "turn": 2, "stream": false, "ok": false, "status_code": 500, "latency_ms": 10779, "error_type": "api_error", "error_message": "Internal server error", "response_chars": 0}
+{"session_id": "tenantA-user-0015", "turn": 2, "stream": true, "ok": false, "status_code": 503, "latency_ms": 4437, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0016", "turn": 2, "stream": true, "ok": false, "status_code": 503, "latency_ms": 3465, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0017", "turn": 2, "stream": false, "ok": false, "status_code": 503, "latency_ms": 1883, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0018", "turn": 2, "stream": true, "ok": false, "status_code": 503, "latency_ms": 3660, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0019", "turn": 2, "stream": true, "ok": false, "status_code": 500, "latency_ms": 10262, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0020", "turn": 2, "stream": false, "ok": false, "status_code": 503, "latency_ms": 4757, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0021", "turn": 2, "stream": true, "ok": false, "status_code": 500, "latency_ms": 10845, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0022", "turn": 2, "stream": false, "ok": false, "status_code": 503, "latency_ms": 6107, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0023", "turn": 2, "stream": true, "ok": false, "status_code": 503, "latency_ms": 3459, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0024", "turn": 2, "stream": false, "ok": false, "status_code": 503, "latency_ms": 3418, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0025", "turn": 2, "stream": false, "ok": false, "status_code": 500, "latency_ms": 10840, "error_type": "api_error", "error_message": "Internal server error", "response_chars": 0}
+{"session_id": "tenantA-user-0026", "turn": 2, "stream": false, "ok": false, "status_code": 500, "latency_ms": 10257, "error_type": "api_error", "error_message": "Internal server error", "response_chars": 0}
+{"session_id": "tenantA-user-0027", "turn": 2, "stream": false, "ok": false, "status_code": 503, "latency_ms": 4026, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0028", "turn": 2, "stream": true, "ok": false, "status_code": 503, "latency_ms": 5218, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0029", "turn": 2, "stream": false, "ok": false, "status_code": 503, "latency_ms": 5812, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0030", "turn": 2, "stream": false, "ok": false, "status_code": 503, "latency_ms": 5216, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0031", "turn": 2, "stream": true, "ok": false, "status_code": 503, "latency_ms": 3582, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0032", "turn": 2, "stream": false, "ok": false, "status_code": 500, "latency_ms": 10275, "error_type": "api_error", "error_message": "Internal server error", "response_chars": 0}
+{"session_id": "tenantA-user-0033", "turn": 2, "stream": false, "ok": false, "status_code": 500, "latency_ms": 10294, "error_type": "api_error", "error_message": "Internal server error", "response_chars": 0}
+{"session_id": "tenantA-user-0034", "turn": 2, "stream": true, "ok": false, "status_code": 500, "latency_ms": 10291, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0035", "turn": 2, "stream": false, "ok": false, "status_code": 500, "latency_ms": 10254, "error_type": "api_error", "error_message": "Internal server error", "response_chars": 0}
+{"session_id": "tenantA-user-0036", "turn": 2, "stream": false, "ok": false, "status_code": 500, "latency_ms": 10290, "error_type": "api_error", "error_message": "Internal server error", "response_chars": 0}
+{"session_id": "tenantA-user-0037", "turn": 2, "stream": false, "ok": false, "status_code": 500, "latency_ms": 10285, "error_type": "api_error", "error_message": "Internal server error", "response_chars": 0}
+{"session_id": "tenantA-user-0038", "turn": 2, "stream": true, "ok": false, "status_code": 503, "latency_ms": 5393, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0039", "turn": 2, "stream": false, "ok": false, "status_code": 500, "latency_ms": 9852, "error_type": "api_error", "error_message": "Internal server error", "response_chars": 0}
+{"session_id": "tenantA-user-0040", "turn": 2, "stream": true, "ok": false, "status_code": 503, "latency_ms": 4029, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0041", "turn": 2, "stream": true, "ok": false, "status_code": 503, "latency_ms": 6184, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0042", "turn": 2, "stream": true, "ok": false, "status_code": 503, "latency_ms": 6633, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0043", "turn": 2, "stream": false, "ok": false, "status_code": 500, "latency_ms": 10262, "error_type": "api_error", "error_message": "Internal server error", "response_chars": 0}
+{"session_id": "tenantA-user-0044", "turn": 2, "stream": true, "ok": false, "status_code": 500, "latency_ms": 10284, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0045", "turn": 2, "stream": true, "ok": false, "status_code": 503, "latency_ms": 6090, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0046", "turn": 2, "stream": false, "ok": false, "status_code": 500, "latency_ms": 10469, "error_type": "api_error", "error_message": "Internal server error", "response_chars": 0}
+{"session_id": "tenantA-user-0047", "turn": 2, "stream": false, "ok": false, "status_code": 503, "latency_ms": 5152, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0048", "turn": 2, "stream": true, "ok": false, "status_code": 500, "latency_ms": 11234, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0049", "turn": 2, "stream": true, "ok": false, "status_code": 500, "latency_ms": 11135, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0050", "turn": 2, "stream": true, "ok": false, "status_code": 500, "latency_ms": 10239, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0051", "turn": 2, "stream": true, "ok": false, "status_code": 500, "latency_ms": 10276, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0052", "turn": 2, "stream": false, "ok": false, "status_code": 500, "latency_ms": 10240, "error_type": "api_error", "error_message": "Internal server error", "response_chars": 0}
+{"session_id": "tenantA-user-0053", "turn": 2, "stream": true, "ok": false, "status_code": 500, "latency_ms": 10243, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0054", "turn": 2, "stream": true, "ok": false, "status_code": 500, "latency_ms": 10549, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0055", "turn": 2, "stream": true, "ok": false, "status_code": 500, "latency_ms": 10274, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0056", "turn": 2, "stream": true, "ok": false, "status_code": 503, "latency_ms": 5505, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0057", "turn": 2, "stream": false, "ok": false, "status_code": 500, "latency_ms": 10269, "error_type": "api_error", "error_message": "Internal server error", "response_chars": 0}
+{"session_id": "tenantA-user-0058", "turn": 2, "stream": false, "ok": false, "status_code": 500, "latency_ms": 10240, "error_type": "api_error", "error_message": "Internal server error", "response_chars": 0}
+{"session_id": "tenantA-user-0059", "turn": 2, "stream": true, "ok": false, "status_code": 500, "latency_ms": 10268, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0060", "turn": 2, "stream": true, "ok": false, "status_code": 503, "latency_ms": 5256, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0061", "turn": 2, "stream": true, "ok": false, "status_code": 503, "latency_ms": 5297, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0062", "turn": 2, "stream": true, "ok": false, "status_code": 503, "latency_ms": 5296, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0063", "turn": 2, "stream": true, "ok": false, "status_code": 503, "latency_ms": 5517, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0064", "turn": 2, "stream": false, "ok": false, "status_code": 503, "latency_ms": 5636, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0065", "turn": 2, "stream": false, "ok": false, "status_code": 503, "latency_ms": 5907, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0066", "turn": 2, "stream": false, "ok": false, "status_code": 503, "latency_ms": 6223, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0067", "turn": 2, "stream": true, "ok": false, "status_code": 503, "latency_ms": 6208, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0068", "turn": 2, "stream": true, "ok": false, "status_code": 503, "latency_ms": 5434, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0069", "turn": 2, "stream": true, "ok": false, "status_code": 503, "latency_ms": 5841, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0070", "turn": 2, "stream": false, "ok": false, "status_code": 503, "latency_ms": 5257, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0071", "turn": 2, "stream": true, "ok": false, "status_code": 503, "latency_ms": 5287, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0072", "turn": 2, "stream": true, "ok": false, "status_code": 503, "latency_ms": 5288, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0073", "turn": 2, "stream": true, "ok": false, "status_code": 503, "latency_ms": 5520, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0074", "turn": 2, "stream": true, "ok": false, "status_code": 503, "latency_ms": 5639, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0075", "turn": 2, "stream": true, "ok": false, "status_code": 503, "latency_ms": 5897, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0076", "turn": 2, "stream": true, "ok": false, "status_code": 503, "latency_ms": 5690, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0077", "turn": 2, "stream": false, "ok": false, "status_code": 503, "latency_ms": 6212, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0078", "turn": 2, "stream": false, "ok": false, "status_code": 503, "latency_ms": 5829, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0079", "turn": 2, "stream": false, "ok": false, "status_code": 503, "latency_ms": 5674, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0000", "turn": 3, "stream": false, "ok": false, "status_code": 503, "latency_ms": 1955, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0001", "turn": 3, "stream": true, "ok": false, "status_code": 503, "latency_ms": 1964, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0002", "turn": 3, "stream": true, "ok": false, "status_code": 503, "latency_ms": 2738, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0003", "turn": 3, "stream": true, "ok": false, "status_code": 503, "latency_ms": 1757, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0004", "turn": 3, "stream": true, "ok": false, "status_code": 503, "latency_ms": 1782, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0005", "turn": 3, "stream": false, "ok": false, "status_code": 500, "latency_ms": 10365, "error_type": "api_error", "error_message": "Internal server error", "response_chars": 0}
+{"session_id": "tenantA-user-0006", "turn": 3, "stream": true, "ok": false, "status_code": 503, "latency_ms": 1690, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0007", "turn": 3, "stream": false, "ok": false, "status_code": 503, "latency_ms": 1811, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0008", "turn": 3, "stream": true, "ok": false, "status_code": 503, "latency_ms": 6778, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0009", "turn": 3, "stream": false, "ok": false, "status_code": 503, "latency_ms": 4933, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0010", "turn": 3, "stream": true, "ok": false, "status_code": 503, "latency_ms": 2606, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0011", "turn": 3, "stream": true, "ok": false, "status_code": 500, "latency_ms": 10359, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0012", "turn": 3, "stream": false, "ok": false, "status_code": 503, "latency_ms": 1673, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0013", "turn": 3, "stream": true, "ok": false, "status_code": 503, "latency_ms": 3715, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0014", "turn": 3, "stream": true, "ok": false, "status_code": 503, "latency_ms": 5234, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0015", "turn": 3, "stream": false, "ok": false, "status_code": 500, "latency_ms": 10794, "error_type": "api_error", "error_message": "Internal server error", "response_chars": 0}
+{"session_id": "tenantA-user-0016", "turn": 3, "stream": true, "ok": false, "status_code": 503, "latency_ms": 3442, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0017", "turn": 3, "stream": false, "ok": false, "status_code": 503, "latency_ms": 1693, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0018", "turn": 3, "stream": false, "ok": false, "status_code": 503, "latency_ms": 3649, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0019", "turn": 3, "stream": true, "ok": false, "status_code": 500, "latency_ms": 6310, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0020", "turn": 3, "stream": true, "ok": false, "status_code": 503, "latency_ms": 6091, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0021", "turn": 3, "stream": false, "ok": false, "status_code": 503, "latency_ms": 5172, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0022", "turn": 3, "stream": true, "ok": false, "status_code": 500, "latency_ms": 10236, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0023", "turn": 3, "stream": false, "ok": false, "status_code": 503, "latency_ms": 3453, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0024", "turn": 3, "stream": true, "ok": false, "status_code": 503, "latency_ms": 3414, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0025", "turn": 3, "stream": false, "ok": false, "status_code": 500, "latency_ms": 9842, "error_type": "api_error", "error_message": "Internal server error", "response_chars": 0}
+{"session_id": "tenantA-user-0026", "turn": 3, "stream": false, "ok": false, "status_code": 503, "latency_ms": 5522, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0027", "turn": 3, "stream": true, "ok": false, "status_code": 503, "latency_ms": 4015, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0028", "turn": 3, "stream": false, "ok": false, "status_code": 500, "latency_ms": 10228, "error_type": "api_error", "error_message": "Internal server error", "response_chars": 0}
+{"session_id": "tenantA-user-0029", "turn": 3, "stream": false, "ok": false, "status_code": 500, "latency_ms": 10344, "error_type": "api_error", "error_message": "Internal server error", "response_chars": 0}
+{"session_id": "tenantA-user-0030", "turn": 3, "stream": false, "ok": false, "status_code": 500, "latency_ms": 9881, "error_type": "api_error", "error_message": "Internal server error", "response_chars": 0}
+{"session_id": "tenantA-user-0031", "turn": 3, "stream": true, "ok": false, "status_code": 503, "latency_ms": 3935, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0032", "turn": 3, "stream": false, "ok": false, "status_code": 500, "latency_ms": 10313, "error_type": "api_error", "error_message": "Internal server error", "response_chars": 0}
+{"session_id": "tenantA-user-0033", "turn": 3, "stream": true, "ok": false, "status_code": 500, "latency_ms": 10939, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0034", "turn": 3, "stream": false, "ok": false, "status_code": 503, "latency_ms": 5625, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0035", "turn": 3, "stream": true, "ok": false, "status_code": 500, "latency_ms": 10220, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0036", "turn": 3, "stream": false, "ok": false, "status_code": 500, "latency_ms": 10333, "error_type": "api_error", "error_message": "Internal server error", "response_chars": 0}
+{"session_id": "tenantA-user-0037", "turn": 3, "stream": false, "ok": false, "status_code": 503, "latency_ms": 4771, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0038", "turn": 3, "stream": true, "ok": false, "status_code": 500, "latency_ms": 10333, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0039", "turn": 3, "stream": true, "ok": false, "status_code": 500, "latency_ms": 10333, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0040", "turn": 3, "stream": true, "ok": false, "status_code": 503, "latency_ms": 4005, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0041", "turn": 3, "stream": true, "ok": false, "status_code": 503, "latency_ms": 6074, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0042", "turn": 3, "stream": true, "ok": false, "status_code": 500, "latency_ms": 10206, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0043", "turn": 3, "stream": false, "ok": false, "status_code": 500, "latency_ms": 10806, "error_type": "api_error", "error_message": "Internal server error", "response_chars": 0}
+{"session_id": "tenantA-user-0044", "turn": 3, "stream": true, "ok": false, "status_code": 500, "latency_ms": 10326, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0045", "turn": 3, "stream": false, "ok": false, "status_code": 503, "latency_ms": 5763, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0046", "turn": 3, "stream": true, "ok": false, "status_code": 500, "latency_ms": 10474, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0047", "turn": 3, "stream": true, "ok": false, "status_code": 500, "latency_ms": 10328, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0048", "turn": 3, "stream": false, "ok": false, "status_code": 500, "latency_ms": 10330, "error_type": "api_error", "error_message": "Internal server error", "response_chars": 0}
+{"session_id": "tenantA-user-0049", "turn": 3, "stream": false, "ok": false, "status_code": 503, "latency_ms": 5177, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0050", "turn": 3, "stream": true, "ok": false, "status_code": 500, "latency_ms": 10210, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0051", "turn": 3, "stream": true, "ok": false, "status_code": 500, "latency_ms": 10963, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0052", "turn": 3, "stream": false, "ok": false, "status_code": 500, "latency_ms": 10326, "error_type": "api_error", "error_message": "Internal server error", "response_chars": 0}
+{"session_id": "tenantA-user-0053", "turn": 3, "stream": true, "ok": false, "status_code": 500, "latency_ms": 10322, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0054", "turn": 3, "stream": true, "ok": false, "status_code": 500, "latency_ms": 10320, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0055", "turn": 3, "stream": true, "ok": false, "status_code": 503, "latency_ms": 6757, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0056", "turn": 3, "stream": true, "ok": false, "status_code": 500, "latency_ms": 10314, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0057", "turn": 3, "stream": false, "ok": false, "status_code": 500, "latency_ms": 10843, "error_type": "api_error", "error_message": "Internal server error", "response_chars": 0}
+{"session_id": "tenantA-user-0058", "turn": 3, "stream": false, "ok": false, "status_code": 500, "latency_ms": 11409, "error_type": "api_error", "error_message": "Internal server error", "response_chars": 0}
+{"session_id": "tenantA-user-0059", "turn": 3, "stream": true, "ok": false, "status_code": 500, "latency_ms": 10318, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0060", "turn": 3, "stream": true, "ok": false, "status_code": 500, "latency_ms": 10049, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0061", "turn": 3, "stream": true, "ok": false, "status_code": 503, "latency_ms": 5285, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0062", "turn": 3, "stream": false, "ok": false, "status_code": 503, "latency_ms": 5305, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0063", "turn": 3, "stream": true, "ok": false, "status_code": 503, "latency_ms": 5663, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0064", "turn": 3, "stream": true, "ok": false, "status_code": 503, "latency_ms": 5766, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0065", "turn": 3, "stream": false, "ok": false, "status_code": 503, "latency_ms": 5838, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0066", "turn": 3, "stream": false, "ok": false, "status_code": 503, "latency_ms": 6216, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0067", "turn": 3, "stream": true, "ok": false, "status_code": 503, "latency_ms": 6211, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0068", "turn": 3, "stream": true, "ok": false, "status_code": 503, "latency_ms": 5319, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0069", "turn": 3, "stream": false, "ok": false, "status_code": 503, "latency_ms": 5893, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0070", "turn": 3, "stream": true, "ok": false, "status_code": 503, "latency_ms": 5286, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0071", "turn": 3, "stream": false, "ok": false, "status_code": 503, "latency_ms": 5285, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0072", "turn": 3, "stream": true, "ok": false, "status_code": 503, "latency_ms": 5310, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0073", "turn": 3, "stream": false, "ok": false, "status_code": 503, "latency_ms": 5638, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0074", "turn": 3, "stream": true, "ok": false, "status_code": 503, "latency_ms": 5722, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0075", "turn": 3, "stream": true, "ok": false, "status_code": 503, "latency_ms": 5528, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0076", "turn": 3, "stream": false, "ok": false, "status_code": 503, "latency_ms": 5654, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0077", "turn": 3, "stream": true, "ok": false, "status_code": 503, "latency_ms": 6199, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0078", "turn": 3, "stream": true, "ok": false, "status_code": 503, "latency_ms": 5439, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0079", "turn": 3, "stream": true, "ok": false, "status_code": 503, "latency_ms": 5527, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0000", "turn": 4, "stream": false, "ok": false, "status_code": 503, "latency_ms": 1964, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0001", "turn": 4, "stream": true, "ok": false, "status_code": 503, "latency_ms": 1794, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0002", "turn": 4, "stream": false, "ok": false, "status_code": 503, "latency_ms": 2732, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0003", "turn": 4, "stream": false, "ok": false, "status_code": 503, "latency_ms": 1693, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0004", "turn": 4, "stream": false, "ok": false, "status_code": 503, "latency_ms": 1765, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0005", "turn": 4, "stream": false, "ok": false, "status_code": 500, "latency_ms": 10283, "error_type": "api_error", "error_message": "Internal server error", "response_chars": 0}
+{"session_id": "tenantA-user-0006", "turn": 4, "stream": false, "ok": false, "status_code": 503, "latency_ms": 1822, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0007", "turn": 4, "stream": true, "ok": false, "status_code": 503, "latency_ms": 1681, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0008", "turn": 4, "stream": false, "ok": false, "status_code": 503, "latency_ms": 6646, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0009", "turn": 4, "stream": false, "ok": false, "status_code": 503, "latency_ms": 4438, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0010", "turn": 4, "stream": false, "ok": false, "status_code": 503, "latency_ms": 2553, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0011", "turn": 4, "stream": false, "ok": false, "status_code": 500, "latency_ms": 10276, "error_type": "api_error", "error_message": "Internal server error", "response_chars": 0}
+{"session_id": "tenantA-user-0012", "turn": 4, "stream": true, "ok": false, "status_code": 503, "latency_ms": 1710, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0013", "turn": 4, "stream": true, "ok": false, "status_code": 503, "latency_ms": 3664, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0014", "turn": 4, "stream": true, "ok": false, "status_code": 503, "latency_ms": 5249, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0015", "turn": 4, "stream": true, "ok": false, "status_code": 500, "latency_ms": 11061, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0016", "turn": 4, "stream": false, "ok": false, "status_code": 503, "latency_ms": 3442, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0017", "turn": 4, "stream": true, "ok": false, "status_code": 503, "latency_ms": 1780, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0018", "turn": 4, "stream": true, "ok": false, "status_code": 503, "latency_ms": 3607, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0019", "turn": 4, "stream": true, "ok": false, "status_code": 500, "latency_ms": 10242, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0020", "turn": 4, "stream": true, "ok": false, "status_code": 503, "latency_ms": 6103, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0021", "turn": 4, "stream": false, "ok": false, "status_code": 503, "latency_ms": 5171, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0022", "turn": 4, "stream": true, "ok": false, "status_code": 500, "latency_ms": 10232, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0023", "turn": 4, "stream": true, "ok": false, "status_code": 503, "latency_ms": 3477, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0024", "turn": 4, "stream": true, "ok": false, "status_code": 503, "latency_ms": 3425, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0025", "turn": 4, "stream": true, "ok": false, "status_code": 500, "latency_ms": 9829, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0026", "turn": 4, "stream": true, "ok": false, "status_code": 503, "latency_ms": 5767, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0027", "turn": 4, "stream": true, "ok": false, "status_code": 503, "latency_ms": 3735, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0028", "turn": 4, "stream": true, "ok": false, "status_code": 500, "latency_ms": 10227, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0029", "turn": 4, "stream": false, "ok": false, "status_code": 500, "latency_ms": 10789, "error_type": "api_error", "error_message": "Internal server error", "response_chars": 0}
+{"session_id": "tenantA-user-0030", "turn": 4, "stream": false, "ok": false, "status_code": 500, "latency_ms": 10254, "error_type": "api_error", "error_message": "Internal server error", "response_chars": 0}
+{"session_id": "tenantA-user-0031", "turn": 4, "stream": true, "ok": false, "status_code": 500, "latency_ms": 9877, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0032", "turn": 4, "stream": true, "ok": false, "status_code": 503, "latency_ms": 3899, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0033", "turn": 4, "stream": true, "ok": false, "status_code": 500, "latency_ms": 10212, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0034", "turn": 4, "stream": false, "ok": false, "status_code": 500, "latency_ms": 10604, "error_type": "api_error", "error_message": "Internal server error", "response_chars": 0}
+{"session_id": "tenantA-user-0035", "turn": 4, "stream": true, "ok": false, "status_code": 503, "latency_ms": 5515, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0036", "turn": 4, "stream": true, "ok": false, "status_code": 500, "latency_ms": 10877, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0037", "turn": 4, "stream": false, "ok": false, "status_code": 500, "latency_ms": 10245, "error_type": "api_error", "error_message": "Internal server error", "response_chars": 0}
+{"session_id": "tenantA-user-0038", "turn": 4, "stream": false, "ok": false, "status_code": 503, "latency_ms": 4727, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0039", "turn": 4, "stream": false, "ok": false, "status_code": 500, "latency_ms": 10246, "error_type": "api_error", "error_message": "Internal server error", "response_chars": 0}
+{"session_id": "tenantA-user-0040", "turn": 4, "stream": true, "ok": false, "status_code": 500, "latency_ms": 10244, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0041", "turn": 4, "stream": true, "ok": false, "status_code": 500, "latency_ms": 10244, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0042", "turn": 4, "stream": true, "ok": false, "status_code": 503, "latency_ms": 4004, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0043", "turn": 4, "stream": false, "ok": false, "status_code": 503, "latency_ms": 5730, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0044", "turn": 4, "stream": true, "ok": false, "status_code": 500, "latency_ms": 9757, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0045", "turn": 4, "stream": false, "ok": false, "status_code": 500, "latency_ms": 10731, "error_type": "api_error", "error_message": "Internal server error", "response_chars": 0}
+{"session_id": "tenantA-user-0046", "turn": 4, "stream": false, "ok": false, "status_code": 500, "latency_ms": 10211, "error_type": "api_error", "error_message": "Internal server error", "response_chars": 0}
+{"session_id": "tenantA-user-0047", "turn": 4, "stream": false, "ok": false, "status_code": 503, "latency_ms": 5603, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0048", "turn": 4, "stream": false, "ok": false, "status_code": 500, "latency_ms": 10459, "error_type": "api_error", "error_message": "Internal server error", "response_chars": 0}
+{"session_id": "tenantA-user-0049", "turn": 4, "stream": false, "ok": false, "status_code": 500, "latency_ms": 10240, "error_type": "api_error", "error_message": "Internal server error", "response_chars": 0}
+{"session_id": "tenantA-user-0050", "turn": 4, "stream": true, "ok": false, "status_code": 500, "latency_ms": 10240, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0051", "turn": 4, "stream": true, "ok": false, "status_code": 503, "latency_ms": 5164, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0052", "turn": 4, "stream": false, "ok": false, "status_code": 500, "latency_ms": 10198, "error_type": "api_error", "error_message": "Internal server error", "response_chars": 0}
+{"session_id": "tenantA-user-0053", "turn": 4, "stream": false, "ok": false, "status_code": 500, "latency_ms": 10579, "error_type": "api_error", "error_message": "Internal server error", "response_chars": 0}
+{"session_id": "tenantA-user-0054", "turn": 4, "stream": false, "ok": false, "status_code": 500, "latency_ms": 10237, "error_type": "api_error", "error_message": "Internal server error", "response_chars": 0}
+{"session_id": "tenantA-user-0055", "turn": 4, "stream": true, "ok": false, "status_code": 500, "latency_ms": 10235, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0056", "turn": 4, "stream": true, "ok": false, "status_code": 500, "latency_ms": 10204, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0057", "turn": 4, "stream": true, "ok": false, "status_code": 503, "latency_ms": 6134, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0058", "turn": 4, "stream": true, "ok": false, "status_code": 500, "latency_ms": 10202, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0059", "turn": 4, "stream": false, "ok": false, "status_code": 500, "latency_ms": 11148, "error_type": "api_error", "error_message": "Internal server error", "response_chars": 0}
+{"session_id": "tenantA-user-0060", "turn": 4, "stream": false, "ok": false, "status_code": 503, "latency_ms": 5247, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0061", "turn": 4, "stream": false, "ok": false, "status_code": 503, "latency_ms": 5271, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0062", "turn": 4, "stream": false, "ok": false, "status_code": 503, "latency_ms": 5303, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0063", "turn": 4, "stream": true, "ok": false, "status_code": 503, "latency_ms": 5668, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0064", "turn": 4, "stream": true, "ok": false, "status_code": 503, "latency_ms": 5750, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0065", "turn": 4, "stream": false, "ok": false, "status_code": 503, "latency_ms": 5820, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0066", "turn": 4, "stream": true, "ok": false, "status_code": 503, "latency_ms": 5802, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0067", "turn": 4, "stream": true, "ok": false, "status_code": 503, "latency_ms": 6221, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0068", "turn": 4, "stream": false, "ok": false, "status_code": 503, "latency_ms": 5374, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0069", "turn": 4, "stream": true, "ok": false, "status_code": 503, "latency_ms": 5802, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0070", "turn": 4, "stream": true, "ok": false, "status_code": 503, "latency_ms": 5245, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0071", "turn": 4, "stream": false, "ok": false, "status_code": 503, "latency_ms": 5274, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0072", "turn": 4, "stream": true, "ok": false, "status_code": 503, "latency_ms": 5291, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0073", "turn": 4, "stream": false, "ok": false, "status_code": 503, "latency_ms": 5690, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0074", "turn": 4, "stream": true, "ok": false, "status_code": 503, "latency_ms": 5763, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0075", "turn": 4, "stream": true, "ok": false, "status_code": 503, "latency_ms": 5706, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0076", "turn": 4, "stream": false, "ok": false, "status_code": 503, "latency_ms": 5525, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0077", "turn": 4, "stream": true, "ok": false, "status_code": 503, "latency_ms": 5635, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0078", "turn": 4, "stream": true, "ok": false, "status_code": 503, "latency_ms": 5813, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0079", "turn": 4, "stream": true, "ok": false, "status_code": 503, "latency_ms": 5656, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0000", "turn": 5, "stream": true, "ok": false, "status_code": 503, "latency_ms": 1970, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0001", "turn": 5, "stream": false, "ok": false, "status_code": 503, "latency_ms": 1780, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0002", "turn": 5, "stream": false, "ok": false, "status_code": 503, "latency_ms": 2656, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0003", "turn": 5, "stream": false, "ok": false, "status_code": 503, "latency_ms": 1796, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0004", "turn": 5, "stream": true, "ok": false, "status_code": 503, "latency_ms": 1781, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0005", "turn": 5, "stream": true, "ok": false, "status_code": 500, "latency_ms": 10241, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0006", "turn": 5, "stream": false, "ok": false, "status_code": 503, "latency_ms": 1687, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0007", "turn": 5, "stream": true, "ok": false, "status_code": 503, "latency_ms": 1733, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0008", "turn": 5, "stream": true, "ok": false, "status_code": 503, "latency_ms": 6676, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0009", "turn": 5, "stream": true, "ok": false, "status_code": 503, "latency_ms": 4614, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0010", "turn": 5, "stream": true, "ok": false, "status_code": 503, "latency_ms": 2588, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0011", "turn": 5, "stream": false, "ok": false, "status_code": 500, "latency_ms": 10239, "error_type": "api_error", "error_message": "Internal server error", "response_chars": 0}
+{"session_id": "tenantA-user-0012", "turn": 5, "stream": true, "ok": false, "status_code": 503, "latency_ms": 1663, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0013", "turn": 5, "stream": true, "ok": false, "status_code": 503, "latency_ms": 3654, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0014", "turn": 5, "stream": false, "ok": false, "status_code": 503, "latency_ms": 5210, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0015", "turn": 5, "stream": true, "ok": false, "status_code": 500, "latency_ms": 10576, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0016", "turn": 5, "stream": false, "ok": false, "status_code": 503, "latency_ms": 3443, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0017", "turn": 5, "stream": true, "ok": false, "status_code": 503, "latency_ms": 1680, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0018", "turn": 5, "stream": true, "ok": false, "status_code": 503, "latency_ms": 3651, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0019", "turn": 5, "stream": true, "ok": false, "status_code": 500, "latency_ms": 10210, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0020", "turn": 5, "stream": false, "ok": false, "status_code": 503, "latency_ms": 6103, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0021", "turn": 5, "stream": false, "ok": false, "status_code": 503, "latency_ms": 5164, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0022", "turn": 5, "stream": true, "ok": false, "status_code": 500, "latency_ms": 10204, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0023", "turn": 5, "stream": true, "ok": false, "status_code": 503, "latency_ms": 3439, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0024", "turn": 5, "stream": false, "ok": false, "status_code": 503, "latency_ms": 3407, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0025", "turn": 5, "stream": true, "ok": false, "status_code": 500, "latency_ms": 9867, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0026", "turn": 5, "stream": false, "ok": false, "status_code": 503, "latency_ms": 5420, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0027", "turn": 5, "stream": true, "ok": false, "status_code": 503, "latency_ms": 3671, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0028", "turn": 5, "stream": true, "ok": false, "status_code": 500, "latency_ms": 10200, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0029", "turn": 5, "stream": true, "ok": false, "status_code": 500, "latency_ms": 10224, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0030", "turn": 5, "stream": true, "ok": false, "status_code": 500, "latency_ms": 9863, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0031", "turn": 5, "stream": true, "ok": false, "status_code": 503, "latency_ms": 3552, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0032", "turn": 5, "stream": true, "ok": false, "status_code": 500, "latency_ms": 10199, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0033", "turn": 5, "stream": true, "ok": false, "status_code": 500, "latency_ms": 10799, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0034", "turn": 5, "stream": true, "ok": false, "status_code": 503, "latency_ms": 5532, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0035", "turn": 5, "stream": true, "ok": false, "status_code": 500, "latency_ms": 10174, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0036", "turn": 5, "stream": false, "ok": false, "status_code": 500, "latency_ms": 10204, "error_type": "api_error", "error_message": "Internal server error", "response_chars": 0}
+{"session_id": "tenantA-user-0037", "turn": 5, "stream": true, "ok": false, "status_code": 503, "latency_ms": 4717, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0038", "turn": 5, "stream": false, "ok": false, "status_code": 500, "latency_ms": 10219, "error_type": "api_error", "error_message": "Internal server error", "response_chars": 0}
+{"session_id": "tenantA-user-0039", "turn": 5, "stream": false, "ok": false, "status_code": 500, "latency_ms": 10216, "error_type": "api_error", "error_message": "Internal server error", "response_chars": 0}
+{"session_id": "tenantA-user-0040", "turn": 5, "stream": true, "ok": false, "status_code": 503, "latency_ms": 4012, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0041", "turn": 5, "stream": false, "ok": false, "status_code": 503, "latency_ms": 5553, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0042", "turn": 5, "stream": false, "ok": false, "status_code": 500, "latency_ms": 9761, "error_type": "api_error", "error_message": "Internal server error", "response_chars": 0}
+{"session_id": "tenantA-user-0043", "turn": 5, "stream": true, "ok": false, "status_code": 500, "latency_ms": 10736, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0044", "turn": 5, "stream": true, "ok": false, "status_code": 500, "latency_ms": 10197, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0045", "turn": 5, "stream": true, "ok": false, "status_code": 503, "latency_ms": 5523, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0046", "turn": 5, "stream": false, "ok": false, "status_code": 500, "latency_ms": 10274, "error_type": "api_error", "error_message": "Internal server error", "response_chars": 0}
+{"session_id": "tenantA-user-0047", "turn": 5, "stream": false, "ok": false, "status_code": 500, "latency_ms": 10193, "error_type": "api_error", "error_message": "Internal server error", "response_chars": 0}
+{"session_id": "tenantA-user-0048", "turn": 5, "stream": true, "ok": false, "status_code": 500, "latency_ms": 10212, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0049", "turn": 5, "stream": false, "ok": false, "status_code": 503, "latency_ms": 5185, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0050", "turn": 5, "stream": true, "ok": false, "status_code": 500, "latency_ms": 10177, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0051", "turn": 5, "stream": false, "ok": false, "status_code": 500, "latency_ms": 10484, "error_type": "api_error", "error_message": "Internal server error", "response_chars": 0}
+{"session_id": "tenantA-user-0052", "turn": 5, "stream": false, "ok": false, "status_code": 500, "latency_ms": 10209, "error_type": "api_error", "error_message": "Internal server error", "response_chars": 0}
+{"session_id": "tenantA-user-0053", "turn": 5, "stream": true, "ok": false, "status_code": 500, "latency_ms": 10204, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0054", "turn": 5, "stream": true, "ok": false, "status_code": 500, "latency_ms": 10186, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0055", "turn": 5, "stream": true, "ok": false, "status_code": 503, "latency_ms": 6461, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0056", "turn": 5, "stream": false, "ok": false, "status_code": 500, "latency_ms": 10187, "error_type": "api_error", "error_message": "Internal server error", "response_chars": 0}
+{"session_id": "tenantA-user-0057", "turn": 5, "stream": true, "ok": false, "status_code": 500, "latency_ms": 10969, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0058", "turn": 5, "stream": true, "ok": false, "status_code": 500, "latency_ms": 10967, "error_type": "http_500", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0059", "turn": 5, "stream": false, "ok": false, "status_code": 500, "latency_ms": 10198, "error_type": "api_error", "error_message": "Internal server error", "response_chars": 0}
+{"session_id": "tenantA-user-0060", "turn": 5, "stream": false, "ok": false, "status_code": 503, "latency_ms": 5255, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0061", "turn": 5, "stream": false, "ok": false, "status_code": 503, "latency_ms": 5303, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0062", "turn": 5, "stream": true, "ok": false, "status_code": 503, "latency_ms": 5302, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0063", "turn": 5, "stream": false, "ok": false, "status_code": 503, "latency_ms": 5545, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0064", "turn": 5, "stream": true, "ok": false, "status_code": 503, "latency_ms": 5656, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0065", "turn": 5, "stream": false, "ok": false, "status_code": 503, "latency_ms": 5653, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0066", "turn": 5, "stream": true, "ok": false, "status_code": 503, "latency_ms": 5683, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0067", "turn": 5, "stream": true, "ok": false, "status_code": 503, "latency_ms": 6228, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0068", "turn": 5, "stream": true, "ok": false, "status_code": 503, "latency_ms": 5779, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0069", "turn": 5, "stream": false, "ok": false, "status_code": 503, "latency_ms": 5951, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0070", "turn": 5, "stream": false, "ok": false, "status_code": 503, "latency_ms": 5251, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0071", "turn": 5, "stream": true, "ok": false, "status_code": 503, "latency_ms": 5305, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0072", "turn": 5, "stream": true, "ok": false, "status_code": 503, "latency_ms": 5304, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0073", "turn": 5, "stream": true, "ok": false, "status_code": 503, "latency_ms": 5553, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0074", "turn": 5, "stream": false, "ok": false, "status_code": 503, "latency_ms": 5655, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0075", "turn": 5, "stream": true, "ok": false, "status_code": 503, "latency_ms": 5654, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0076", "turn": 5, "stream": true, "ok": false, "status_code": 503, "latency_ms": 5687, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0077", "turn": 5, "stream": true, "ok": false, "status_code": 503, "latency_ms": 6234, "error_type": "http_503", "error_message": "", "response_chars": 0}
+{"session_id": "tenantA-user-0078", "turn": 5, "stream": false, "ok": false, "status_code": 503, "latency_ms": 5628, "error_type": "overloaded_error", "error_message": "Upstream service unavailable", "response_chars": 0}
+{"session_id": "tenantA-user-0079", "turn": 5, "stream": true, "ok": false, "status_code": 503, "latency_ms": 5813, "error_type": "http_503", "error_message": "", "response_chars": 0}

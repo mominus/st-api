@@ -8,10 +8,12 @@ and post-call persistence for all protocol adapters.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
 import random
+import re
 import time
 import uuid
 from dataclasses import dataclass
@@ -40,6 +42,7 @@ from app.services.token_counter import TokenCounter, get_token_counter
 
 logger = logging.getLogger(__name__)
 ACCOUNT_SELECT_RETRY_DELAY_SECONDS = 0.08
+_SESSION_HINT_ALLOWED_PATTERN = re.compile(r"[^a-zA-Z0-9._:@/-]+")
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -49,6 +52,7 @@ def _env_bool(name: str, default: bool) -> bool:
 ENABLE_REQUEST_LOG_PERSIST = _env_bool("ENABLE_REQUEST_LOG_PERSIST", True)
 ENABLE_CALL_LOG_PERSIST = _env_bool("ENABLE_CALL_LOG_PERSIST", True)
 ENABLE_SYSTEM_STATS_PERSIST = _env_bool("ENABLE_SYSTEM_STATS_PERSIST", True)
+AUTO_DISABLE_ON_PERMISSION_DENIED = _env_bool("AUTO_DISABLE_ON_PERMISSION_DENIED", False)
 CALL_LOG_SAMPLE_RATE = min(
     1.0,
     max(0.0, float(os.getenv("CALL_LOG_SAMPLE_RATE", "1.0"))),
@@ -147,13 +151,17 @@ class GatewayRuntime:
             )
 
         input_mapping = await self.get_model_input_mapping(session, model)
-        return ResolvedRequest(
+        resolved = ResolvedRequest(
             request_id=request_id or uuid.uuid4().hex[:24],
             model=model,
             api_key=api_key_obj,
             account=account,
             input_mapping=input_mapping,
         )
+        # Release DB connection early before long upstream inference call.
+        # A fresh transaction will be opened lazily for later persistence writes.
+        await session.commit()
+        return resolved
 
     def _map_validation_error(self, message: str) -> APIError:
         lowered = message.lower()
@@ -224,6 +232,117 @@ class GatewayRuntime:
     # ------------------------------------------------------------------
     # Backend IO
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def resolve_client_ip(
+        *,
+        headers: Any,
+        fallback_client_ip: Optional[str],
+    ) -> Optional[str]:
+        """Resolve client IP from reverse-proxy headers."""
+        for header_name in ("cf-connecting-ip", "true-client-ip", "x-forwarded-for", "x-real-ip"):
+            raw_value = headers.get(header_name) if headers is not None else None
+            if not raw_value:
+                continue
+            value = str(raw_value).strip()
+            if header_name == "x-forwarded-for":
+                value = value.split(",", 1)[0].strip()
+            if value:
+                return value
+        if fallback_client_ip:
+            value = str(fallback_client_ip).strip()
+            if value:
+                return value
+        return None
+
+    @staticmethod
+    def _sanitize_session_hint(session_hint: Optional[str]) -> Optional[str]:
+        if not session_hint:
+            return None
+        compact = _SESSION_HINT_ALLOWED_PATTERN.sub("-", str(session_hint).strip())
+        compact = compact.strip("-._:/")
+        if not compact:
+            return None
+        return compact[:64]
+
+    def resolve_session_hint(
+        self,
+        *,
+        headers: Any,
+        payload: Optional[Dict[str, Any]] = None,
+        allow_user_field: bool = True,
+    ) -> Optional[str]:
+        """
+        Resolve stable client session hint from common header/body conventions.
+        """
+        header_candidates = (
+            "x-st-session-id",
+            "x-session-id",
+        )
+        for key in header_candidates:
+            raw = headers.get(key) if headers is not None else None
+            sanitized = self._sanitize_session_hint(raw)
+            if sanitized:
+                return sanitized
+
+        if not isinstance(payload, dict):
+            return None
+
+        direct_candidates = (
+            "st_session_id",
+            "session_id",
+            "sessionId",
+        )
+        for key in direct_candidates:
+            sanitized = self._sanitize_session_hint(payload.get(key))
+            if sanitized:
+                return sanitized
+
+        metadata = payload.get("metadata")
+        if isinstance(metadata, dict):
+            metadata_candidates = (
+                "st_session_id",
+                "session_id",
+                "sessionId",
+                "user_id",
+                "user",
+            )
+            for key in metadata_candidates:
+                sanitized = self._sanitize_session_hint(metadata.get(key))
+                if sanitized:
+                    return sanitized
+
+        if allow_user_field:
+            sanitized = self._sanitize_session_hint(payload.get("user"))
+            if sanitized:
+                return sanitized
+
+        return None
+
+    def resolve_backend_user_id(
+        self,
+        *,
+        resolved: ResolvedRequest,
+        request_id: str,
+        session_hint: Optional[str],
+        client_ip: Optional[str],
+        user_agent: Optional[str],
+    ) -> str:
+        """
+        Build isolated upstream user_id.
+
+        - If caller provides a stable session hint, keep context within that session.
+        - Otherwise default to request-scoped identity to avoid cross-user bleed.
+        """
+        sanitized_hint = self._sanitize_session_hint(session_hint)
+        if sanitized_hint:
+            return f"api:{resolved.api_key.id}:session:{sanitized_hint}"
+
+        # Privacy-first default: request-level isolation.
+        # Keep a short fingerprint suffix for debugging observability only.
+        identity_material = f"{client_ip or 'na'}|{user_agent or 'na'}|{request_id}"
+        fingerprint = hashlib.sha256(identity_material.encode("utf-8")).hexdigest()[:12]
+        return f"api:{resolved.api_key.id}:req:{request_id}:{fingerprint}"
 
     def build_backend_payload(
         self,
@@ -443,6 +562,12 @@ class GatewayRuntime:
         error_message: str,
     ) -> None:
         try:
+            await self._adapt_account_state_on_error(
+                session=session,
+                resolved=resolved,
+                error_message=error_message,
+            )
+
             request_id = resolved.request_id if resolved else uuid.uuid4().hex[:24]
             api_key_prefix = resolved.api_key.key_prefix if resolved else None
             account_id = resolved.account.id if resolved else None
@@ -491,6 +616,59 @@ class GatewayRuntime:
         except Exception:
             await session.rollback()
             logger.exception("Failed to persist error metrics")
+
+    async def _adapt_account_state_on_error(
+        self,
+        *,
+        session: AsyncSession,
+        resolved: Optional[ResolvedRequest],
+        error_message: str,
+    ) -> None:
+        """Apply defensive account state transitions for upstream hard failures."""
+        if resolved is None:
+            return
+
+        normalized = (error_message or "").strip().lower()
+        if not normalized:
+            return
+
+        try:
+            if "daily token quota exceeded" in normalized:
+                changed = await self.account_pool.mark_account_exhausted(
+                    session,
+                    resolved.account.id,
+                    enforce_quota_block=True,
+                )
+                if changed:
+                    logger.warning(
+                        "Auto-marked account exhausted after upstream quota error: account_id=%s model=%s",
+                        resolved.account.id,
+                        resolved.model,
+                    )
+                return
+
+            if normalized == "permission denied":
+                if not AUTO_DISABLE_ON_PERMISSION_DENIED:
+                    logger.warning(
+                        "Permission denied from upstream (auto-disable disabled): account_id=%s model=%s",
+                        resolved.account.id,
+                        resolved.model,
+                    )
+                    return
+                updated = await self.account_pool.update_account(
+                    session,
+                    resolved.account.id,
+                    status="disabled",
+                )
+                if updated is not None:
+                    logger.warning(
+                        "Auto-disabled account after upstream permission error: account_id=%s model=%s",
+                        resolved.account.id,
+                        resolved.model,
+                    )
+                return
+        except Exception:
+            logger.exception("Failed to adapt account state for upstream error")
 
     # ------------------------------------------------------------------
     # Error mapping

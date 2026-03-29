@@ -66,9 +66,10 @@ def test_get_available_account_recovers_stale_exhausted_status():
     selected = asyncio.run(service.get_available_account(session, "claude-opus-4-6"))
 
     assert selected is stale
-    assert stale.status == "active"
-    assert stale.last_used_at is not None
-    assert session.flush_calls >= 1
+    # Selection phase is pure-read; no status/last_used mutations here.
+    assert stale.status == "exhausted"
+    assert stale.last_used_at is None
+    assert session.flush_calls == 0
     assert session.commit_calls == 0
 
 
@@ -107,6 +108,7 @@ def test_get_available_account_marks_quota_blocked_active_as_exhausted():
     selected = asyncio.run(service.get_available_account(session, "claude-opus-4-6"))
 
     assert selected is None
-    assert blocked.status == "exhausted"
-    assert blocked.updated_at is not None
-    assert session.flush_calls >= 1
+    # Selection phase is pure-read; exhausted state is handled in write path.
+    assert blocked.status == "active"
+    assert blocked.updated_at is None
+    assert session.flush_calls == 0

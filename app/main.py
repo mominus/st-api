@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from contextlib import asynccontextmanager
+import asyncio
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -166,14 +167,32 @@ async def log_requests(request: Request, call_next):
     
     if should_track:
         limiter = get_concurrency_limiter()
+        request_queue_timeout = float(
+            os.getenv(
+                "REQUEST_QUEUE_TIMEOUT_SECONDS",
+                os.getenv("QUEUE_TIMEOUT_SECONDS", "8"),
+            )
+        )
         start_time = time.time()
         try:
-            async with limiter.acquire_request():
+            async with limiter.acquire_request(timeout=request_queue_timeout):
                 response = await call_next(request)
                 # 记录响应时间
                 elapsed = (time.time() - start_time) * 1000  # 毫秒
                 limiter.record_response_time(elapsed)
                 return response
+        except asyncio.TimeoutError:
+            return JSONResponse(
+                status_code=429,
+                content={
+                    "error": {
+                        "message": "Server is busy. Please retry later.",
+                        "type": "rate_limit_error",
+                        "code": "server_overloaded",
+                    }
+                },
+                headers={"Retry-After": "3"},
+            )
         except Exception as e:
             # 请求被拒绝或出错
             logger.warning(f"Request rejected or failed: {e}")

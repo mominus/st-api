@@ -1,0 +1,288 @@
+{
+  "started_at_utc": "20260328T174723Z",
+  "config": {
+    "base_url": "http://127.0.0.1:18080",
+    "model": "claude-opus-4-6",
+    "sessions": 140,
+    "turns": 12,
+    "concurrency": 220,
+    "stream_ratio": 0.72,
+    "max_history_messages": 30,
+    "max_tokens": 260,
+    "request_timeout_seconds": 40.0
+  },
+  "summary": {
+    "total_requests": 1680,
+    "success_requests": 836,
+    "failed_requests": 844,
+    "success_rate": 0.4976,
+    "max_turn_depth_observed": 12
+  },
+  "latency_ms": {
+    "min": 858,
+    "max": 53032,
+    "mean": 31930.52,
+    "p50": 40081.0,
+    "p95": 43095.0,
+    "p99": 49512.0
+  },
+  "status_code_distribution": {
+    "200": 872,
+    "0": 792,
+    "429": 14,
+    "500": 1,
+    "502": 1
+  },
+  "request_mode_distribution": {
+    "non_stream": 463,
+    "stream": 1217
+  },
+  "error_type_distribution": {
+    "ReadTimeout": 792,
+    "api_error": 37,
+    "rate_limit_error": 14,
+    "http_500": 1
+  },
+  "failure_samples": [
+    {
+      "session_id": "tenantA-user-0045",
+      "turn": 0,
+      "stream": true,
+      "status_code": 0,
+      "error_type": "ReadTimeout",
+      "error_message": ""
+    },
+    {
+      "session_id": "tenantA-user-0046",
+      "turn": 0,
+      "stream": true,
+      "status_code": 0,
+      "error_type": "ReadTimeout",
+      "error_message": ""
+    },
+    {
+      "session_id": "tenantA-user-0047",
+      "turn": 0,
+      "stream": true,
+      "status_code": 0,
+      "error_type": "ReadTimeout",
+      "error_message": ""
+    },
+    {
+      "session_id": "tenantA-user-0048",
+      "turn": 0,
+      "stream": true,
+      "status_code": 0,
+      "error_type": "ReadTimeout",
+      "error_message": ""
+    },
+    {
+      "session_id": "tenantA-user-0049",
+      "turn": 0,
+      "stream": false,
+      "status_code": 0,
+      "error_type": "ReadTimeout",
+      "error_message": ""
+    },
+    {
+      "session_id": "tenantA-user-0050",
+      "turn": 0,
+      "stream": true,
+      "status_code": 0,
+      "error_type": "ReadTimeout",
+      "error_message": ""
+    },
+    {
+      "session_id": "tenantA-user-0051",
+      "turn": 0,
+      "stream": true,
+      "status_code": 0,
+      "error_type": "ReadTimeout",
+      "error_message": ""
+    },
+    {
+      "session_id": "tenantA-user-0052",
+      "turn": 0,
+      "stream": true,
+      "status_code": 0,
+      "error_type": "ReadTimeout",
+      "error_message": ""
+    },
+    {
+      "session_id": "tenantA-user-0053",
+      "turn": 0,
+      "stream": true,
+      "status_code": 0,
+      "error_type": "ReadTimeout",
+      "error_message": ""
+    },
+    {
+      "session_id": "tenantA-user-0054",
+      "turn": 0,
+      "stream": true,
+      "status_code": 0,
+      "error_type": "ReadTimeout",
+      "error_message": ""
+    },
+    {
+      "session_id": "tenantA-user-0055",
+      "turn": 0,
+      "stream": true,
+      "status_code": 0,
+      "error_type": "ReadTimeout",
+      "error_message": ""
+    },
+    {
+      "session_id": "tenantA-user-0056",
+      "turn": 0,
+      "stream": true,
+      "status_code": 0,
+      "error_type": "ReadTimeout",
+      "error_message": ""
+    },
+    {
+      "session_id": "tenantA-user-0057",
+      "turn": 0,
+      "stream": false,
+      "status_code": 0,
+      "error_type": "ReadTimeout",
+      "error_message": ""
+    },
+    {
+      "session_id": "tenantA-user-0058",
+      "turn": 0,
+      "stream": false,
+      "status_code": 0,
+      "error_type": "ReadTimeout",
+      "error_message": ""
+    },
+    {
+      "session_id": "tenantA-user-0059",
+      "turn": 0,
+      "stream": true,
+      "status_code": 0,
+      "error_type": "ReadTimeout",
+      "error_message": ""
+    },
+    {
+      "session_id": "tenantA-user-0060",
+      "turn": 0,
+      "stream": true,
+      "status_code": 0,
+      "error_type": "ReadTimeout",
+      "error_message": ""
+    },
+    {
+      "session_id": "tenantA-user-0061",
+      "turn": 0,
+      "stream": true,
+      "status_code": 0,
+      "error_type": "ReadTimeout",
+      "error_message": ""
+    },
+    {
+      "session_id": "tenantA-user-0062",
+      "turn": 0,
+      "stream": true,
+      "status_code": 0,
+      "error_type": "ReadTimeout",
+      "error_message": ""
+    },
+    {
+      "session_id": "tenantA-user-0063",
+      "turn": 0,
+      "stream": true,
+      "status_code": 0,
+      "error_type": "ReadTimeout",
+      "error_message": ""
+    },
+    {
+      "session_id": "tenantA-user-0064",
+      "turn": 0,
+      "stream": true,
+      "status_code": 0,
+      "error_type": "ReadTimeout",
+      "error_message": ""
+    },
+    {
+      "session_id": "tenantA-user-0065",
+      "turn": 0,
+      "stream": true,
+      "status_code": 0,
+      "error_type": "ReadTimeout",
+      "error_message": ""
+    },
+    {
+      "session_id": "tenantA-user-0066",
+      "turn": 0,
+      "stream": true,
+      "status_code": 0,
+      "error_type": "ReadTimeout",
+      "error_message": ""
+    },
+    {
+      "session_id": "tenantA-user-0067",
+      "turn": 0,
+      "stream": false,
+      "status_code": 0,
+      "error_type": "ReadTimeout",
+      "error_message": ""
+    },
+    {
+      "session_id": "tenantA-user-0068",
+      "turn": 0,
+      "stream": true,
+      "status_code": 0,
+      "error_type": "ReadTimeout",
+      "error_message": ""
+    },
+    {
+      "session_id": "tenantA-user-0069",
+      "turn": 0,
+      "stream": true,
+      "status_code": 0,
+      "error_type": "ReadTimeout",
+      "error_message": ""
+    },
+    {
+      "session_id": "tenantA-user-0070",
+      "turn": 0,
+      "stream": true,
+      "status_code": 0,
+      "error_type": "ReadTimeout",
+      "error_message": ""
+    },
+    {
+      "session_id": "tenantA-user-0071",
+      "turn": 0,
+      "stream": true,
+      "status_code": 0,
+      "error_type": "ReadTimeout",
+      "error_message": ""
+    },
+    {
+      "session_id": "tenantA-user-0072",
+      "turn": 0,
+      "stream": true,
+      "status_code": 0,
+      "error_type": "ReadTimeout",
+      "error_message": ""
+    },
+    {
+      "session_id": "tenantA-user-0073",
+      "turn": 0,
+      "stream": false,
+      "status_code": 0,
+      "error_type": "ReadTimeout",
+      "error_message": ""
+    },
+    {
+      "session_id": "tenantA-user-0074",
+      "turn": 0,
+      "stream": false,
+      "status_code": 0,
+      "error_type": "ReadTimeout",
+      "error_message": ""
+    }
+  ]
+}

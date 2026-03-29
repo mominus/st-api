@@ -1,0 +1,285 @@
+{
+  "started_at_utc": "20260329T004720Z",
+  "config": {
+    "base_url": "http://127.0.0.1:18080",
+    "model": "claude-opus-4-6",
+    "sessions": 80,
+    "turns": 6,
+    "concurrency": 60,
+    "stream_ratio": 0.6,
+    "max_history_messages": 20,
+    "max_tokens": 160,
+    "request_timeout_seconds": 45.0
+  },
+  "summary": {
+    "total_requests": 480,
+    "success_requests": 0,
+    "failed_requests": 480,
+    "success_rate": 0.0,
+    "max_turn_depth_observed": 6
+  },
+  "latency_ms": {
+    "min": 1663,
+    "max": 11409,
+    "mean": 6787.86,
+    "p50": 5802.0,
+    "p95": 10794.0,
+    "p99": 11263.0
+  },
+  "status_code_distribution": {
+    "503": 294,
+    "500": 186
+  },
+  "request_mode_distribution": {
+    "non_stream": 192,
+    "stream": 288
+  },
+  "error_type_distribution": {
+    "overloaded_error": 115,
+    "http_503": 179,
+    "api_error": 77,
+    "http_500": 109
+  },
+  "failure_samples": [
+    {
+      "session_id": "tenantA-user-0000",
+      "turn": 0,
+      "stream": false,
+      "status_code": 503,
+      "error_type": "overloaded_error",
+      "error_message": "Upstream service unavailable"
+    },
+    {
+      "session_id": "tenantA-user-0001",
+      "turn": 0,
+      "stream": true,
+      "status_code": 503,
+      "error_type": "http_503",
+      "error_message": ""
+    },
+    {
+      "session_id": "tenantA-user-0002",
+      "turn": 0,
+      "stream": false,
+      "status_code": 503,
+      "error_type": "overloaded_error",
+      "error_message": "Upstream service unavailable"
+    },
+    {
+      "session_id": "tenantA-user-0003",
+      "turn": 0,
+      "stream": true,
+      "status_code": 503,
+      "error_type": "http_503",
+      "error_message": ""
+    },
+    {
+      "session_id": "tenantA-user-0004",
+      "turn": 0,
+      "stream": false,
+      "status_code": 503,
+      "error_type": "overloaded_error",
+      "error_message": "Upstream service unavailable"
+    },
+    {
+      "session_id": "tenantA-user-0005",
+      "turn": 0,
+      "stream": true,
+      "status_code": 503,
+      "error_type": "http_503",
+      "error_message": ""
+    },
+    {
+      "session_id": "tenantA-user-0006",
+      "turn": 0,
+      "stream": false,
+      "status_code": 503,
+      "error_type": "overloaded_error",
+      "error_message": "Upstream service unavailable"
+    },
+    {
+      "session_id": "tenantA-user-0007",
+      "turn": 0,
+      "stream": true,
+      "status_code": 503,
+      "error_type": "http_503",
+      "error_message": ""
+    },
+    {
+      "session_id": "tenantA-user-0008",
+      "turn": 0,
+      "stream": true,
+      "status_code": 503,
+      "error_type": "http_503",
+      "error_message": ""
+    },
+    {
+      "session_id": "tenantA-user-0009",
+      "turn": 0,
+      "stream": true,
+      "status_code": 503,
+      "error_type": "http_503",
+      "error_message": ""
+    },
+    {
+      "session_id": "tenantA-user-0010",
+      "turn": 0,
+      "stream": false,
+      "status_code": 503,
+      "error_type": "overloaded_error",
+      "error_message": "Upstream service unavailable"
+    },
+    {
+      "session_id": "tenantA-user-0011",
+      "turn": 0,
+      "stream": true,
+      "status_code": 503,
+      "error_type": "http_503",
+      "error_message": ""
+    },
+    {
+      "session_id": "tenantA-user-0012",
+      "turn": 0,
+      "stream": false,
+      "status_code": 503,
+      "error_type": "overloaded_error",
+      "error_message": "Upstream service unavailable"
+    },
+    {
+      "session_id": "tenantA-user-0013",
+      "turn": 0,
+      "stream": false,
+      "status_code": 503,
+      "error_type": "overloaded_error",
+      "error_message": "Upstream service unavailable"
+    },
+    {
+      "session_id": "tenantA-user-0014",
+      "turn": 0,
+      "stream": false,
+      "status_code": 503,
+      "error_type": "overloaded_error",
+      "error_message": "Upstream service unavailable"
+    },
+    {
+      "session_id": "tenantA-user-0015",
+      "turn": 0,
+      "stream": false,
+      "status_code": 503,
+      "error_type": "overloaded_error",
+      "error_message": "Upstream service unavailable"
+    },
+    {
+      "session_id": "tenantA-user-0016",
+      "turn": 0,
+      "stream": false,
+      "status_code": 503,
+      "error_type": "overloaded_error",
+      "error_message": "Upstream service unavailable"
+    },
+    {
+      "session_id": "tenantA-user-0017",
+      "turn": 0,
+      "stream": false,
+      "status_code": 503,
+      "error_type": "overloaded_error",
+      "error_message": "Upstream service unavailable"
+    },
+    {
+      "session_id": "tenantA-user-0018",
+      "turn": 0,
+      "stream": true,
+      "status_code": 503,
+      "error_type": "http_503",
+      "error_message": ""
+    },
+    {
+      "session_id": "tenantA-user-0019",
+      "turn": 0,
+      "stream": true,
+      "status_code": 503,
+      "error_type": "http_503",
+      "error_message": ""
+    },
+    {
+      "session_id": "tenantA-user-0020",
+      "turn": 0,
+      "stream": true,
+      "status_code": 503,
+      "error_type": "http_503",
+      "error_message": ""
+    },
+    {
+      "session_id": "tenantA-user-0021",
+      "turn": 0,
+      "stream": true,
+      "status_code": 503,
+      "error_type": "http_503",
+      "error_message": ""
+    },
+    {
+      "session_id": "tenantA-user-0022",
+      "turn": 0,
+      "stream": false,
+      "status_code": 503,
+      "error_type": "overloaded_error",
+      "error_message": "Upstream service unavailable"
+    },
+    {
+      "session_id": "tenantA-user-0023",
+      "turn": 0,
+      "stream": false,
+      "status_code": 503,
+      "error_type": "overloaded_error",
+      "error_message": "Upstream service unavailable"
+    },
+    {
+      "session_id": "tenantA-user-0024",
+      "turn": 0,
+      "stream": true,
+      "status_code": 503,
+      "error_type": "http_503",
+      "error_message": ""
+    },
+    {
+      "session_id": "tenantA-user-0025",
+      "turn": 0,
+      "stream": false,
+      "status_code": 503,
+      "error_type": "overloaded_error",
+      "error_message": "Upstream service unavailable"
+    },
+    {
+      "session_id": "tenantA-user-0026",
+      "turn": 0,
+      "stream": false,
+      "status_code": 500,
+      "error_type": "api_error",
+      "error_message": "Internal server error"
+    },
+    {
+      "session_id": "tenantA-user-0027",
+      "turn": 0,
+      "stream": true,
+      "status_code": 500,
+      "error_type": "http_500",
+      "error_message": ""
+    },
+    {
+      "session_id": "tenantA-user-0028",
+      "turn": 0,
+      "stream": true,
+      "status_code": 500,
+      "error_type": "http_500",
+      "error_message": ""
+    },
+    {
+      "session_id": "tenantA-user-0029",
+      "turn": 0,
+      "stream": true,
+      "status_code": 500,
+      "error_type": "http_500",
+      "error_message": ""
+    }
+  ]
+}

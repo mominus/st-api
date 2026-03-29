@@ -1,0 +1,285 @@
+{
+  "started_at_utc": "20260329T005943Z",
+  "config": {
+    "base_url": "http://127.0.0.1:18080",
+    "model": "claude-opus-4-6",
+    "sessions": 80,
+    "turns": 6,
+    "concurrency": 60,
+    "stream_ratio": 0.6,
+    "max_history_messages": 20,
+    "max_tokens": 160,
+    "request_timeout_seconds": 45.0
+  },
+  "summary": {
+    "total_requests": 480,
+    "success_requests": 325,
+    "failed_requests": 155,
+    "success_rate": 0.6771,
+    "max_turn_depth_observed": 6
+  },
+  "latency_ms": {
+    "min": 6159,
+    "max": 45047,
+    "mean": 15536.1,
+    "p50": 15210.0,
+    "p95": 28519.0,
+    "p99": 34443.0
+  },
+  "status_code_distribution": {
+    "200": 325,
+    "500": 154,
+    "0": 1
+  },
+  "request_mode_distribution": {
+    "non_stream": 192,
+    "stream": 288
+  },
+  "error_type_distribution": {
+    "http_500": 94,
+    "api_error": 60,
+    "ReadTimeout": 1
+  },
+  "failure_samples": [
+    {
+      "session_id": "tenantA-user-0031",
+      "turn": 0,
+      "stream": true,
+      "status_code": 500,
+      "error_type": "http_500",
+      "error_message": ""
+    },
+    {
+      "session_id": "tenantA-user-0032",
+      "turn": 0,
+      "stream": true,
+      "status_code": 500,
+      "error_type": "http_500",
+      "error_message": ""
+    },
+    {
+      "session_id": "tenantA-user-0033",
+      "turn": 0,
+      "stream": false,
+      "status_code": 500,
+      "error_type": "api_error",
+      "error_message": "Internal server error"
+    },
+    {
+      "session_id": "tenantA-user-0034",
+      "turn": 0,
+      "stream": false,
+      "status_code": 500,
+      "error_type": "api_error",
+      "error_message": "Internal server error"
+    },
+    {
+      "session_id": "tenantA-user-0035",
+      "turn": 0,
+      "stream": true,
+      "status_code": 500,
+      "error_type": "http_500",
+      "error_message": ""
+    },
+    {
+      "session_id": "tenantA-user-0036",
+      "turn": 0,
+      "stream": true,
+      "status_code": 500,
+      "error_type": "http_500",
+      "error_message": ""
+    },
+    {
+      "session_id": "tenantA-user-0037",
+      "turn": 0,
+      "stream": true,
+      "status_code": 500,
+      "error_type": "http_500",
+      "error_message": ""
+    },
+    {
+      "session_id": "tenantA-user-0038",
+      "turn": 0,
+      "stream": false,
+      "status_code": 500,
+      "error_type": "api_error",
+      "error_message": "Internal server error"
+    },
+    {
+      "session_id": "tenantA-user-0039",
+      "turn": 0,
+      "stream": true,
+      "status_code": 500,
+      "error_type": "http_500",
+      "error_message": ""
+    },
+    {
+      "session_id": "tenantA-user-0040",
+      "turn": 0,
+      "stream": true,
+      "status_code": 500,
+      "error_type": "http_500",
+      "error_message": ""
+    },
+    {
+      "session_id": "tenantA-user-0041",
+      "turn": 0,
+      "stream": false,
+      "status_code": 500,
+      "error_type": "api_error",
+      "error_message": "Internal server error"
+    },
+    {
+      "session_id": "tenantA-user-0042",
+      "turn": 0,
+      "stream": false,
+      "status_code": 500,
+      "error_type": "api_error",
+      "error_message": "Internal server error"
+    },
+    {
+      "session_id": "tenantA-user-0043",
+      "turn": 0,
+      "stream": false,
+      "status_code": 500,
+      "error_type": "api_error",
+      "error_message": "Internal server error"
+    },
+    {
+      "session_id": "tenantA-user-0044",
+      "turn": 0,
+      "stream": false,
+      "status_code": 500,
+      "error_type": "api_error",
+      "error_message": "Internal server error"
+    },
+    {
+      "session_id": "tenantA-user-0045",
+      "turn": 0,
+      "stream": true,
+      "status_code": 500,
+      "error_type": "http_500",
+      "error_message": ""
+    },
+    {
+      "session_id": "tenantA-user-0046",
+      "turn": 0,
+      "stream": true,
+      "status_code": 500,
+      "error_type": "http_500",
+      "error_message": ""
+    },
+    {
+      "session_id": "tenantA-user-0047",
+      "turn": 0,
+      "stream": true,
+      "status_code": 500,
+      "error_type": "http_500",
+      "error_message": ""
+    },
+    {
+      "session_id": "tenantA-user-0048",
+      "turn": 0,
+      "stream": true,
+      "status_code": 500,
+      "error_type": "http_500",
+      "error_message": ""
+    },
+    {
+      "session_id": "tenantA-user-0049",
+      "turn": 0,
+      "stream": false,
+      "status_code": 500,
+      "error_type": "api_error",
+      "error_message": "Internal server error"
+    },
+    {
+      "session_id": "tenantA-user-0050",
+      "turn": 0,
+      "stream": true,
+      "status_code": 500,
+      "error_type": "http_500",
+      "error_message": ""
+    },
+    {
+      "session_id": "tenantA-user-0051",
+      "turn": 0,
+      "stream": true,
+      "status_code": 500,
+      "error_type": "http_500",
+      "error_message": ""
+    },
+    {
+      "session_id": "tenantA-user-0052",
+      "turn": 0,
+      "stream": true,
+      "status_code": 500,
+      "error_type": "http_500",
+      "error_message": ""
+    },
+    {
+      "session_id": "tenantA-user-0053",
+      "turn": 0,
+      "stream": true,
+      "status_code": 500,
+      "error_type": "http_500",
+      "error_message": ""
+    },
+    {
+      "session_id": "tenantA-user-0054",
+      "turn": 0,
+      "stream": true,
+      "status_code": 500,
+      "error_type": "http_500",
+      "error_message": ""
+    },
+    {
+      "session_id": "tenantA-user-0055",
+      "turn": 0,
+      "stream": false,
+      "status_code": 500,
+      "error_type": "api_error",
+      "error_message": "Internal server error"
+    },
+    {
+      "session_id": "tenantA-user-0056",
+      "turn": 0,
+      "stream": true,
+      "status_code": 500,
+      "error_type": "http_500",
+      "error_message": ""
+    },
+    {
+      "session_id": "tenantA-user-0057",
+      "turn": 0,
+      "stream": false,
+      "status_code": 500,
+      "error_type": "api_error",
+      "error_message": "Internal server error"
+    },
+    {
+      "session_id": "tenantA-user-0058",
+      "turn": 0,
+      "stream": false,
+      "status_code": 500,
+      "error_type": "api_error",
+      "error_message": "Internal server error"
+    },
+    {
+      "session_id": "tenantA-user-0059",
+      "turn": 0,
+      "stream": false,
+      "status_code": 500,
+      "error_type": "api_error",
+      "error_message": "Internal server error"
+    },
+    {
+      "session_id": "tenantA-user-0038",
+      "turn": 1,
+      "stream": true,
+      "status_code": 500,
+      "error_type": "http_500",
+      "error_message": ""
+    }
+  ]
+}

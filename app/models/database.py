@@ -4,6 +4,8 @@ SQLAlchemy Database Models
 """
 
 import os
+import logging
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from datetime import datetime, date
 from typing import Optional, AsyncGenerator
 
@@ -18,6 +20,7 @@ from sqlalchemy.orm import declarative_base
 
 # 创建基类
 Base = declarative_base()
+logger = logging.getLogger(__name__)
 
 # 数据库 URL，默认使用 SQLite
 DATABASE_URL = os.getenv(
@@ -213,11 +216,125 @@ def get_database_url() -> str:
     return os.getenv("DATABASE_URL", DATABASE_URL)
 
 
+def _get_int_env(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        logger.warning("Invalid integer env %s=%r, fallback=%s", name, raw, default)
+        return default
+
+
+def _get_float_env(name: str) -> Optional[float]:
+    raw = os.getenv(name)
+    if raw is None or raw == "":
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        logger.warning("Invalid float env %s=%r, ignored", name, raw)
+        return None
+
+
+def _log_connection_budget_hint(pool_size: int, max_overflow: int) -> None:
+    """
+    可选连接预算提示（仅日志提示，不改写用户配置）。
+    适用于托管 PostgreSQL 的 connection limit 场景。
+    """
+    limit_raw = os.getenv("DB_CONNECTION_LIMIT", "").strip()
+    if not limit_raw:
+        return
+
+    try:
+        connection_limit = max(1, int(limit_raw))
+    except ValueError:
+        logger.warning("Invalid DB_CONNECTION_LIMIT=%r, skip pool budget hint", limit_raw)
+        return
+
+    reserve = max(0, _get_int_env("DB_CONNECTION_RESERVE", 6))
+    instance_count = max(1, _get_int_env("APP_INSTANCE_COUNT", 1))
+    worker_count = max(1, _get_int_env("UVICORN_WORKERS", 1))
+
+    per_worker_pool = pool_size + max_overflow
+    estimated_peak = instance_count * worker_count * per_worker_pool
+    usable_limit = max(1, connection_limit - reserve)
+
+    if estimated_peak > usable_limit:
+        logger.warning(
+            (
+                "DB pool config may exceed PostgreSQL connection budget: "
+                "estimated_peak=%s > usable_limit=%s "
+                "(connection_limit=%s, reserve=%s, instances=%s, workers=%s, pool=%s+%s)."
+            ),
+            estimated_peak,
+            usable_limit,
+            connection_limit,
+            reserve,
+            instance_count,
+            worker_count,
+            pool_size,
+            max_overflow,
+        )
+    else:
+        logger.info(
+            (
+                "DB pool budget check passed: estimated_peak=%s, usable_limit=%s "
+                "(connection_limit=%s, reserve=%s, instances=%s, workers=%s)."
+            ),
+            estimated_peak,
+            usable_limit,
+            connection_limit,
+            reserve,
+            instance_count,
+            worker_count,
+        )
+
+
+def _normalize_database_url_for_asyncpg(db_url: str) -> str:
+    """
+    兼容托管 PostgreSQL 常见连接串：
+    - postgresql+asyncpg://...?...&sslmode=require
+    asyncpg 不支持 sslmode 参数，需改为 ssl=require。
+    """
+    if "postgresql+asyncpg" not in db_url or "sslmode=" not in db_url:
+        return db_url
+
+    try:
+        parts = urlsplit(db_url)
+        query = parse_qsl(parts.query, keep_blank_values=True)
+        normalized_query = []
+        changed = False
+        for key, value in query:
+            if key.lower() == "sslmode":
+                normalized_query.append(("ssl", value))
+                changed = True
+            else:
+                normalized_query.append((key, value))
+        if not changed:
+            return db_url
+        normalized = urlunsplit(
+            (
+                parts.scheme,
+                parts.netloc,
+                parts.path,
+                urlencode(normalized_query),
+                parts.fragment,
+            )
+        )
+        logger.info("DATABASE_URL normalized: replaced sslmode with ssl for asyncpg")
+        return normalized
+    except Exception:
+        # 解析失败时回退原值，避免启动流程被兼容逻辑阻断。
+        return db_url
+
+
 async def init_database() -> None:
     """初始化数据库，创建所有表"""
     global _engine, _async_session_factory
     
-    db_url = get_database_url()
+    db_url = _normalize_database_url_for_asyncpg(get_database_url())
     
     # 连接池配置
     pool_size = int(os.getenv("DB_POOL_SIZE", "20"))
@@ -238,15 +355,46 @@ async def init_database() -> None:
             "timeout": 60,  # 增加锁等待超时时间
             "check_same_thread": False
         }
-        # SQLite 使用 NullPool 或 StaticPool 更适合
-        engine_kwargs["pool_size"] = 5
-        engine_kwargs["max_overflow"] = 10
+        # SQLite 默认也启用可配置连接池，避免高并发下过早触发 QueuePool 超时
+        # （默认继承 DB_*，可用 SQLITE_* 单独覆盖）
+        engine_kwargs["pool_size"] = int(os.getenv("SQLITE_POOL_SIZE", str(pool_size)))
+        engine_kwargs["max_overflow"] = int(os.getenv("SQLITE_MAX_OVERFLOW", str(max_overflow)))
+        engine_kwargs["pool_timeout"] = int(os.getenv("SQLITE_POOL_TIMEOUT", str(pool_timeout)))
+        engine_kwargs["pool_recycle"] = int(os.getenv("SQLITE_POOL_RECYCLE", str(pool_recycle)))
     else:
         # PostgreSQL 等数据库使用完整连接池配置
         engine_kwargs["pool_size"] = pool_size
         engine_kwargs["max_overflow"] = max_overflow
         engine_kwargs["pool_timeout"] = pool_timeout
         engine_kwargs["pool_recycle"] = pool_recycle
+
+        # PostgreSQL/asyncpg 可选连接参数（按需配置）
+        # 仅在设置环境变量时生效，未设置则保持默认行为。
+        pg_connect_timeout = _get_float_env("POSTGRES_CONNECT_TIMEOUT_SECONDS")
+        if pg_connect_timeout is not None:
+            connect_args["timeout"] = pg_connect_timeout
+
+        pg_command_timeout = _get_float_env("POSTGRES_COMMAND_TIMEOUT_SECONDS")
+        if pg_command_timeout is not None:
+            connect_args["command_timeout"] = pg_command_timeout
+
+        server_settings = {}
+        statement_timeout_ms = os.getenv("POSTGRES_STATEMENT_TIMEOUT_MS", "").strip()
+        if statement_timeout_ms:
+            server_settings["statement_timeout"] = statement_timeout_ms
+
+        lock_timeout_ms = os.getenv("POSTGRES_LOCK_TIMEOUT_MS", "").strip()
+        if lock_timeout_ms:
+            server_settings["lock_timeout"] = lock_timeout_ms
+
+        app_name = os.getenv("POSTGRES_APPLICATION_NAME", "").strip()
+        if app_name:
+            server_settings["application_name"] = app_name
+
+        if server_settings:
+            connect_args["server_settings"] = server_settings
+
+        _log_connection_budget_hint(pool_size=pool_size, max_overflow=max_overflow)
     
     engine_kwargs["connect_args"] = connect_args
     

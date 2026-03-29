@@ -13,6 +13,11 @@ class _FakeAPIKeyService:
         )
 
 
+class _FakeSession:
+    async def commit(self):
+        return None
+
+
 class _FakeAccountPool:
     def __init__(self, picks, availability):
         self._picks = list(picks)
@@ -45,9 +50,10 @@ def test_resolve_request_retries_once_then_succeeds():
         account_pool=account_pool,
     )
     runtime.get_model_input_mapping = _none_input_mapping
+    session = _FakeSession()
     resolved = asyncio.run(
         runtime.resolve_request(
-            session=object(),
+            session=session,
             raw_key="sk-test",
             model="claude-opus-4-6",
             request_id="req_1",
@@ -75,10 +81,11 @@ def test_resolve_request_returns_quota_exceeded_when_all_accounts_exhausted():
         account_pool=account_pool,
     )
     runtime.get_model_input_mapping = _none_input_mapping
+    session = _FakeSession()
     try:
         asyncio.run(
             runtime.resolve_request(
-                session=object(),
+                session=session,
                 raw_key="sk-test",
                 model="claude-opus-4-6",
                 request_id="req_2",
@@ -110,10 +117,11 @@ def test_resolve_request_returns_service_unavailable_when_no_accounts_configured
         account_pool=account_pool,
     )
     runtime.get_model_input_mapping = _none_input_mapping
+    session = _FakeSession()
     try:
         asyncio.run(
             runtime.resolve_request(
-                session=object(),
+                session=session,
                 raw_key="sk-test",
                 model="claude-opus-4-6",
                 request_id="req_3",

@@ -92,6 +92,16 @@ class ToolParser:
         r"^\s*(?:[-*]\s*)?Perform a web search for the query:\s*(?P<query>.+?)\s*$",
         re.IGNORECASE | re.MULTILINE,
     )
+
+    # 匹配裸 JSON tool call 开始位置
+    # 示例:
+    # {"tool":"Write","arguments":{"file_path":"a","content":"b"}}
+    PLAIN_TOOL_JSON_START_PATTERN = re.compile(
+        r'(^|\n)\s*(\{\s*"tool")',
+        re.IGNORECASE,
+    )
+
+    JSON_STRING_ESCAPE_CHARS = frozenset('"\\/bfnrtu')
     
     # 工具调用 ID 前缀
     TOOL_USE_ID_PREFIX = "toolu_"
@@ -146,6 +156,12 @@ class ToolParser:
         if json_result.has_tool_calls:
             logger.debug(f"Parsed {len(json_result.tool_calls)} tool calls from JSON format")
             return json_result
+
+        # 最后尝试裸 JSON tool call
+        plain_json_result = self._parse_plain_json_format(content)
+        if plain_json_result.has_tool_calls:
+            logger.debug("Parsed tool call from plain JSON format")
+            return plain_json_result
         
         # 没有找到工具调用
         return ParseResult(text_before=content)
@@ -182,11 +198,8 @@ class ToolParser:
             json_content = match.group(3).strip()
             
             # 解析 JSON 参数
-            try:
-                arguments = json.loads(json_content) if json_content else {}
-                if not isinstance(arguments, dict):
-                    arguments = {}
-            except json.JSONDecodeError:
+            arguments = self.load_jsonish(json_content) if json_content else {}
+            if not isinstance(arguments, dict):
                 logger.warning(f"Failed to parse JSON in XML tool_use: {json_content}")
                 arguments = {}
             
@@ -227,7 +240,6 @@ class ToolParser:
         if not matches:
             return result
 
-        decoder = json.JSONDecoder()
         tool_calls: List[ParsedToolCall] = []
         result.text_before = content[:matches[0].start()].rstrip()
         trailing_after_last = ""
@@ -243,12 +255,13 @@ class ToolParser:
             arguments: Dict[str, Any] = {}
 
             if stripped_segment:
-                try:
-                    parsed_obj, end_idx = decoder.raw_decode(stripped_segment)
+                decoded = self.load_jsonish_prefix(stripped_segment)
+                if decoded is not None:
+                    parsed_obj, consumed_len = decoded
                     if isinstance(parsed_obj, dict):
                         arguments = parsed_obj
-                    trailing = stripped_segment[end_idx:]
-                except json.JSONDecodeError:
+                    trailing = stripped_segment[consumed_len:]
+                else:
                     # 兼容 WebSearch 非 JSON 参数写法:
                     # [tool_call ... name=WebSearch]
                     # Perform a web search for the query: ...
@@ -347,6 +360,170 @@ class ToolParser:
                 return query
 
         return None
+
+    @classmethod
+    def load_jsonish(cls, content: str) -> Optional[Any]:
+        """
+        宽容解析 JSON-like 文本。
+
+        Claude Code 在 Write/Edit 等工具参数中偶尔会输出未转义的引号或反斜杠，
+        这里先尝试严格 JSON，再做最小修复后重试，避免工具调用外泄。
+        """
+        stripped = (content or "").strip()
+        if not stripped:
+            return None
+
+        try:
+            return json.loads(stripped)
+        except json.JSONDecodeError:
+            repaired = cls._repair_jsonish(stripped)
+            if repaired == stripped:
+                return None
+            try:
+                return json.loads(repaired)
+            except json.JSONDecodeError as exc:
+                logger.debug("Failed to repair malformed JSON-like tool payload: %s", exc)
+                return None
+
+    @classmethod
+    def load_jsonish_prefix(cls, content: str) -> Optional[Tuple[Any, int]]:
+        """
+        解析开头处的完整 JSON-like 对象，并返回消费长度。
+        """
+        if not content:
+            return None
+
+        end_idx = cls._find_complete_jsonish_prefix_end(content)
+        if end_idx is None:
+            return None
+
+        parsed = cls.load_jsonish(content[:end_idx])
+        if parsed is None:
+            return None
+
+        consumed_len = end_idx
+        while consumed_len < len(content) and content[consumed_len] in " \t\r\n":
+            consumed_len += 1
+        return parsed, consumed_len
+
+    @classmethod
+    def _find_complete_jsonish_prefix_end(cls, content: str) -> Optional[int]:
+        if not content or content[0] not in "{[":
+            return None
+
+        depth = 0
+        in_string = False
+        escape_next = False
+
+        for idx, ch in enumerate(content):
+            if in_string:
+                if escape_next:
+                    escape_next = False
+                    continue
+
+                if ch == "\\":
+                    if cls._is_valid_json_escape(content, idx):
+                        escape_next = True
+                    continue
+
+                if ch == '"':
+                    if cls._quote_terminates_json_string(content, idx):
+                        in_string = False
+                    continue
+
+                continue
+
+            if ch == '"':
+                in_string = True
+                continue
+
+            if ch in "{[":
+                depth += 1
+                continue
+
+            if ch in "}]":
+                depth -= 1
+                if depth == 0:
+                    return idx + 1
+                if depth < 0:
+                    return None
+
+        return None
+
+    @classmethod
+    def _repair_jsonish(cls, content: str) -> str:
+        if not content:
+            return content
+
+        repaired: List[str] = []
+        in_string = False
+        escape_next = False
+
+        for idx, ch in enumerate(content):
+            if in_string:
+                if escape_next:
+                    repaired.append(ch)
+                    escape_next = False
+                    continue
+
+                if ch == "\\":
+                    if cls._is_valid_json_escape(content, idx):
+                        repaired.append(ch)
+                        escape_next = True
+                    else:
+                        repaired.append("\\\\")
+                    continue
+
+                if ch == '"':
+                    if cls._quote_terminates_json_string(content, idx):
+                        repaired.append(ch)
+                        in_string = False
+                    else:
+                        repaired.append('\\"')
+                    continue
+
+                if ch == "\n":
+                    repaired.append("\\n")
+                    continue
+
+                if ch == "\r":
+                    repaired.append("\\r")
+                    continue
+
+                if ch == "\t":
+                    repaired.append("\\t")
+                    continue
+
+                repaired.append(ch)
+                continue
+
+            repaired.append(ch)
+            if ch == '"':
+                in_string = True
+
+        if in_string:
+            repaired.append('"')
+
+        return "".join(repaired)
+
+    @classmethod
+    def _quote_terminates_json_string(cls, content: str, quote_idx: int) -> bool:
+        next_char = cls._next_non_whitespace_char(content, quote_idx + 1)
+        return next_char is None or next_char in ",:}]"
+
+    @classmethod
+    def _is_valid_json_escape(cls, content: str, slash_idx: int) -> bool:
+        next_idx = slash_idx + 1
+        return next_idx < len(content) and content[next_idx] in cls.JSON_STRING_ESCAPE_CHARS
+
+    @staticmethod
+    def _next_non_whitespace_char(content: str, start_idx: int) -> Optional[str]:
+        idx = start_idx
+        while idx < len(content) and content[idx] in " \t\r\n":
+            idx += 1
+        if idx >= len(content):
+            return None
+        return content[idx]
     
     def _parse_json_format(self, content: str) -> ParseResult:
         """
@@ -423,6 +600,57 @@ class ToolParser:
             or "[tool_call" in lowered
             or "<tool_use" in lowered
         )
+
+    def _parse_plain_json_format(self, content: str) -> ParseResult:
+        """
+        解析裸 JSON tool call。
+
+        支持模型直接输出单个 JSON 对象而不包裹 ```json 代码块。
+        """
+        result = ParseResult()
+        if not content:
+            return result
+
+        start_match = self.PLAIN_TOOL_JSON_START_PATTERN.search(content)
+        if not start_match:
+            return result
+
+        start_pos = start_match.start(2)
+        trailing = content[start_pos:]
+
+        decoded = self.load_jsonish_prefix(trailing)
+        if decoded is None:
+            return result
+        parsed_obj, end_idx = decoded
+
+        if not isinstance(parsed_obj, dict):
+            return result
+
+        tool_name = parsed_obj.get("tool")
+        if not tool_name or not isinstance(tool_name, str):
+            return result
+
+        arguments = parsed_obj.get("arguments", {})
+        if not isinstance(arguments, dict):
+            arguments = {}
+
+        parsed_call = ParsedToolCall(
+            tool_name=tool_name,
+            arguments=arguments,
+            raw_json=json.dumps(parsed_obj, ensure_ascii=False, separators=(",", ":")),
+        )
+        if not self._is_valid_tool_call(parsed_call):
+            return result
+
+        consumed_end = start_pos + end_idx
+        while consumed_end < len(content) and content[consumed_end] in " \t\r\n":
+            consumed_end += 1
+
+        result.text_before = content[:start_pos].rstrip()
+        result.tool_calls = [parsed_call]
+        result.has_tool_calls = True
+        result.text_after = content[consumed_end:].lstrip()
+        return result
     
     def _parse_json_block(self, json_str: str) -> Optional[ParsedToolCall]:
         """
@@ -435,31 +663,28 @@ class ToolParser:
             ParsedToolCall 或 None（如果解析失败）
         """
         try:
-            data = json.loads(json_str)
-            
+            data = self.load_jsonish(json_str)
+
             # 检查是否是工具调用格式
             if not isinstance(data, dict):
                 return None
-            
+
             # 提取工具名称
             tool_name = data.get("tool")
             if not tool_name or not isinstance(tool_name, str):
                 return None
-            
+
             # 提取参数
             arguments = data.get("arguments", {})
             if not isinstance(arguments, dict):
                 arguments = {}
-            
+
             return ParsedToolCall(
                 tool_name=tool_name,
                 arguments=arguments,
                 raw_json=json_str
             )
-            
-        except json.JSONDecodeError as e:
-            logger.debug(f"JSON decode error: {e}")
-            return None
+
         except Exception as e:
             logger.debug(f"Error parsing JSON block: {e}")
             return None

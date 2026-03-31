@@ -287,11 +287,10 @@ class _ToolAwareTextBuffer:
         if not json_part:
             return None
 
-        decoder = json.JSONDecoder()
-        try:
-            _parsed_obj, end_idx = decoder.raw_decode(json_part)
-        except json.JSONDecodeError:
+        decoded = self._bridge._tool_parser.load_jsonish_prefix(json_part)
+        if decoded is None:
             return None
+        _parsed_obj, end_idx = decoded
 
         consumed_len = header_match.end() + leading_ws + end_idx
         while consumed_len < len(self._buffer) and self._buffer[consumed_len] in " \t\r\n":
@@ -301,11 +300,10 @@ class _ToolAwareTextBuffer:
         return consumed_len, self._is_valid_tool_segment(segment)
 
     def _consume_plain_json_tool_call(self) -> Optional[tuple[int, bool]]:
-        decoder = json.JSONDecoder()
-        try:
-            _parsed_obj, end_idx = decoder.raw_decode(self._buffer)
-        except json.JSONDecodeError:
+        decoded = self._bridge._tool_parser.load_jsonish_prefix(self._buffer)
+        if decoded is None:
             return None
+        _parsed_obj, end_idx = decoded
 
         consumed_len = end_idx
         while consumed_len < len(self._buffer) and self._buffer[consumed_len] in " \t\r\n":

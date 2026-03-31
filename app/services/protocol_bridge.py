@@ -1067,9 +1067,8 @@ class ProtocolBridge:
         if not stripped:
             return None
 
-        try:
-            parsed = json.loads(stripped)
-        except Exception:
+        parsed = self._tool_parser.load_jsonish(stripped)
+        if parsed is None:
             return None
 
         if not isinstance(parsed, dict):

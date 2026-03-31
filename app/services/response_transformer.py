@@ -897,6 +897,7 @@ class ResponseTransformer:
         STATE_BUFFERING_JSON = 1 # 缓冲 JSON 代码块状态
         STATE_BUFFERING_XML = 2  # 缓冲 XML tool_use 标签状态
         STATE_BUFFERING_BRACKET = 3  # 缓冲 [tool_call ...] 语法状态
+        STATE_BUFFERING_PLAIN_JSON = 4  # 缓冲裸 JSON tool call 状态
         
         state = STATE_TEXT
         content_index = 0
@@ -926,6 +927,10 @@ class ResponseTransformer:
         )
         BRACKET_TOOL_CALL_HEADER_PATTERN = re.compile(
             r"\[tool_call\s+id=([^\s\]]+)\s+name=([^\]]+)\]\s*",
+            re.IGNORECASE,
+        )
+        PLAIN_TOOL_JSON_START_PATTERN = re.compile(
+            r'(^|\n)\s*(\{\s*"tool")',
             re.IGNORECASE,
         )
         
@@ -1022,7 +1027,7 @@ class ResponseTransformer:
                 return None
             
             try:
-                data = json.loads(json_str)
+                data = tool_parser.load_jsonish(json_str)
                 if not isinstance(data, dict):
                     return None
                 
@@ -1063,12 +1068,9 @@ class ResponseTransformer:
             tool_id = match.group(1)
             tool_name = match.group(2)
             json_content = match.group(3).strip()
-            
-            try:
-                arguments = json.loads(json_content) if json_content else {}
-                if not isinstance(arguments, dict):
-                    arguments = {}
-            except json.JSONDecodeError:
+
+            arguments = tool_parser.load_jsonish(json_content) if json_content else {}
+            if not isinstance(arguments, dict):
                 return None, None
             
             from .tool_parser import ParsedToolCall
@@ -1103,11 +1105,10 @@ class ResponseTransformer:
             if not json_part:
                 return None, None, 0, False
 
-            decoder = json.JSONDecoder()
-            try:
-                parsed_obj, end_idx = decoder.raw_decode(json_part)
-            except json.JSONDecodeError:
+            decoded = tool_parser.load_jsonish_prefix(json_part)
+            if decoded is None:
                 return None, None, 0, False
+            parsed_obj, end_idx = decoded
 
             arguments = parsed_obj if isinstance(parsed_obj, dict) else {}
 
@@ -1125,6 +1126,39 @@ class ResponseTransformer:
             if tool_parser.validate_tool_call(parsed_call):
                 return parsed_call, tool_id, consumed_len, True
             return None, tool_id, consumed_len, True
+
+        def parse_plain_json_tool_call(buffer_content: str):
+            """从裸 JSON 对象解析工具调用。"""
+            if tool_parser is None:
+                return None, 0, False
+
+            decoded = tool_parser.load_jsonish_prefix(buffer_content)
+            if decoded is None:
+                return None, 0, False
+            parsed_obj, end_idx = decoded
+
+            arguments = {}
+            tool_name = ""
+            if isinstance(parsed_obj, dict):
+                tool_name = str(parsed_obj.get("tool") or "").strip()
+                raw_arguments = parsed_obj.get("arguments", {})
+                if isinstance(raw_arguments, dict):
+                    arguments = raw_arguments
+
+            from .tool_parser import ParsedToolCall
+            parsed_call = ParsedToolCall(
+                tool_name=tool_name,
+                arguments=arguments,
+                raw_json=json.dumps(parsed_obj, ensure_ascii=False, separators=(",", ":")),
+            )
+
+            consumed_len = end_idx
+            while consumed_len < len(buffer_content) and buffer_content[consumed_len] in " \t\r\n":
+                consumed_len += 1
+
+            if tool_name and tool_parser.validate_tool_call(parsed_call):
+                return parsed_call, consumed_len, True
+            return None, consumed_len, True
         
         # 处理流
         async for raw_data in backend_stream:
@@ -1141,6 +1175,7 @@ class ResponseTransformer:
                     json_start_pos = buffer.find(JSON_BLOCK_START)
                     xml_start_pos = buffer.find(XML_TOOL_START)
                     bracket_start_pos = buffer.find(BRACKET_TOOL_START)
+                    plain_json_match = PLAIN_TOOL_JSON_START_PATTERN.search(buffer)
 
                     candidates = []
                     if json_start_pos != -1:
@@ -1149,6 +1184,8 @@ class ResponseTransformer:
                         candidates.append((xml_start_pos, "xml"))
                     if bracket_start_pos != -1:
                         candidates.append((bracket_start_pos, "bracket"))
+                    if plain_json_match is not None:
+                        candidates.append((plain_json_match.start(2), "plain_json"))
 
                     start_pos = -1
                     start_type = None
@@ -1175,8 +1212,10 @@ class ResponseTransformer:
                             state = STATE_BUFFERING_JSON
                         elif start_type == "xml":
                             state = STATE_BUFFERING_XML
-                        else:
+                        elif start_type == "bracket":
                             state = STATE_BUFFERING_BRACKET
+                        else:
+                            state = STATE_BUFFERING_PLAIN_JSON
                     else:
                         # 没有找到开始标记
                         # 检查缓冲区末尾是否可能是不完整的开始标记
@@ -1184,6 +1223,7 @@ class ResponseTransformer:
                             len(JSON_BLOCK_START),
                             len(XML_TOOL_START),
                             len(BRACKET_TOOL_START),
+                            len('{"tool"'),
                         ) - 1
                         
                         if len(buffer) <= potential_start_len:
@@ -1383,6 +1423,58 @@ class ResponseTransformer:
                             buffer = ""
                             state = STATE_TEXT
                         break
+                elif state == STATE_BUFFERING_PLAIN_JSON:
+                    parsed_call, consumed_len, is_complete = parse_plain_json_tool_call(buffer)
+
+                    if is_complete and consumed_len > 0:
+                        json_content = buffer[:consumed_len]
+                        if parsed_call is not None:
+                            has_tool_calls = True
+
+                            event = await end_current_block()
+                            if event:
+                                yield event
+
+                            event = await ensure_message_started()
+                            if event:
+                                yield event
+
+                            tool_use_id = tool_parser.generate_tool_use_id()
+                            yield emit_tool_use_block_start(content_index, tool_use_id, parsed_call.tool_name)
+
+                            input_json = json.dumps(parsed_call.arguments)
+                            yield emit_tool_use_delta(content_index, input_json)
+
+                            yield emit_block_stop(content_index)
+                            content_index += 1
+                            current_block_started = False
+                            if stop_after_first_tool_call:
+                                terminate_stream_early = True
+                        else:
+                            if not (has_tool_calls and suppress_intermediate_tool_text):
+                                event = await ensure_message_started()
+                                if event:
+                                    yield event
+                                event = await start_text_block()
+                                if event:
+                                    yield event
+                                yield emit_text_delta(content_index, json_content)
+
+                        buffer = buffer[consumed_len:]
+                        state = STATE_TEXT
+                    else:
+                        if len(buffer) > max_buffer_size:
+                            if not (has_tool_calls and suppress_intermediate_tool_text):
+                                event = await ensure_message_started()
+                                if event:
+                                    yield event
+                                event = await start_text_block()
+                                if event:
+                                    yield event
+                                yield emit_text_delta(content_index, buffer)
+                            buffer = ""
+                            state = STATE_TEXT
+                        break
                 if terminate_stream_early:
                     buffer = ""
                     break
@@ -1391,7 +1483,12 @@ class ResponseTransformer:
         
         # 处理剩余缓冲区
         if buffer and not terminate_stream_early:
-            if state in (STATE_BUFFERING_JSON, STATE_BUFFERING_XML, STATE_BUFFERING_BRACKET):
+            if state in (
+                STATE_BUFFERING_JSON,
+                STATE_BUFFERING_XML,
+                STATE_BUFFERING_BRACKET,
+                STATE_BUFFERING_PLAIN_JSON,
+            ):
                 # 代码块未完成，作为普通文本输出
                 if not (has_tool_calls and suppress_intermediate_tool_text):
                     event = await ensure_message_started()

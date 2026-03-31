@@ -13,6 +13,8 @@ from app.services.web_search_fallback import (
 
 bridge = get_protocol_bridge()
 
+MALFORMED_EDIT_TOOL_JSON = """{"tool":"Edit","arguments":{"replace_all":false,"file_path":"/home/ww/Project/BlogDemo/index.html","old_string":"          <p class=\\"details hidden\\">\\n            如果你只需要快速上线，一个静态页面就足够；如果你需要后台管理和内容检索，再考虑引入框架与数据库。建议先做最小可用版本，持续迭代，而不是一开始就追求"完美架构"。\\n          </p>","new_string":"          <div class=\\"details-wrapper\\">\\n            <p class=\\"details\\">\\n              如果你只需要快速上线，一个静态页面就足够；如果你需要后台管理和内容检索，再考虑引入框架与数据库。建议先做最小可用版本，持续迭代，而不是一开始就追求"完美架构"。\\n            </p>\\n          </div>"}}"""
+
 
 def test_parse_openai_chat_and_tool_call_roundtrip():
     payload = {
@@ -84,6 +86,31 @@ def test_parse_bracket_tool_call_roundtrip():
     assert parsed.has_tool_calls is True
     assert parsed.tool_calls[0].name == "Read"
     assert parsed.tool_calls[0].arguments["file_path"] == "README.md"
+    assert parsed.text == ""
+
+
+def test_parse_plain_json_tool_call_roundtrip():
+    parsed = bridge.parse_model_output(
+        '{"tool":"Write","arguments":{"file_path":"/tmp/plan.md","content":"# Plan"}}'
+    )
+
+    assert parsed.has_tool_calls is True
+    assert parsed.tool_calls[0].name == "Write"
+    assert parsed.tool_calls[0].arguments["file_path"] == "/tmp/plan.md"
+    assert parsed.tool_calls[0].arguments["content"] == "# Plan"
+    assert parsed.text == ""
+
+
+def test_parse_malformed_edit_tool_call_roundtrip():
+    parsed = bridge.parse_model_output(
+        f"```json\n{MALFORMED_EDIT_TOOL_JSON}\n```"
+    )
+
+    assert parsed.has_tool_calls is True
+    assert parsed.tool_calls[0].name == "Edit"
+    assert parsed.tool_calls[0].arguments["file_path"] == "/home/ww/Project/BlogDemo/index.html"
+    assert '追求"完美架构"' in parsed.tool_calls[0].arguments["old_string"]
+    assert 'details-wrapper' in parsed.tool_calls[0].arguments["new_string"]
     assert parsed.text == ""
 
 
@@ -224,6 +251,42 @@ def test_response_transformer_preserves_tool_use_input_verbatim():
     assert tool_blocks[0]["input"] == {"file_path": "README.md"}
 
 
+def test_response_transformer_plain_json_write_becomes_tool_use():
+    transformer = get_response_transformer()
+    response = transformer.to_anthropic_response_with_tools(
+        {
+            "outputs": {
+                "out-0": '{"tool":"Write","arguments":{"file_path":"/home/ww/.claude/plans/demo.md","content":"# Demo"}}'
+            }
+        },
+        model="claude-opus-4-6",
+        request_id="msg_plain_write",
+        tool_parser=ToolParser(registry=None),
+    )
+
+    tool_blocks = [block for block in response["content"] if block["type"] == "tool_use"]
+    assert tool_blocks
+    assert tool_blocks[0]["name"] == "Write"
+    assert tool_blocks[0]["input"]["file_path"] == "/home/ww/.claude/plans/demo.md"
+    assert tool_blocks[0]["input"]["content"] == "# Demo"
+
+
+def test_response_transformer_malformed_edit_becomes_tool_use():
+    transformer = get_response_transformer()
+    response = transformer.to_anthropic_response_with_tools(
+        {"outputs": {"out-0": MALFORMED_EDIT_TOOL_JSON}},
+        model="claude-opus-4-6",
+        request_id="msg_malformed_edit",
+        tool_parser=ToolParser(registry=None),
+    )
+
+    tool_blocks = [block for block in response["content"] if block["type"] == "tool_use"]
+    assert tool_blocks
+    assert tool_blocks[0]["name"] == "Edit"
+    assert tool_blocks[0]["input"]["replace_all"] is False
+    assert '追求"完美架构"' in tool_blocks[0]["input"]["old_string"]
+
+
 def test_response_transformer_preserves_anthropic_stream_whitespace():
     transformer = get_response_transformer()
     event = transformer.to_anthropic_stream_event(
@@ -336,6 +399,134 @@ def test_anthropic_stream_with_bracket_tool_call_emits_tool_use():
     assert "\"name\": \"Read\"" in merged
     assert "[tool_call id=" not in merged
     assert "\"stop_reason\": \"tool_use\"" in merged
+
+
+def test_anthropic_stream_with_plain_json_write_emits_tool_use_without_leak():
+    transformer = get_response_transformer()
+
+    chunks = [
+        {
+            "outputs": {
+                "out-0": '{"tool":"Write","arguments":{"file_path":"/home/ww/.claude/plans/demo.md","content":"# Demo"}}'
+            }
+        },
+    ]
+
+    async def backend_stream():
+        for chunk in chunks:
+            yield f"data: {json.dumps(chunk)}"
+
+    async def collect_events():
+        events = []
+        async for event in transformer.transform_backend_sse_to_anthropic_with_tools(
+            backend_stream(),
+            model="claude-opus-4-6",
+            request_id="stream_plain_write",
+            tool_parser=ToolParser(registry=None),
+        ):
+            events.append(event)
+        return events
+
+    events = asyncio.run(collect_events())
+    merged = "\n".join(events)
+    assert '"type": "tool_use"' in merged
+    assert '"name": "Write"' in merged
+    assert '"tool":"Write"' not in merged
+    assert '"stop_reason": "tool_use"' in merged
+
+
+def test_anthropic_stream_with_malformed_plain_json_edit_emits_tool_use_without_leak():
+    transformer = get_response_transformer()
+
+    chunks = [
+        {"outputs": {"out-0": MALFORMED_EDIT_TOOL_JSON}},
+    ]
+
+    async def backend_stream():
+        for chunk in chunks:
+            yield f"data: {json.dumps(chunk)}"
+
+    async def collect_events():
+        events = []
+        async for event in transformer.transform_backend_sse_to_anthropic_with_tools(
+            backend_stream(),
+            model="claude-opus-4-6",
+            request_id="stream_malformed_plain_edit",
+            tool_parser=ToolParser(registry=None),
+        ):
+            events.append(event)
+        return events
+
+    events = asyncio.run(collect_events())
+    merged = "\n".join(events)
+    assert '"type": "tool_use"' in merged
+    assert '"name": "Edit"' in merged
+    assert '"tool":"Edit"' not in merged
+    assert '"stop_reason": "tool_use"' in merged
+
+
+def test_anthropic_stream_with_malformed_fenced_json_edit_emits_tool_use_without_leak():
+    transformer = get_response_transformer()
+
+    chunks = [
+        {"outputs": {"out-0": f"```json\n{MALFORMED_EDIT_TOOL_JSON}\n```"}},
+    ]
+
+    async def backend_stream():
+        for chunk in chunks:
+            yield f"data: {json.dumps(chunk)}"
+
+    async def collect_events():
+        events = []
+        async for event in transformer.transform_backend_sse_to_anthropic_with_tools(
+            backend_stream(),
+            model="claude-opus-4-6",
+            request_id="stream_malformed_fenced_edit",
+            tool_parser=ToolParser(registry=None),
+        ):
+            events.append(event)
+        return events
+
+    events = asyncio.run(collect_events())
+    merged = "\n".join(events)
+    assert '"type": "tool_use"' in merged
+    assert '"name": "Edit"' in merged
+    assert '"tool":"Edit"' not in merged
+    assert '"stop_reason": "tool_use"' in merged
+
+
+def test_anthropic_stream_with_plain_json_todowrite_emits_tool_use_without_leak():
+    transformer = get_response_transformer()
+
+    chunks = [
+        {
+            "outputs": {
+                "out-0": '{"tool":"TodoWrite","arguments":{"todos":[{"content":"Task A","status":"pending","activeForm":"Doing task A"}]}}'
+            }
+        },
+    ]
+
+    async def backend_stream():
+        for chunk in chunks:
+            yield f"data: {json.dumps(chunk)}"
+
+    async def collect_events():
+        events = []
+        async for event in transformer.transform_backend_sse_to_anthropic_with_tools(
+            backend_stream(),
+            model="claude-opus-4-6",
+            request_id="stream_plain_todo",
+            tool_parser=ToolParser(registry=None),
+        ):
+            events.append(event)
+        return events
+
+    events = asyncio.run(collect_events())
+    merged = "\n".join(events)
+    assert '"type": "tool_use"' in merged
+    assert '"name": "TodoWrite"' in merged
+    assert '"tool":"TodoWrite"' not in merged
+    assert '"stop_reason": "tool_use"' in merged
 
 
 def test_anthropic_stream_with_tools_suppresses_text_after_first_tool_call():

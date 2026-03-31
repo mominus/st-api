@@ -5,6 +5,8 @@ from types import SimpleNamespace
 from app.routers import openai as openai_router
 from app.services.protocol_bridge import UsageNumbers, get_protocol_bridge
 
+MALFORMED_EDIT_TOOL_JSON = """{"tool":"Edit","arguments":{"replace_all":false,"file_path":"/home/ww/Project/BlogDemo/index.html","old_string":"建议先做最小可用版本，而不是一开始就追求"完美架构"。","new_string":"建议先做最小可用版本，而不是一开始就追求"完美架构"和过度设计。"}}"""
+
 
 class _FakeClient:
     host = "127.0.0.1"
@@ -214,6 +216,53 @@ def test_chat_completions_stream_with_tools_emits_incremental_content(monkeypatc
     merged = "".join(content_deltas)
     assert merged.startswith("hello world ")
     assert '"tool":"Read"' not in merged
+    assert "tool_calls" in finish_reasons
+
+
+def test_chat_completions_stream_with_malformed_edit_tool_call_suppresses_leak(monkeypatch):
+    canonical = _FakeCanonical()
+    bridge = _FakeBridge(canonical)
+    runtime = _FakeRuntime(
+        [
+            "先准备替换内容。",
+            f"```json\n{MALFORMED_EDIT_TOOL_JSON}\n```",
+        ]
+    )
+
+    monkeypatch.setattr(openai_router, "get_protocol_bridge", lambda: bridge)
+    monkeypatch.setattr(openai_router, "get_gateway_runtime", lambda: runtime)
+
+    request = _FakeRequest(
+        {
+            "model": "claude-opus-4-6",
+            "stream": True,
+            "messages": [{"role": "user", "content": "edit file"}],
+            "tools": [{"type": "function", "function": {"name": "Edit"}}],
+        }
+    )
+
+    response = asyncio.run(
+        openai_router.chat_completions(
+            request,
+            authorization="Bearer sk-test",
+            x_api_key=None,
+            session=object(),
+        )
+    )
+    body = asyncio.run(_collect_stream_body(response))
+    events = _parse_openai_data_events(body)
+
+    content_deltas = []
+    finish_reasons = []
+    for event in events:
+        choice = event["choices"][0]
+        delta = choice.get("delta") or {}
+        if "content" in delta:
+            content_deltas.append(delta["content"])
+        finish_reasons.append(choice.get("finish_reason"))
+
+    merged = "".join(content_deltas)
+    assert '"tool":"Edit"' not in merged
     assert "tool_calls" in finish_reasons
 
 

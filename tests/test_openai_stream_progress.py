@@ -60,6 +60,10 @@ class _FakeRuntime:
         self._stream_tokens = stream_tokens
 
     @staticmethod
+    def resolve_request_id(*, headers):
+        return "req_test_stream"
+
+    @staticmethod
     def resolve_client_ip(*, headers, fallback_client_ip):
         return fallback_client_ip
 

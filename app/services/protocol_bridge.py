@@ -13,7 +13,6 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from app.services.tool_parser import ToolParser
-from app.services.upstream_sanitizer import sanitize_exposed_payload, sanitize_exposed_text
 
 
 TEXT_PART_TYPES = {
@@ -393,30 +392,19 @@ class ProtocolBridge:
     # Output parsing
     # ---------------------------------------------------------------------
 
-    @staticmethod
-    def _sanitize_text_output(text: str) -> str:
-        return sanitize_exposed_text(text) or ""
-
-    @staticmethod
-    def _sanitize_tool_arguments(arguments: Dict[str, Any]) -> Dict[str, Any]:
-        sanitized = sanitize_exposed_payload(arguments or {})
-        return sanitized if isinstance(sanitized, dict) else {}
-
     def parse_model_output(self, output: str) -> ParsedOutput:
         text = output or ""
         parse_result = self._tool_parser.parse(text)
 
         if parse_result.has_tool_calls:
-            merged_text = self._sanitize_text_output(
-                self._merge_clean_text(parse_result.text_before, parse_result.text_after)
-            )
+            merged_text = self._merge_clean_text(parse_result.text_before, parse_result.text_after)
             return ParsedOutput(
                 text=merged_text,
                 tool_calls=[
                     CanonicalToolCall(
                         call_id=self._new_call_id(),
                         name=call.tool_name,
-                        arguments=self._sanitize_tool_arguments(call.arguments or {}),
+                        arguments=call.arguments or {},
                     )
                     for call in parse_result.tool_calls
                 ],
@@ -424,10 +412,9 @@ class ProtocolBridge:
 
         fallback_call = self._parse_single_tool_object(text)
         if fallback_call is not None:
-            fallback_call.arguments = self._sanitize_tool_arguments(fallback_call.arguments or {})
             return ParsedOutput(text="", tool_calls=[fallback_call])
 
-        return ParsedOutput(text=self._sanitize_text_output(text))
+        return ParsedOutput(text=text)
 
     # ---------------------------------------------------------------------
     # Provider response formatting

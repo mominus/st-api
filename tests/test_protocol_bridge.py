@@ -183,24 +183,22 @@ def test_gemini_response_with_function_call_parts():
     assert fn["name"] == "search_docs"
 
 
-def test_parse_model_output_sanitizes_upstream_domain_in_text():
+def test_parse_model_output_preserves_success_text_verbatim():
     parsed = bridge.parse_model_output("Open https://api.stack-ai.com/docs for details")
-    assert "stack-ai" not in parsed.text.lower()
-    assert "upstream service" in parsed.text
+    assert parsed.text == "Open https://api.stack-ai.com/docs for details"
 
 
-def test_parse_model_output_sanitizes_upstream_domain_in_tool_arguments():
+def test_parse_model_output_preserves_tool_arguments_verbatim():
     parsed = bridge.parse_model_output(
         """```json
 {"tool":"OpenURL","arguments":{"url":"https://api.stack-ai.com/docs"}}
 ```"""
     )
     assert parsed.has_tool_calls is True
-    assert "stack-ai" not in parsed.tool_calls[0].arguments["url"].lower()
-    assert "upstream service" in parsed.tool_calls[0].arguments["url"]
+    assert parsed.tool_calls[0].arguments["url"] == "https://api.stack-ai.com/docs"
 
 
-def test_response_transformer_sanitizes_non_tool_text_response():
+def test_response_transformer_preserves_non_tool_text_response_verbatim():
     transformer = get_response_transformer()
     response = transformer.to_anthropic_response(
         {"outputs": {"out-0": "Visit https://api.stack-ai.com/help"}},
@@ -209,8 +207,75 @@ def test_response_transformer_sanitizes_non_tool_text_response():
     )
     text_blocks = [block for block in response["content"] if block["type"] == "text"]
     assert text_blocks
-    assert "stack-ai" not in text_blocks[0]["text"].lower()
-    assert "upstream service" in text_blocks[0]["text"]
+    assert text_blocks[0]["text"] == "Visit https://api.stack-ai.com/help"
+
+
+def test_response_transformer_preserves_tool_use_input_verbatim():
+    transformer = get_response_transformer()
+    response = transformer.to_anthropic_response_with_tools(
+        {"outputs": {"out-0": '```json\n{"tool":"Read","arguments":{"file_path":"README.md"}}\n```'}},
+        model="claude-opus-4-6",
+        request_id="msg_tool_input",
+        tool_parser=ToolParser(registry=None),
+    )
+
+    tool_blocks = [block for block in response["content"] if block["type"] == "tool_use"]
+    assert tool_blocks
+    assert tool_blocks[0]["input"] == {"file_path": "README.md"}
+
+
+def test_response_transformer_preserves_anthropic_stream_whitespace():
+    transformer = get_response_transformer()
+    event = transformer.to_anthropic_stream_event(
+        "content_block_delta",
+        {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "text_delta", "text": "  line1\n    code"},
+        },
+    )
+
+    assert '"text": "  line1\\n    code"' in event
+
+
+def test_response_transformer_preserves_openai_chunk_whitespace():
+    transformer = get_response_transformer()
+    chunk = transformer.to_openai_stream_chunk(
+        "\n  - item",
+        "claude-opus-4-6",
+        "chunk_whitespace",
+        is_final=False,
+    )
+
+    assert '"content": "\\n  - item"' in chunk
+
+
+def test_transform_backend_sse_to_anthropic_preserves_whitespace():
+    transformer = get_response_transformer()
+
+    chunks = [
+        {"outputs": {"out-0": "  line1"}},
+        {"outputs": {"out-0": "\n    line2"}},
+    ]
+
+    async def backend_stream():
+        for chunk in chunks:
+            yield f"data: {json.dumps(chunk)}"
+
+    async def collect_events():
+        events = []
+        async for event in transformer.transform_backend_sse_to_anthropic(
+            backend_stream(),
+            model="claude-opus-4-6",
+            request_id="stream_ws",
+        ):
+            events.append(event)
+        return events
+
+    events = asyncio.run(collect_events())
+    merged = "\n".join(events)
+    assert '"text": "  line1"' in merged
+    assert '"text": "\\n    line2"' in merged
 
 
 def test_anthropic_stream_events_with_tool_use_are_incremental():

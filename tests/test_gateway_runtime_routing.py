@@ -876,6 +876,24 @@ def test_error_handler_hides_details_in_api_formats_but_keeps_logs():
     assert api_error.details["raw"] == "contact upstream support"
 
 
+def test_error_handler_still_sanitizes_tool_arguments_in_details():
+    handler = ErrorHandler()
+    api_error = handler.parse_backend_error(
+        {
+            "message": 'Write failed: {"tool":"Write","arguments":{"file_path":"/a","content":"secret"}}',
+            "raw": "contact support@stack-ai.com",
+        },
+        status_code=400,
+    )
+
+    assert api_error.details is not None
+    message = api_error.details["message"]
+    assert '"_redacted":true' in message
+    assert "file_path" not in message
+    assert "secret" not in message
+    assert api_error.details["raw"] == "contact upstream support"
+
+
 def test_runtime_resolve_request_id_prefers_client_header():
     runtime = GatewayRuntime()
     request_id = runtime.resolve_request_id(headers={"x-st-request-id": "tenantA-user-0001-s03"})

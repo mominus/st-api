@@ -10,6 +10,16 @@ def test_sanitize_exposed_text_replaces_upstream_brand():
     assert "upstream service" in sanitized
 
 
+def test_sanitize_exposed_text_replaces_configured_upstream_domain(monkeypatch):
+    monkeypatch.setenv("BACKEND_API_URL", "https://gateway.example-upstream.ai/v1/run")
+    text = "Email ops@gateway.example-upstream.ai or open https://gateway.example-upstream.ai/status"
+    sanitized = sanitize_exposed_text(text)
+    assert sanitized is not None
+    assert "example-upstream.ai" not in sanitized.lower()
+    assert "upstream support" in sanitized
+    assert "upstream service" in sanitized
+
+
 def test_sanitize_exposed_text_redacts_tool_arguments_object():
     text = '{"tool":"Write","arguments":{"file_path":"/amms/project/a.txt","content":"secret"}}'
     sanitized = sanitize_exposed_text(text)

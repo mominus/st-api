@@ -10,12 +10,13 @@ from datetime import datetime, date, timedelta
 from typing import Optional, List, Dict, Any
 from dataclasses import dataclass, field
 
-from sqlalchemy import select, and_, func
+from sqlalchemy import select, and_, func, text, case
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.database import (
     BackendAccount, AccountModelRoute, APIKey, TokenUsageHistory, RequestLog, ModelGroup, SystemStats
 )
+from app.services.time_utils import utc_now_naive, utc_today
 
 # 兼容旧名称
 STAccount = BackendAccount
@@ -161,13 +162,13 @@ class StatsService:
         )
         
         # 获取今日请求统计
-        today = date.today()
+        today = utc_today()
         request_stats = await self._get_account_request_stats(
             session, account_id, today, today
         )
         model_groups = await self._get_account_models(session, account.id)
         primary_model_group = model_groups[0] if model_groups else account.model_group
-        
+
         return AccountStats(
             id=account.id,
             name=account.name,
@@ -199,21 +200,30 @@ class StatsService:
         """
         result = await session.execute(select(STAccount))
         accounts = list(result.scalars().all())
-        
+        if not accounts:
+            return []
+
+        today = utc_today()
+        account_request_stats = await self._get_account_request_stats_map(
+            session,
+            [account.id for account in accounts],
+            today,
+            today,
+        )
+        account_model_map = await self._get_account_models_map(session, accounts)
+
         stats_list = []
-        today = date.today()
-        
         for account in accounts:
             usage_percentage = self._calculate_usage_percentage(
                 account.daily_used, account.daily_quota
             )
-            
-            request_stats = await self._get_account_request_stats(
-                session, account.id, today, today
+            request_stats = account_request_stats.get(account.id, {})
+            model_groups = account_model_map.get(
+                account.id,
+                [account.model_group] if account.model_group else [],
             )
-            model_groups = await self._get_account_models(session, account.id)
             primary_model_group = model_groups[0] if model_groups else account.model_group
-            
+
             stats_list.append(AccountStats(
                 id=account.id,
                 name=account.name,
@@ -227,8 +237,85 @@ class StatsService:
                 total_input_tokens=request_stats.get("input_tokens", 0),
                 total_output_tokens=request_stats.get("output_tokens", 0)
             ))
-        
+
         return stats_list
+
+    async def _get_account_request_stats_map(
+        self,
+        session: AsyncSession,
+        account_ids: List[str],
+        start_date: date,
+        end_date: date,
+    ) -> Dict[str, Dict[str, int]]:
+        if not account_ids:
+            return {}
+
+        start_datetime = datetime.combine(start_date, datetime.min.time())
+        end_datetime = datetime.combine(end_date, datetime.max.time())
+        result = await session.execute(
+            select(
+                RequestLog.account_id,
+                func.count(RequestLog.id),
+                func.coalesce(func.sum(RequestLog.input_tokens), 0),
+                func.coalesce(func.sum(RequestLog.output_tokens), 0),
+            )
+            .where(
+                and_(
+                    RequestLog.account_id.in_(account_ids),
+                    RequestLog.timestamp >= start_datetime,
+                    RequestLog.timestamp <= end_datetime,
+                )
+            )
+            .group_by(RequestLog.account_id)
+        )
+        return {
+            str(account_id): {
+                "request_count": int(request_count or 0),
+                "input_tokens": int(input_tokens or 0),
+                "output_tokens": int(output_tokens or 0),
+            }
+            for account_id, request_count, input_tokens, output_tokens in result.fetchall()
+            if account_id
+        }
+
+    async def _get_account_models_map(
+        self,
+        session: AsyncSession,
+        accounts: List[STAccount],
+    ) -> Dict[str, List[str]]:
+        account_ids = [account.id for account in accounts if getattr(account, "id", None)]
+        if not account_ids:
+            return {}
+
+        route_result = await session.execute(
+            select(AccountModelRoute.account_id, AccountModelRoute.model_name)
+            .where(
+                and_(
+                    AccountModelRoute.account_id.in_(account_ids),
+                    AccountModelRoute.enabled == True,
+                )
+            )
+            .order_by(
+                AccountModelRoute.account_id.asc(),
+                AccountModelRoute.priority.asc(),
+                AccountModelRoute.model_name.asc(),
+            )
+        )
+        model_map: Dict[str, List[str]] = {}
+        for account_id, model_name in route_result.fetchall():
+            if not account_id or not model_name:
+                continue
+            bucket = model_map.setdefault(str(account_id), [])
+            if model_name not in bucket:
+                bucket.append(str(model_name))
+
+        for account in accounts:
+            if model_map.get(account.id):
+                continue
+            if account.model_group:
+                model_map[account.id] = [account.model_group]
+
+        return model_map
     
     async def _get_account_request_stats(
         self,
@@ -253,7 +340,11 @@ class StatsService:
         end_datetime = datetime.combine(end_date, datetime.max.time())
         
         result = await session.execute(
-            select(RequestLog).where(
+            select(
+                func.count(RequestLog.id),
+                func.coalesce(func.sum(RequestLog.input_tokens), 0),
+                func.coalesce(func.sum(RequestLog.output_tokens), 0),
+            ).where(
                 and_(
                     RequestLog.account_id == account_id,
                     RequestLog.timestamp >= start_datetime,
@@ -261,12 +352,12 @@ class StatsService:
                 )
             )
         )
-        logs = list(result.scalars().all())
-        
+        request_count, input_tokens, output_tokens = result.one()
+
         return {
-            "request_count": len(logs),
-            "input_tokens": sum(log.input_tokens or 0 for log in logs),
-            "output_tokens": sum(log.output_tokens or 0 for log in logs)
+            "request_count": int(request_count or 0),
+            "input_tokens": int(input_tokens or 0),
+            "output_tokens": int(output_tokens or 0),
         }
     
     # ========================================================================
@@ -329,7 +420,7 @@ class StatsService:
         usage_percentage = self._calculate_usage_percentage(total_used, total_quota)
         
         # 获取今日请求数
-        today = date.today()
+        today = utc_today()
         request_count = await self._get_model_group_request_count(
             session, model_group, today, today
         )
@@ -361,30 +452,101 @@ class StatsService:
             
         Requirements: 3.3
         """
-        # 获取所有唯一模型（优先新路由表，兼容旧字段）
-        route_result = await session.execute(
-            select(AccountModelRoute.model_name).where(
-                AccountModelRoute.enabled == True
-            ).distinct()
-        )
-        legacy_result = await session.execute(
-            select(STAccount.model_group).distinct()
-        )
+        group_account_map = await self._get_model_group_account_map(session)
+        if not group_account_map:
+            return []
 
-        model_groups = {
-            row[0] for row in route_result.fetchall() if row[0]
-        }
-        model_groups.update(
-            {row[0] for row in legacy_result.fetchall() if row[0]}
+        today = utc_today()
+        request_count_map = await self._get_model_group_request_count_map(
+            session,
+            list(group_account_map.keys()),
+            today,
+            today,
         )
 
         stats_list = []
-        for group in sorted(model_groups):
-            stats = await self.get_model_group_stats(session, group)
-            if stats:
-                stats_list.append(stats)
-        
+        for group in sorted(group_account_map):
+            accounts = list(group_account_map[group].values())
+            total_quota = sum(a.daily_quota for a in accounts)
+            total_used = sum(a.daily_used for a in accounts)
+            active_count = sum(1 for a in accounts if a.status == "active")
+            exhausted_count = sum(1 for a in accounts if a.status == "exhausted")
+            disabled_count = sum(1 for a in accounts if a.status == "disabled")
+            stats_list.append(
+                ModelGroupStats(
+                    name=group,
+                    total_accounts=len(accounts),
+                    active_accounts=active_count,
+                    exhausted_accounts=exhausted_count,
+                    disabled_accounts=disabled_count,
+                    total_quota=total_quota,
+                    total_used=total_used,
+                    usage_percentage=self._calculate_usage_percentage(total_used, total_quota),
+                    request_count=int(request_count_map.get(group, 0)),
+                )
+            )
+
         return stats_list
+
+    async def _get_model_group_account_map(
+        self,
+        session: AsyncSession,
+    ) -> Dict[str, Dict[str, STAccount]]:
+        group_account_map: Dict[str, Dict[str, STAccount]] = {}
+
+        route_result = await session.execute(
+            select(AccountModelRoute.model_name, STAccount)
+            .join(STAccount, STAccount.id == AccountModelRoute.account_id)
+            .where(
+                and_(
+                    AccountModelRoute.enabled == True,
+                    AccountModelRoute.model_name.isnot(None),
+                )
+            )
+        )
+        for model_name, account in route_result.fetchall():
+            if not model_name or account is None:
+                continue
+            group_account_map.setdefault(str(model_name), {})[account.id] = account
+
+        legacy_result = await session.execute(
+            select(STAccount).where(STAccount.model_group.isnot(None))
+        )
+        for account in legacy_result.scalars().all():
+            if not account.model_group:
+                continue
+            group_account_map.setdefault(account.model_group, {}).setdefault(account.id, account)
+
+        return group_account_map
+
+    async def _get_model_group_request_count_map(
+        self,
+        session: AsyncSession,
+        model_groups: List[str],
+        start_date: date,
+        end_date: date,
+    ) -> Dict[str, int]:
+        if not model_groups:
+            return {}
+
+        start_datetime = datetime.combine(start_date, datetime.min.time())
+        end_datetime = datetime.combine(end_date, datetime.max.time())
+        result = await session.execute(
+            select(RequestLog.model, func.count(RequestLog.id))
+            .where(
+                and_(
+                    RequestLog.model.in_(model_groups),
+                    RequestLog.timestamp >= start_datetime,
+                    RequestLog.timestamp <= end_datetime,
+                )
+            )
+            .group_by(RequestLog.model)
+        )
+        return {
+            str(model): int(request_count or 0)
+            for model, request_count in result.fetchall()
+            if model
+        }
     
     async def _get_model_group_request_count(
         self,
@@ -409,7 +571,7 @@ class StatsService:
         end_datetime = datetime.combine(end_date, datetime.max.time())
         
         result = await session.execute(
-            select(RequestLog).where(
+            select(func.count(RequestLog.id)).where(
                 and_(
                     RequestLog.model == model_group,
                     RequestLog.timestamp >= start_datetime,
@@ -417,8 +579,7 @@ class StatsService:
                 )
             )
         )
-        logs = list(result.scalars().all())
-        return len(logs)
+        return int(result.scalar() or 0)
     
     # ========================================================================
     # API Key Statistics
@@ -457,7 +618,7 @@ class StatsService:
             )
         
         # 获取今日请求统计
-        today = date.today()
+        today = utc_today()
         request_stats = await self._get_api_key_request_stats(
             session, api_key.key_prefix, today, today
         )
@@ -500,21 +661,27 @@ class StatsService:
                 select(APIKey).where(APIKey.status == "active")
             )
         api_keys = list(result.scalars().all())
-        
+        if not api_keys:
+            return []
+
+        today = utc_today()
+        request_stats_map = await self._get_api_key_request_stats_map(
+            session,
+            [api_key.key_prefix for api_key in api_keys if api_key.key_prefix],
+            today,
+            today,
+        )
         stats_list = []
-        today = date.today()
-        
+
         for api_key in api_keys:
             usage_percentage = None
             if api_key.quota is not None and api_key.quota > 0:
                 usage_percentage = self._calculate_usage_percentage(
                     api_key.used, api_key.quota
                 )
-            
-            request_stats = await self._get_api_key_request_stats(
-                session, api_key.key_prefix, today, today
-            )
-            
+
+            request_stats = request_stats_map.get(api_key.key_prefix, {})
+
             stats_list.append(APIKeyStats(
                 id=api_key.id,
                 key_prefix=api_key.key_prefix,
@@ -528,8 +695,46 @@ class StatsService:
                 total_input_tokens=request_stats.get("input_tokens", 0),
                 total_output_tokens=request_stats.get("output_tokens", 0)
             ))
-        
+
         return stats_list
+
+    async def _get_api_key_request_stats_map(
+        self,
+        session: AsyncSession,
+        api_key_prefixes: List[str],
+        start_date: date,
+        end_date: date,
+    ) -> Dict[str, Dict[str, int]]:
+        if not api_key_prefixes:
+            return {}
+
+        start_datetime = datetime.combine(start_date, datetime.min.time())
+        end_datetime = datetime.combine(end_date, datetime.max.time())
+        result = await session.execute(
+            select(
+                RequestLog.api_key_prefix,
+                func.count(RequestLog.id),
+                func.coalesce(func.sum(RequestLog.input_tokens), 0),
+                func.coalesce(func.sum(RequestLog.output_tokens), 0),
+            )
+            .where(
+                and_(
+                    RequestLog.api_key_prefix.in_(api_key_prefixes),
+                    RequestLog.timestamp >= start_datetime,
+                    RequestLog.timestamp <= end_datetime,
+                )
+            )
+            .group_by(RequestLog.api_key_prefix)
+        )
+        return {
+            str(api_key_prefix): {
+                "request_count": int(request_count or 0),
+                "input_tokens": int(input_tokens or 0),
+                "output_tokens": int(output_tokens or 0),
+            }
+            for api_key_prefix, request_count, input_tokens, output_tokens in result.fetchall()
+            if api_key_prefix
+        }
     
     async def _get_api_key_request_stats(
         self,
@@ -554,7 +759,11 @@ class StatsService:
         end_datetime = datetime.combine(end_date, datetime.max.time())
         
         result = await session.execute(
-            select(RequestLog).where(
+            select(
+                func.count(RequestLog.id),
+                func.coalesce(func.sum(RequestLog.input_tokens), 0),
+                func.coalesce(func.sum(RequestLog.output_tokens), 0),
+            ).where(
                 and_(
                     RequestLog.api_key_prefix == api_key_prefix,
                     RequestLog.timestamp >= start_datetime,
@@ -562,12 +771,12 @@ class StatsService:
                 )
             )
         )
-        logs = list(result.scalars().all())
-        
+        request_count, input_tokens, output_tokens = result.one()
+
         return {
-            "request_count": len(logs),
-            "input_tokens": sum(log.input_tokens or 0 for log in logs),
-            "output_tokens": sum(log.output_tokens or 0 for log in logs)
+            "request_count": int(request_count or 0),
+            "input_tokens": int(input_tokens or 0),
+            "output_tokens": int(output_tokens or 0),
         }
     
     # ========================================================================
@@ -595,7 +804,7 @@ class StatsService:
             
         Requirements: 3.6
         """
-        start_date = date.today() - timedelta(days=days - 1)
+        start_date = utc_today() - timedelta(days=days - 1)
         
         # 构建查询条件
         conditions = [TokenUsageHistory.date >= start_date]
@@ -633,7 +842,7 @@ class StatsService:
         # 填充缺失的日期
         result_list = []
         current_date = start_date
-        today = date.today()
+        today = utc_today()
         
         while current_date <= today:
             if current_date in daily_stats:
@@ -713,45 +922,73 @@ class StatsService:
         Returns:
             系统概览统计
         """
-        # 账号统计
-        accounts_result = await session.execute(select(STAccount))
-        accounts = list(accounts_result.scalars().all())
-        
-        total_accounts = len(accounts)
-        active_accounts = sum(1 for a in accounts if a.status == "active")
-        exhausted_accounts = sum(1 for a in accounts if a.status == "exhausted")
-        disabled_accounts = sum(1 for a in accounts if a.status == "disabled")
-        
-        # API Key 统计
-        keys_result = await session.execute(select(APIKey))
-        api_keys = list(keys_result.scalars().all())
-        
-        total_api_keys = len(api_keys)
-        active_api_keys = sum(1 for k in api_keys if k.status == "active")
-        
+        # 账号统计（聚合）
+        account_row = (
+            await session.execute(
+                select(
+                    func.count(STAccount.id).label("total_accounts"),
+                    func.coalesce(
+                        func.sum(case((STAccount.status == "active", 1), else_=0)),
+                        0,
+                    ).label("active_accounts"),
+                    func.coalesce(
+                        func.sum(case((STAccount.status == "exhausted", 1), else_=0)),
+                        0,
+                    ).label("exhausted_accounts"),
+                    func.coalesce(
+                        func.sum(case((STAccount.status == "disabled", 1), else_=0)),
+                        0,
+                    ).label("disabled_accounts"),
+                )
+            )
+        ).one()
+        total_accounts = int(account_row.total_accounts or 0)
+        active_accounts = int(account_row.active_accounts or 0)
+        exhausted_accounts = int(account_row.exhausted_accounts or 0)
+        disabled_accounts = int(account_row.disabled_accounts or 0)
+
+        # API Key 统计（聚合）
+        api_key_row = (
+            await session.execute(
+                select(
+                    func.count(APIKey.id).label("total_api_keys"),
+                    func.coalesce(
+                        func.sum(case((APIKey.status == "active", 1), else_=0)),
+                        0,
+                    ).label("active_api_keys"),
+                )
+            )
+        ).one()
+        total_api_keys = int(api_key_row.total_api_keys or 0)
+        active_api_keys = int(api_key_row.active_api_keys or 0)
+
         # 模型组统计
-        groups_result = await session.execute(select(ModelGroup))
-        total_model_groups = len(list(groups_result.scalars().all()))
+        total_model_groups = int(
+            (await session.execute(select(func.count(ModelGroup.id)))).scalar() or 0
+        )
         
         # 今日请求统计（使用 UTC 时间）
-        now_utc = datetime.utcnow()
-        today_utc = now_utc.date()
+        today_utc = utc_today()
         today_start = datetime.combine(today_utc, datetime.min.time())
         today_end = datetime.combine(today_utc, datetime.max.time())
         
-        logs_result = await session.execute(
-            select(RequestLog).where(
-                and_(
-                    RequestLog.timestamp >= today_start,
-                    RequestLog.timestamp <= today_end
+        today_row = (
+            await session.execute(
+                select(
+                    func.count(RequestLog.id),
+                    func.coalesce(func.sum(RequestLog.input_tokens), 0),
+                    func.coalesce(func.sum(RequestLog.output_tokens), 0),
+                ).where(
+                    and_(
+                        RequestLog.timestamp >= today_start,
+                        RequestLog.timestamp <= today_end
+                    )
                 )
             )
-        )
-        today_logs = list(logs_result.scalars().all())
-        
-        today_requests = len(today_logs)
-        today_input_tokens = sum(log.input_tokens or 0 for log in today_logs)
-        today_output_tokens = sum(log.output_tokens or 0 for log in today_logs)
+        ).one()
+        today_requests = int(today_row[0] or 0)
+        today_input_tokens = int(today_row[1] or 0)
+        today_output_tokens = int(today_row[2] or 0)
         today_tokens = today_input_tokens + today_output_tokens
         
         # 获取历史累计统计
@@ -854,7 +1091,9 @@ class StatsService:
         self,
         session: AsyncSession,
         input_tokens: int,
-        output_tokens: int
+        output_tokens: int,
+        *,
+        request_count: int = 1,
     ) -> None:
         """
         更新系统累计统计（每次请求后调用）
@@ -864,38 +1103,53 @@ class StatsService:
             input_tokens: 输入 Token 数量
             output_tokens: 输出 Token 数量
         """
-        total_tokens = input_tokens + output_tokens
-        
-        # 获取或创建系统统计记录
-        result = await session.execute(
-            select(SystemStats).where(SystemStats.id == "global")
+        safe_input_tokens = max(0, int(input_tokens))
+        safe_output_tokens = max(0, int(output_tokens))
+        safe_request_count = max(1, int(request_count))
+        total_tokens = safe_input_tokens + safe_output_tokens
+        now = utc_now_naive()
+
+        # 并发安全：单语句 UPSERT，避免高并发下读改写导致丢增量。
+        await session.execute(
+            text(
+                """
+                INSERT INTO system_stats (
+                    id,
+                    total_requests,
+                    total_tokens,
+                    total_input_tokens,
+                    total_output_tokens,
+                    updated_at
+                )
+                VALUES (
+                    'global',
+                    :request_count,
+                    :total_tokens,
+                    :input_tokens,
+                    :output_tokens,
+                    :updated_at
+                )
+                ON CONFLICT (id) DO UPDATE SET
+                    total_requests = system_stats.total_requests + EXCLUDED.total_requests,
+                    total_tokens = system_stats.total_tokens + EXCLUDED.total_tokens,
+                    total_input_tokens = system_stats.total_input_tokens + EXCLUDED.total_input_tokens,
+                    total_output_tokens = system_stats.total_output_tokens + EXCLUDED.total_output_tokens,
+                    updated_at = EXCLUDED.updated_at
+                """
+            ),
+            {
+                "total_tokens": total_tokens,
+                "input_tokens": safe_input_tokens,
+                "output_tokens": safe_output_tokens,
+                "request_count": safe_request_count,
+                "updated_at": now,
+            },
         )
-        system_stats = result.scalar_one_or_none()
-        
-        if system_stats is None:
-            # 创建新记录
-            system_stats = SystemStats(
-                id="global",
-                total_requests=1,
-                total_tokens=total_tokens,
-                total_input_tokens=input_tokens,
-                total_output_tokens=output_tokens,
-                updated_at=datetime.utcnow()
-            )
-            session.add(system_stats)
-        else:
-            # 更新现有记录
-            system_stats.total_requests = (system_stats.total_requests or 0) + 1
-            system_stats.total_tokens = (system_stats.total_tokens or 0) + total_tokens
-            system_stats.total_input_tokens = (system_stats.total_input_tokens or 0) + input_tokens
-            system_stats.total_output_tokens = (system_stats.total_output_tokens or 0) + output_tokens
-            system_stats.updated_at = datetime.utcnow()
-        
         await session.flush()
-        
+
         logger.debug(
-            f"Updated system stats: +1 request, +{total_tokens} tokens "
-            f"(total: {system_stats.total_requests} requests, {system_stats.total_tokens} tokens)"
+            "Updated system stats atomically: +1 request, +%s tokens",
+            total_tokens,
         )
     
     async def get_system_stats(

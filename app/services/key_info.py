@@ -3,9 +3,10 @@ Public API Key Info Service
 构建 API Key 自查询接口的响应载荷。
 """
 
-from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, List, Optional
+
+from app.services.time_utils import ensure_utc, utc_now
 
 
 def _to_decimal(value: Optional[str]) -> Optional[Decimal]:
@@ -70,7 +71,7 @@ def build_decimal_limit_info(total: Optional[str], used: Optional[str]) -> Dict[
 
 def _build_key_status(api_key: Any) -> Dict[str, Any]:
     reasons: List[str] = []
-    now = datetime.utcnow()
+    now = utc_now()
 
     legacy_tokens = build_integer_limit_info(api_key.quota, api_key.used or 0)
     request_quota = build_integer_limit_info(api_key.request_quota, api_key.total_requests or 0)
@@ -79,7 +80,8 @@ def _build_key_status(api_key: Any) -> Dict[str, Any]:
 
     if api_key.status == "revoked":
         reasons.append("revoked")
-    if api_key.expires_at and api_key.expires_at < now:
+    expires_at = ensure_utc(api_key.expires_at)
+    if expires_at and expires_at < now:
         reasons.append("expired")
     if api_key.status == "exhausted":
         reasons.append("status_exhausted")

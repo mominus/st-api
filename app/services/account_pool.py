@@ -3,24 +3,34 @@ Account Pool Management Service
 多账号池化管理，支持 CRUD、轮询负载均衡、Token 使用追踪
 """
 
+import os
 import uuid
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from typing import Optional, List, Dict, Any, Tuple
 from collections import defaultdict
 import logging
 
-from sqlalchemy import select, update, delete, and_
+from sqlalchemy import select, update, delete, and_, case, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.database import (
-    BackendAccount, AccountModelRoute, TokenUsageHistory, get_session_factory
+    BackendAccount, AccountModelRoute, TokenUsageHistory
 )
 from app.services.crypto import get_crypto_service
+from app.services.time_utils import to_utc_naive, utc_now_naive, utc_today
 
 logger = logging.getLogger(__name__)
 
 # 兼容旧名称
 STAccount = BackendAccount
+ACCOUNT_MAX_INFLIGHT_REQUESTS_PER_ACCOUNT = max(
+    0,
+    int(os.getenv("ACCOUNT_MAX_INFLIGHT_REQUESTS_PER_ACCOUNT", "8")),
+)
+ACCOUNT_INFLIGHT_LEASE_SECONDS = max(
+    30.0,
+    float(os.getenv("ACCOUNT_INFLIGHT_LEASE_SECONDS", "900")),
+)
 
 
 class AccountPoolService:
@@ -34,6 +44,22 @@ class AccountPoolService:
         """初始化账号池服务"""
         # 轮询索引，按模型组分别维护
         self._round_robin_index: Dict[str, int] = defaultdict(int)
+        # PostgreSQL 表达式 UPSERT 兼容标记（失败后自动回退到锁定路径）
+        self._usage_upsert_available: bool = True
+
+    @staticmethod
+    def _session_dialect(session: AsyncSession) -> str:
+        try:
+            bind = session.get_bind()
+            if bind is not None and bind.dialect is not None:
+                return str(bind.dialect.name or "").lower()
+        except Exception:
+            pass
+        return ""
+
+    @classmethod
+    def _is_postgres_session(cls, session: AsyncSession) -> bool:
+        return cls._session_dialect(session) == "postgresql"
 
     @staticmethod
     def _chunked(values: List[str], chunk_size: int = 500) -> List[List[str]]:
@@ -41,6 +67,69 @@ class AccountPoolService:
         if chunk_size <= 0:
             return [values]
         return [values[i:i + chunk_size] for i in range(0, len(values), chunk_size)]
+
+    @staticmethod
+    def _reservation_stale_before(now: Optional[datetime] = None) -> datetime:
+        anchor = now or utc_now_naive()
+        return anchor - timedelta(seconds=ACCOUNT_INFLIGHT_LEASE_SECONDS)
+
+    @classmethod
+    def _effective_inflight_expr(cls, stale_before: datetime):
+        return case(
+            (
+                and_(
+                    STAccount.inflight_requests.isnot(None),
+                    STAccount.inflight_requests > 0,
+                    STAccount.inflight_updated_at.isnot(None),
+                    STAccount.inflight_updated_at >= stale_before,
+                ),
+                STAccount.inflight_requests,
+            ),
+            else_=0,
+        )
+
+    @classmethod
+    def _decrement_inflight_expr(cls, stale_before: datetime):
+        effective = cls._effective_inflight_expr(stale_before)
+        return case(
+            (effective > 0, effective - 1),
+            else_=0,
+        )
+
+    @staticmethod
+    def _reservation_enabled() -> bool:
+        return ACCOUNT_MAX_INFLIGHT_REQUESTS_PER_ACCOUNT > 0
+
+    @classmethod
+    def _effective_inflight_requests(
+        cls,
+        account: STAccount,
+        *,
+        now: Optional[datetime] = None,
+    ) -> int:
+        if not cls._reservation_enabled():
+            return 0
+        inflight = max(0, int(getattr(account, "inflight_requests", 0) or 0))
+        if inflight <= 0:
+            return 0
+        updated_at = getattr(account, "inflight_updated_at", None)
+        if updated_at is None:
+            return 0
+        normalized_updated_at = to_utc_naive(updated_at)
+        if normalized_updated_at < cls._reservation_stale_before(now):
+            return 0
+        return inflight
+
+    @classmethod
+    def _has_inflight_capacity(
+        cls,
+        account: STAccount,
+        *,
+        now: Optional[datetime] = None,
+    ) -> bool:
+        if not cls._reservation_enabled():
+            return True
+        return cls._effective_inflight_requests(account, now=now) < ACCOUNT_MAX_INFLIGHT_REQUESTS_PER_ACCOUNT
     
     # ==================== CRUD Operations ====================
     # Requirements: 2.1, 2.2
@@ -97,16 +186,16 @@ class AccountPoolService:
             daily_quota=daily_quota,
             daily_used=0,
             status="active",
-            created_at=datetime.utcnow(),
-            updated_at=datetime.utcnow()
+            created_at=utc_now_naive(),
+            updated_at=utc_now_naive()
         )
-        
+
         session.add(account)
         await session.flush()
 
         # 同步账号-模型路由（支持单账号多模型）
         await self.set_account_models(session, account.id, normalized_groups)
-        
+
         logger.info(
             f"Created account: {account.id} ({name}) with models={normalized_groups}"
         )
@@ -131,7 +220,7 @@ class AccountPoolService:
             return []
 
         crypto = get_crypto_service()
-        now = datetime.utcnow()
+        now = utc_now_naive()
         accounts: List[BackendAccount] = []
         routes: List[AccountModelRoute] = []
 
@@ -285,6 +374,58 @@ class AccountPoolService:
             return [account.model_group]
         return []
 
+    async def get_account_models_map(
+        self,
+        session: AsyncSession,
+        accounts: List[STAccount],
+        enabled_only: bool = True,
+    ) -> Dict[str, List[str]]:
+        """
+        批量获取账号支持的模型列表，避免逐账号查询路由表。
+        """
+        account_ids = [
+            str(account.id)
+            for account in accounts
+            if getattr(account, "id", None)
+        ]
+        if not account_ids:
+            return {}
+
+        model_map: Dict[str, List[str]] = {}
+        for chunk in self._chunked(account_ids):
+            route_result = await session.execute(
+                select(AccountModelRoute.account_id, AccountModelRoute.model_name)
+                .where(
+                    and_(
+                        AccountModelRoute.account_id.in_(chunk),
+                        AccountModelRoute.enabled == True if enabled_only else True,
+                    )
+                )
+                .order_by(
+                    AccountModelRoute.account_id.asc(),
+                    AccountModelRoute.priority.asc(),
+                    AccountModelRoute.model_name.asc(),
+                )
+            )
+            for account_id, model_name in route_result.fetchall():
+                if not account_id or not model_name:
+                    continue
+                bucket = model_map.setdefault(str(account_id), [])
+                normalized_model = str(model_name)
+                if normalized_model not in bucket:
+                    bucket.append(normalized_model)
+
+        for account in accounts:
+            account_id = getattr(account, "id", None)
+            if not account_id:
+                continue
+            if model_map.get(account_id):
+                continue
+            if account.model_group:
+                model_map[str(account_id)] = [account.model_group]
+
+        return model_map
+
     async def set_account_models(
         self,
         session: AsyncSession,
@@ -312,13 +453,13 @@ class AccountPoolService:
                 enabled=True,
                 weight=100,
                 priority=idx,
-                created_at=datetime.utcnow(),
-                updated_at=datetime.utcnow(),
+                created_at=utc_now_naive(),
+                updated_at=utc_now_naive(),
             ))
 
         # 兼容旧字段：保留主模型
         account.model_group = normalized[0]
-        account.updated_at = datetime.utcnow()
+        account.updated_at = utc_now_naive()
         await session.flush()
     
     async def get_accounts_by_model_group(
@@ -336,33 +477,69 @@ class AccountPoolService:
         Returns:
             该模型组的账号列表
         """
-        # 新路由表命中
-        route_result = await session.execute(
-            select(AccountModelRoute.account_id).where(
-                and_(
-                    AccountModelRoute.model_name == model_group,
-                    AccountModelRoute.enabled == True
+        accounts_by_model = await self.get_accounts_by_model_groups(session, [model_group])
+        return accounts_by_model.get(str(model_group or "").strip(), [])
+
+    async def get_accounts_by_model_groups(
+        self,
+        session: AsyncSession,
+        model_groups: List[str],
+    ) -> Dict[str, List[STAccount]]:
+        """
+        批量按模型组获取账号列表，避免逐模型 N+1 查询。
+        """
+        normalized = self._normalize_model_names(model_groups)
+        if not normalized:
+            return {}
+
+        accounts_by_model: Dict[str, Dict[str, STAccount]] = {
+            model_name: {}
+            for model_name in normalized
+        }
+
+        route_rows: List[Tuple[str, str]] = []
+        for chunk in self._chunked(normalized):
+            route_result = await session.execute(
+                select(AccountModelRoute.account_id, AccountModelRoute.model_name).where(
+                    and_(
+                        AccountModelRoute.model_name.in_(chunk),
+                        AccountModelRoute.enabled == True,
+                    )
                 )
             )
-        )
-        route_account_ids = [row[0] for row in route_result.fetchall()]
+            route_rows.extend(
+                (row[0], row[1])
+                for row in route_result.fetchall()
+                if row[0] and row[1]
+            )
 
-        accounts_by_id: Dict[str, STAccount] = {}
-        if route_account_ids:
+        route_account_ids = sorted({account_id for account_id, _model_name in route_rows})
+        route_accounts: Dict[str, STAccount] = {}
+        for chunk in self._chunked(route_account_ids):
             result = await session.execute(
-                select(STAccount).where(STAccount.id.in_(route_account_ids))
+                select(STAccount).where(STAccount.id.in_(chunk))
             )
             for account in result.scalars().all():
-                accounts_by_id[account.id] = account
+                route_accounts[account.id] = account
 
-        # 旧字段兜底（兼容历史数据）
-        legacy_result = await session.execute(
-            select(STAccount).where(STAccount.model_group == model_group)
-        )
-        for account in legacy_result.scalars().all():
-            accounts_by_id.setdefault(account.id, account)
+        for account_id, model_name in route_rows:
+            account = route_accounts.get(account_id)
+            if account is not None and model_name in accounts_by_model:
+                accounts_by_model[model_name][account.id] = account
 
-        return sorted(accounts_by_id.values(), key=lambda a: a.id)
+        for chunk in self._chunked(normalized):
+            legacy_result = await session.execute(
+                select(STAccount).where(STAccount.model_group.in_(chunk))
+            )
+            for account in legacy_result.scalars().all():
+                model_name = str(account.model_group or "").strip()
+                if model_name in accounts_by_model:
+                    accounts_by_model[model_name].setdefault(account.id, account)
+
+        return {
+            model_name: sorted(model_accounts.values(), key=lambda account: account.id)
+            for model_name, model_accounts in accounts_by_model.items()
+        }
     
     async def update_account(
         self,
@@ -423,9 +600,9 @@ class AccountPoolService:
         if resolved_model_groups is not None:
             await self.set_account_models(session, account_id, resolved_model_groups)
         else:
-            account.updated_at = datetime.utcnow()
+            account.updated_at = utc_now_naive()
             await session.flush()
-        
+
         logger.info(f"Updated account: {account_id}")
         return account
     
@@ -451,7 +628,7 @@ class AccountPoolService:
         await session.execute(
             delete(AccountModelRoute).where(AccountModelRoute.account_id == account_id)
         )
-        
+
         await session.delete(account)
         await session.flush()
         
@@ -488,7 +665,7 @@ class AccountPoolService:
             chunk_accounts = list(result.scalars().all())
             accounts.extend(chunk_accounts)
             found_ids.update(acc.id for acc in chunk_accounts)
-        now = datetime.utcnow()
+        now = utc_now_naive()
 
         for account in accounts:
             account.status = status
@@ -605,34 +782,47 @@ class AccountPoolService:
         """
         accounts = await self._list_model_group_accounts(session, model_group)
         status_counts: Dict[str, int] = defaultdict(int)
-        routable_accounts = 0
+        active_accounts = 0
         eligible_accounts = 0
-        stale_exhausted_accounts = 0
+        exhausted_accounts = 0
+        concurrency_limited_accounts = 0
+        available_accounts = 0
+        now = utc_now_naive()
 
         for account in accounts:
             status = str(account.status or "unknown")
             status_counts[status] += 1
 
-            if status in {"active", "exhausted"}:
-                routable_accounts += 1
+            if status == "active":
+                active_accounts += 1
                 if account.daily_used < account.daily_quota:
                     eligible_accounts += 1
-                    if status == "exhausted":
-                        stale_exhausted_accounts += 1
+                    if self._has_inflight_capacity(account, now=now):
+                        available_accounts += 1
+                    else:
+                        concurrency_limited_accounts += 1
+            elif status == "exhausted":
+                exhausted_accounts += 1
 
         return {
             "model_group": model_group,
             "total_accounts": len(accounts),
-            "routable_accounts": routable_accounts,
+            "active_accounts": active_accounts,
+            # Backward-compatible alias; only active accounts are routable now.
+            "routable_accounts": active_accounts,
             "eligible_accounts": eligible_accounts,
-            "stale_exhausted_accounts": stale_exhausted_accounts,
+            "exhausted_accounts": exhausted_accounts,
+            "stale_exhausted_accounts": 0,
+            "available_accounts": available_accounts,
+            "concurrency_limited_accounts": concurrency_limited_accounts,
             "status_counts": dict(sorted(status_counts.items())),
         }
 
     async def get_available_account(
         self,
         session: AsyncSession,
-        model_group: str
+        model_group: str,
+        exclude_account_id: Optional[str] = None,
     ) -> Optional[STAccount]:
         """
         使用轮询算法获取可用账号
@@ -647,6 +837,13 @@ class AccountPoolService:
         Returns:
             可用的账号对象，如果没有可用账号则返回 None
         """
+        if self._is_postgres_session(session):
+            return await self._get_available_account_postgres(
+                session,
+                model_group,
+                exclude_account_id=exclude_account_id,
+            )
+
         accounts = await self._list_model_group_accounts(session, model_group)
 
         if not accounts:
@@ -656,58 +853,223 @@ class AccountPoolService:
             )
             return None
 
-        routable_accounts = [
+        active_accounts = [
             account for account in accounts
-            if account.status in {"active", "exhausted"}
+            if account.status == "active"
+            and getattr(account, "id", None) != exclude_account_id
         ]
 
-        if not routable_accounts:
+        if not active_accounts:
             status_counts: Dict[str, int] = defaultdict(int)
             for account in accounts:
                 key = str(account.status or "unknown")
                 status_counts[key] += 1
             logger.warning(
-                "No routable accounts in model group '%s' (total=%d, status_counts=%s)",
+                "No active accounts in model group '%s' (total=%d, status_counts=%s)",
                 model_group,
                 len(accounts),
                 dict(sorted(status_counts.items())),
             )
             return None
 
-        eligible_accounts = [
-            account for account in routable_accounts
+        active_eligible_accounts = [
+            account for account in active_accounts
             if account.daily_used < account.daily_quota
+            and self._has_inflight_capacity(account)
         ]
 
-        if not eligible_accounts:
-            logger.warning(
-                "All routable accounts quota-blocked in model group '%s' (routable=%d, quota_blocked=%d)",
+        if active_eligible_accounts:
+            account = self._select_prioritized_active_account(
                 model_group,
-                len(routable_accounts),
-                len(routable_accounts),
+                active_eligible_accounts,
             )
-            return None
-
-        # 获取当前轮询索引
-        current_index = self._round_robin_index[model_group]
-
-        # 尝试找到一个可用账号（最多尝试 len(eligible_accounts) 次）
-        for _ in range(len(eligible_accounts)):
-            # 使用模运算确保索引在有效范围内
-            index = current_index % len(eligible_accounts)
-            account = eligible_accounts[index]
-
-            # 更新轮询索引
-            current_index += 1
-            self._round_robin_index[model_group] = current_index
-
-            # 账号选择阶段保持纯读，避免在高并发下放大 SQLite 写锁竞争。
-            # 状态与使用时间统一在请求收口（persist_success -> update_token_usage）时落库。
-
-            logger.debug(f"Selected account {account.id} for group {model_group}")
+            logger.debug(
+                "Selected active account %s for group %s (used=%s quota=%s remaining=%s)",
+                getattr(account, "id", None),
+                model_group,
+                getattr(account, "daily_used", None),
+                getattr(account, "daily_quota", None),
+                self._remaining_quota_value(account),
+            )
             return account
 
+        logger.debug(
+            "All active accounts are quota-blocked or inflight-limited for group %s (active=%d)",
+            model_group,
+            len(active_accounts),
+        )
         return None
+
+    def _select_round_robin_account(
+        self,
+        model_group: str,
+        eligible_accounts: List[STAccount],
+    ) -> STAccount:
+        """按模型组轮询选择账号。"""
+        if not eligible_accounts:
+            raise ValueError("eligible_accounts cannot be empty")
+
+        current_index = self._round_robin_index[model_group]
+        index = current_index % len(eligible_accounts)
+        account = eligible_accounts[index]
+        self._round_robin_index[model_group] = current_index + 1
+        return account
+
+    @staticmethod
+    def _remaining_quota_value(account: STAccount) -> int:
+        daily_quota = int(getattr(account, "daily_quota", 0) or 0)
+        daily_used = int(getattr(account, "daily_used", 0) or 0)
+        return max(0, daily_quota - daily_used)
+
+    def _select_prioritized_active_account(
+        self,
+        model_group: str,
+        eligible_accounts: List[STAccount],
+    ) -> STAccount:
+        """
+        账号优选策略：
+        1. 先选今日使用量更低的 active 账号（未使用/满额度账号优先）
+        2. 再选当前 inflight 更低的账号
+        3. 最后在同优先级集合内做轮询，避免单账号长期独占
+        """
+        if not eligible_accounts:
+            raise ValueError("eligible_accounts cannot be empty")
+
+        min_daily_used = min(int(getattr(account, "daily_used", 0) or 0) for account in eligible_accounts)
+        candidates = [
+            account for account in eligible_accounts
+            if int(getattr(account, "daily_used", 0) or 0) == min_daily_used
+        ]
+
+        min_effective_inflight = min(self._effective_inflight_requests(account) for account in candidates)
+        candidates = [
+            account for account in candidates
+            if self._effective_inflight_requests(account) == min_effective_inflight
+        ]
+
+        return self._select_round_robin_account(model_group, candidates)
+
+    async def _get_available_account_postgres(
+        self,
+        session: AsyncSession,
+        model_group: str,
+        *,
+        exclude_account_id: Optional[str] = None,
+    ) -> Optional[STAccount]:
+        """
+        PostgreSQL 并发安全选号：
+        使用 FOR UPDATE SKIP LOCKED，避免并发请求同时挑中同一账号。
+        仅从 active 账号中选择，并优先挑选今日使用量更低、当前 inflight 更低的账号。
+        """
+        now = utc_now_naive()
+        enabled_route_exists = self._enabled_route_exists_clause(model_group)
+
+        account = await self._select_available_account_postgres(
+            session,
+            now=now,
+            extra_conditions=[enabled_route_exists],
+            exclude_account_id=exclude_account_id,
+        )
+        if account is not None:
+            return account
+
+        return await self._select_available_account_postgres(
+            session,
+            now=now,
+            extra_conditions=[
+                STAccount.model_group == model_group,
+                ~enabled_route_exists,
+            ],
+            exclude_account_id=exclude_account_id,
+        )
+
+    @staticmethod
+    def _enabled_route_exists_clause(model_group: str):
+        return (
+            select(AccountModelRoute.id)
+            .where(
+                and_(
+                    AccountModelRoute.account_id == STAccount.id,
+                    AccountModelRoute.model_name == model_group,
+                    AccountModelRoute.enabled == True,
+                )
+            )
+            .correlate(STAccount)
+            .exists()
+        )
+
+    async def _select_available_account_postgres(
+        self,
+        session: AsyncSession,
+        *,
+        now: datetime,
+        extra_conditions: List[Any],
+        exclude_account_id: Optional[str],
+    ) -> Optional[STAccount]:
+        """选择一个 PostgreSQL 可用 active 账号。"""
+        query_conditions = [
+            STAccount.status == "active",
+            STAccount.daily_used < STAccount.daily_quota,
+            *extra_conditions,
+        ]
+        if exclude_account_id:
+            query_conditions.append(STAccount.id != exclude_account_id)
+
+        effective_inflight = self._effective_inflight_expr(self._reservation_stale_before(now))
+        if self._reservation_enabled():
+            query_conditions.append(
+                effective_inflight < ACCOUNT_MAX_INFLIGHT_REQUESTS_PER_ACCOUNT
+            )
+
+        result = await session.execute(
+            select(STAccount)
+            .where(and_(*query_conditions))
+            .order_by(
+                STAccount.daily_used.asc(),
+                effective_inflight.asc(),
+                STAccount.last_used_at.asc().nullsfirst(),
+                STAccount.updated_at.asc().nullsfirst(),
+                STAccount.id.asc(),
+            )
+            .with_for_update(of=STAccount, skip_locked=True)
+            .limit(1)
+        )
+        account = result.scalar_one_or_none()
+        if account is None:
+            return None
+
+        # 预占位：在锁定事务内刷新 last_used_at，降低同一账号被连续挑中的概率。
+        if self._reservation_enabled():
+            account.inflight_requests = self._effective_inflight_requests(account, now=now) + 1
+            account.inflight_updated_at = now
+        account.last_used_at = now
+        account.updated_at = now
+        await session.flush()
+        return account
+
+    async def release_account_request(
+        self,
+        session: AsyncSession,
+        account_id: str,
+    ) -> bool:
+        """
+        释放账号飞行中请求占位；重复释放会被钳制到 0。
+        """
+        if not self._reservation_enabled():
+            return True
+
+        now = utc_now_naive()
+        result = await session.execute(
+            update(STAccount)
+            .where(STAccount.id == account_id)
+            .values(
+                inflight_requests=self._decrement_inflight_expr(self._reservation_stale_before(now)),
+                inflight_updated_at=now,
+                updated_at=now,
+            )
+        )
+        rowcount = getattr(result, "rowcount", None)
+        return rowcount != 0 if rowcount is not None else True
     
     def get_round_robin_index(self, model_group: str) -> int:
         """
@@ -749,19 +1111,69 @@ class AccountPoolService:
         Returns:
             是否成功标记
         """
-        account = await self.get_account(session, account_id)
-        if account is None:
+        exists = await self.get_account(session, account_id)
+        if exists is None:
             return False
-        
-        account.status = "exhausted"
-        if enforce_quota_block and account.daily_used < account.daily_quota:
+
+        values: Dict[str, Any] = {
+            "status": "exhausted",
+            "updated_at": utc_now_naive(),
+        }
+        if enforce_quota_block:
             # Prevent immediate re-selection when upstream already reports quota exceeded
             # but local counters are still lagging.
-            account.daily_used = account.daily_quota
-        account.updated_at = datetime.utcnow()
-        await session.flush()
-        
+            values["daily_used"] = case(
+                (
+                    STAccount.daily_used < STAccount.daily_quota,
+                    STAccount.daily_quota,
+                ),
+                else_=STAccount.daily_used,
+            )
+
+        await session.execute(
+            update(STAccount)
+            .where(STAccount.id == account_id)
+            .values(**values)
+        )
+
         logger.info(f"Marked account {account_id} as exhausted")
+        return True
+
+    async def defer_account_selection(
+        self,
+        session: AsyncSession,
+        account_id: str,
+        defer_seconds: float,
+    ) -> bool:
+        """
+        将账号短暂后置（通过推进 last_used_at），用于暂时性上游故障降噪。
+        """
+        if defer_seconds <= 0:
+            return False
+
+        exists = await self.get_account(session, account_id)
+        if exists is None:
+            return False
+
+        now = utc_now_naive()
+        deferred_until = now + timedelta(seconds=max(0.0, float(defer_seconds)))
+        await session.execute(
+            update(STAccount)
+            .where(STAccount.id == account_id)
+            .values(
+                last_used_at=case(
+                    (STAccount.last_used_at.is_(None), deferred_until),
+                    (STAccount.last_used_at < deferred_until, deferred_until),
+                    else_=STAccount.last_used_at,
+                ),
+                updated_at=now,
+            )
+        )
+        logger.info(
+            "Deferred account selection: account_id=%s defer_seconds=%.2f",
+            account_id,
+            defer_seconds,
+        )
         return True
 
     # ==================== Token Usage Tracking ====================
@@ -772,7 +1184,10 @@ class AccountPoolService:
         session: AsyncSession,
         account_id: str,
         input_tokens: int,
-        output_tokens: int
+        output_tokens: int,
+        *,
+        record_history: bool = True,
+        fetch_account: bool = True,
     ) -> Optional[STAccount]:
         """
         更新账号的 Token 使用量
@@ -786,36 +1201,79 @@ class AccountPoolService:
         Returns:
             更新后的账号对象，如果不存在则返回 None
         """
+        total_tokens = max(0, int(input_tokens)) + max(0, int(output_tokens))
+        now = utc_now_naive()
+        values: Dict[str, Any] = {
+            "daily_used": STAccount.daily_used + total_tokens,
+            "last_used_at": now,
+            "updated_at": now,
+            "status": case(
+                (STAccount.status == "disabled", "disabled"),
+                (
+                    (STAccount.daily_used + total_tokens) >= STAccount.daily_quota,
+                    "exhausted",
+                ),
+                else_=STAccount.status,
+            ),
+        }
+        if self._reservation_enabled():
+            values["inflight_requests"] = self._decrement_inflight_expr(
+                self._reservation_stale_before(now)
+            )
+            values["inflight_updated_at"] = now
+
+        await session.execute(
+            update(STAccount)
+            .where(STAccount.id == account_id)
+            .values(**values)
+        )
+
+        # 记录到历史表（可选，用于高并发下改为后台批量写入）
+        if record_history:
+            await self._record_usage_history(
+                session, account_id, None, input_tokens, output_tokens
+            )
+
+        if not fetch_account:
+            logger.debug(
+                "Updated token usage for account %s: +%s tokens (fetch skipped)",
+                account_id,
+                total_tokens,
+            )
+            return None
+
         account = await self.get_account(session, account_id)
         if account is None:
             return None
-        
-        total_tokens = input_tokens + output_tokens
-        account.daily_used += total_tokens
-        now = datetime.utcnow()
-        account.last_used_at = now
-        account.updated_at = now
-        
-        # 检查是否达到配额
+
         if account.daily_used >= account.daily_quota:
-            account.status = "exhausted"
             logger.info(f"Account {account_id} reached quota limit")
-        elif account.status == "exhausted":
-            # 容错：陈旧 exhausted 状态在成功请求后自动恢复
-            account.status = "active"
-        
-        # 记录到历史表
-        await self._record_usage_history(
-            session, account_id, None, input_tokens, output_tokens
-        )
-        
-        await session.flush()
-        
+
         logger.debug(
             f"Updated token usage for account {account_id}: "
             f"+{total_tokens} (total: {account.daily_used}/{account.daily_quota})"
         )
         return account
+
+    async def record_usage_history(
+        self,
+        session: AsyncSession,
+        account_id: Optional[str],
+        api_key_id: Optional[str],
+        input_tokens: int,
+        output_tokens: int,
+        *,
+        request_count: int = 1,
+    ) -> None:
+        """仅记录 token_usage_history，用于后台批量聚合写。"""
+        await self._record_usage_history(
+            session,
+            account_id,
+            api_key_id,
+            input_tokens,
+            output_tokens,
+            request_count=request_count,
+        )
     
     async def _record_usage_history(
         self,
@@ -823,7 +1281,9 @@ class AccountPoolService:
         account_id: Optional[str],
         api_key_id: Optional[str],
         input_tokens: int,
-        output_tokens: int
+        output_tokens: int,
+        *,
+        request_count: int = 1,
     ) -> None:
         """
         记录 Token 使用历史
@@ -835,36 +1295,95 @@ class AccountPoolService:
             input_tokens: 输入 Token 数量
             output_tokens: 输出 Token 数量
         """
-        today = date.today()
+        today = utc_today()
+        safe_request_count = max(1, int(request_count))
         
-        # 查找今天的记录
-        result = await session.execute(
-            select(TokenUsageHistory).where(
-                and_(
-                    TokenUsageHistory.date == today,
-                    TokenUsageHistory.account_id == account_id,
-                    TokenUsageHistory.api_key_id == api_key_id
+        if self._usage_upsert_available and self._is_postgres_session(session):
+            try:
+                # PostgreSQL: 基于表达式唯一索引的原子 UPSERT
+                await session.execute(
+                    text(
+                        """
+                        INSERT INTO token_usage_history (
+                            date, account_id, api_key_id, input_tokens, output_tokens, request_count
+                        )
+                        VALUES (
+                            :date, :account_id, :api_key_id, :input_tokens, :output_tokens, :request_count
+                        )
+                        ON CONFLICT (date, COALESCE(account_id, ''), COALESCE(api_key_id, ''))
+                        DO UPDATE SET
+                            input_tokens = token_usage_history.input_tokens + EXCLUDED.input_tokens,
+                            output_tokens = token_usage_history.output_tokens + EXCLUDED.output_tokens,
+                            request_count = token_usage_history.request_count + EXCLUDED.request_count
+                        """
+                    ),
+                    {
+                        "date": today,
+                        "account_id": account_id,
+                        "api_key_id": api_key_id,
+                        "input_tokens": input_tokens,
+                        "output_tokens": output_tokens,
+                        "request_count": safe_request_count,
+                    },
                 )
+                return
+            except Exception as exc:
+                # 仅降级一次，后续直接走锁定回退路径，避免重复异常开销。
+                self._usage_upsert_available = False
+                logger.warning(
+                    "Token usage history UPSERT unavailable, fallback to locked merge path: %s",
+                    exc,
+                )
+
+        # 回退路径（兼容 SQLite / 索引未就绪）：事务级锁 + 合并重复行
+        if self._is_postgres_session(session):
+            bucket_key = f"{today.isoformat()}|{account_id or ''}|{api_key_id or ''}"
+            await session.execute(
+                text("SELECT pg_advisory_xact_lock(hashtext(:bucket_key))"),
+                {"bucket_key": bucket_key},
             )
+
+        conditions = [TokenUsageHistory.date == today]
+        if account_id is None:
+            conditions.append(TokenUsageHistory.account_id.is_(None))
+        else:
+            conditions.append(TokenUsageHistory.account_id == account_id)
+
+        if api_key_id is None:
+            conditions.append(TokenUsageHistory.api_key_id.is_(None))
+        else:
+            conditions.append(TokenUsageHistory.api_key_id == api_key_id)
+
+        result = await session.execute(
+            select(TokenUsageHistory)
+            .where(and_(*conditions))
+            .with_for_update()
         )
-        history = result.scalar_one_or_none()
-        
-        if history:
-            # 更新现有记录
+        rows = list(result.scalars().all())
+
+        if rows:
+            history = rows[0]
+            if len(rows) > 1:
+                # 历史重复桶在写入时合并，防止后续 scalar_one_or_none 冲突。
+                for duplicate in rows[1:]:
+                    history.input_tokens += duplicate.input_tokens
+                    history.output_tokens += duplicate.output_tokens
+                    history.request_count += duplicate.request_count
+                    await session.delete(duplicate)
             history.input_tokens += input_tokens
             history.output_tokens += output_tokens
-            history.request_count += 1
-        else:
-            # 创建新记录
-            history = TokenUsageHistory(
-                date=today,
-                account_id=account_id,
-                api_key_id=api_key_id,
-                input_tokens=input_tokens,
-                output_tokens=output_tokens,
-                request_count=1
-            )
-            session.add(history)
+            history.request_count += safe_request_count
+            return
+
+        history = TokenUsageHistory(
+            date=today,
+            account_id=account_id,
+            api_key_id=api_key_id,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            request_count=safe_request_count
+        )
+        session.add(history)
     
     def get_usage_percentage(self, account: STAccount) -> float:
         """
@@ -953,7 +1472,7 @@ class AccountPoolService:
             if account.status == "exhausted":
                 account.status = "active"
             
-            account.updated_at = datetime.utcnow()
+            account.updated_at = utc_now_naive()
             reset_count += 1
         
         await session.flush()
@@ -983,7 +1502,7 @@ class AccountPoolService:
         account.daily_used = 0
         if account.status == "exhausted":
             account.status = "active"
-        account.updated_at = datetime.utcnow()
+        account.updated_at = utc_now_naive()
         
         await session.flush()
         

@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import logging
 import time
-import uuid
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, Header, Request
@@ -48,10 +47,17 @@ def _anthropic_error_payload(error_handler, error: APIError) -> Dict[str, Any]:
     return error_handler.to_anthropic_error(error)
 
 
-def _anthropic_error_response(error_handler, error: APIError) -> JSONResponse:
+def _anthropic_error_response(
+    error_handler,
+    error: APIError,
+    *,
+    request_id: Optional[str] = None,
+) -> JSONResponse:
+    headers = {"X-Request-ID": request_id} if request_id else None
     return JSONResponse(
         status_code=error.status_code,
         content=_anthropic_error_payload(error_handler, error),
+        headers=headers,
     )
 
 
@@ -241,11 +247,17 @@ async def count_tokens(
         error = error_handler.create_authentication_error("Missing API key")
         return _anthropic_error_response(error_handler, error)
 
-    valid, error_msg, _api_key_obj = await runtime.api_key_service.validate_key(
-        session,
-        raw_key,
-        canonical.model,
-    )
+    try:
+        valid, error_msg, _api_key_obj = await runtime.run_db_guarded(
+            session,
+            lambda: runtime.api_key_service.validate_key(
+                session,
+                raw_key,
+                canonical.model,
+            ),
+        )
+    except GatewayAuthError as exc:
+        return _anthropic_error_response(error_handler, exc.error)
     if not valid:
         error = _map_validation_error(error_handler, error_msg or "Invalid API key")
         return _anthropic_error_response(error_handler, error)
@@ -264,13 +276,12 @@ async def create_message(
     anthropic_beta: Optional[str] = Header(None, alias="anthropic-beta"),
     session: AsyncSession = Depends(get_session),
 ):
-    request_id = uuid.uuid4().hex[:24]
-    start_time = time.time()
-
     bridge = get_protocol_bridge()
     runtime = get_gateway_runtime()
     response_transformer = get_response_transformer()
     error_handler = get_error_handler()
+    request_id = runtime.resolve_request_id(headers=http_request.headers)
+    start_time = time.time()
 
     try:
         body_json = await http_request.json()
@@ -278,7 +289,7 @@ async def create_message(
         canonical = bridge.parse_anthropic_messages(body_json)
     except Exception as exc:
         error = error_handler.create_invalid_request_error(str(exc))
-        return _anthropic_error_response(error_handler, error)
+        return _anthropic_error_response(error_handler, error, request_id=request_id)
 
     if anthropic_version:
         logger.debug("anthropic-version=%s", anthropic_version)
@@ -413,6 +424,7 @@ async def create_message(
                             response_time_ms=runtime.elapsed_ms(start_time),
                             client_ip=client_ip,
                             error_message=api_error.message,
+                            defer_noncritical_logs=True,
                         )
 
                 return StreamingResponse(
@@ -475,13 +487,49 @@ async def create_message(
         )
 
         if canonical.stream:
-            stream_gen = await runtime.run_stream(resolved=resolved, payload=payload)
+            stream_gen = await runtime.run_stream(
+                resolved=resolved,
+                payload=payload,
+                session=session,
+            )
+
+            try:
+                first_raw_chunk = await anext(stream_gen)
+            except StopAsyncIteration:
+                first_raw_chunk = None
+            except Exception as exc:
+                logger.exception("Anthropic stream bootstrap failed")
+                api_error = runtime.map_backend_exception(exc)
+
+                await runtime.persist_error(
+                    session,
+                    resolved=resolved,
+                    api_type="anthropic",
+                    model=canonical.model,
+                    input_preview=canonical.input_preview(),
+                    response_time_ms=runtime.elapsed_ms(start_time),
+                    client_ip=client_ip,
+                    error_message=api_error.message,
+                    api_error=api_error,
+                )
+                return _anthropic_error_response(error_handler, api_error, request_id=request_id)
 
             async def generate_stream():
                 raw_tokens: List[str] = []
                 state = {"best_usage": None, "run_id": None}
 
                 async def tracked_backend_stream():
+                    if first_raw_chunk is not None:
+                        token, usage_candidate, run_candidate = runtime.parse_stream_chunk(first_raw_chunk)
+                        if run_candidate and not state["run_id"]:
+                            state["run_id"] = run_candidate
+                        state["best_usage"] = runtime.merge_stream_usage(
+                            state["best_usage"],
+                            usage_candidate,
+                        )
+                        if token:
+                            raw_tokens.append(token)
+                        yield first_raw_chunk
                     async for raw_chunk in stream_gen:
                         token, usage_candidate, run_candidate = runtime.parse_stream_chunk(raw_chunk)
                         if run_candidate and not state["run_id"]:
@@ -552,6 +600,7 @@ async def create_message(
                         response_time_ms=runtime.elapsed_ms(start_time),
                         client_ip=client_ip,
                         error_message=api_error.message,
+                        defer_noncritical_logs=True,
                     )
 
             return StreamingResponse(
@@ -564,7 +613,11 @@ async def create_message(
                 },
             )
 
-        backend_response = await runtime.run_sync(resolved=resolved, payload=payload)
+        backend_response = await runtime.run_sync(
+            resolved=resolved,
+            payload=payload,
+            session=session,
+        )
         raw_output = runtime.extract_content(backend_response)
         parsed = bridge.parse_model_output(raw_output)
         usage = runtime.usage_from_sync(
@@ -615,7 +668,7 @@ async def create_message(
         return JSONResponse(content=response_data, headers={"X-Request-ID": request_id})
 
     except GatewayAuthError as exc:
-        return _anthropic_error_response(error_handler, exc.error)
+        return _anthropic_error_response(error_handler, exc.error, request_id=request_id)
     except Exception as exc:
         logger.exception("Anthropic request failed")
         api_error = runtime.map_backend_exception(exc)
@@ -629,5 +682,6 @@ async def create_message(
             response_time_ms=runtime.elapsed_ms(start_time),
             client_ip=client_ip,
             error_message=api_error.message,
+            api_error=api_error,
         )
-        return _anthropic_error_response(error_handler, api_error)
+        return _anthropic_error_response(error_handler, api_error, request_id=request_id)

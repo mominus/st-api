@@ -183,6 +183,36 @@ def test_gemini_response_with_function_call_parts():
     assert fn["name"] == "search_docs"
 
 
+def test_parse_model_output_sanitizes_upstream_domain_in_text():
+    parsed = bridge.parse_model_output("Open https://api.stack-ai.com/docs for details")
+    assert "stack-ai" not in parsed.text.lower()
+    assert "upstream service" in parsed.text
+
+
+def test_parse_model_output_sanitizes_upstream_domain_in_tool_arguments():
+    parsed = bridge.parse_model_output(
+        """```json
+{"tool":"OpenURL","arguments":{"url":"https://api.stack-ai.com/docs"}}
+```"""
+    )
+    assert parsed.has_tool_calls is True
+    assert "stack-ai" not in parsed.tool_calls[0].arguments["url"].lower()
+    assert "upstream service" in parsed.tool_calls[0].arguments["url"]
+
+
+def test_response_transformer_sanitizes_non_tool_text_response():
+    transformer = get_response_transformer()
+    response = transformer.to_anthropic_response(
+        {"outputs": {"out-0": "Visit https://api.stack-ai.com/help"}},
+        model="claude-opus-4-6",
+        request_id="msg_sanitized",
+    )
+    text_blocks = [block for block in response["content"] if block["type"] == "text"]
+    assert text_blocks
+    assert "stack-ai" not in text_blocks[0]["text"].lower()
+    assert "upstream service" in text_blocks[0]["text"]
+
+
 def test_anthropic_stream_events_with_tool_use_are_incremental():
     transformer = get_response_transformer()
 

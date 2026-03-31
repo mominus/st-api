@@ -12,10 +12,11 @@ from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any, Tuple
 from dataclasses import dataclass, field
 
-from sqlalchemy import select, and_, or_, desc
+from sqlalchemy import select, and_, desc, func, case, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.database import RequestLog, get_session_factory
+from app.services.time_utils import to_utc_naive, utc_now_naive
 
 # 配置标准 Python 日志
 logger = logging.getLogger(__name__)
@@ -137,7 +138,7 @@ class LoggerService:
         """
         log_entry = RequestLog(
             id=request_id,
-            timestamp=timestamp or datetime.utcnow(),
+            timestamp=to_utc_naive(timestamp) if timestamp is not None else utc_now_naive(),
             api_key_prefix=api_key_prefix,
             client_ip=client_ip,
             model=model,
@@ -148,10 +149,9 @@ class LoggerService:
             status=status,
             error_message=error_message
         )
-        
+
         session.add(log_entry)
-        await session.flush()
-        
+
         # 同时记录到标准日志
         log_msg = (
             f"Request {request_id}: "
@@ -375,12 +375,12 @@ class LoggerService:
         # 按时间倒序排列
         query = query.order_by(desc(RequestLog.timestamp))
         
-        # 获取总数
-        count_query = select(RequestLog)
+        # 获取总数（聚合计数，避免拉全量行）
+        count_query = select(func.count(RequestLog.id))
         if conditions:
             count_query = count_query.where(and_(*conditions))
         count_result = await session.execute(count_query)
-        total = len(list(count_result.scalars().all()))
+        total = int(count_result.scalar() or 0)
         
         # 应用分页
         query = query.offset(params.offset).limit(params.limit)
@@ -585,33 +585,48 @@ class LoggerService:
         if end_time:
             conditions.append(RequestLog.timestamp <= end_time)
         
-        # 查询所有符合条件的日志
-        query = select(RequestLog)
-        if conditions:
-            query = query.where(and_(*conditions))
-        
-        result = await session.execute(query)
-        logs = list(result.scalars().all())
-        
-        # 计算统计信息
-        total_requests = len(logs)
-        success_count = sum(1 for log in logs if log.status == "success")
-        error_count = sum(1 for log in logs if log.status == "error")
-        
-        total_input_tokens = sum(log.input_tokens or 0 for log in logs)
-        total_output_tokens = sum(log.output_tokens or 0 for log in logs)
-        
-        response_times = [log.response_time_ms for log in logs if log.response_time_ms]
-        avg_response_time = (
-            sum(response_times) / len(response_times) 
-            if response_times else 0
+        where_clause = and_(*conditions) if conditions else None
+
+        # 聚合主统计，避免把全量日志载入内存
+        aggregate_query = select(
+            func.count(RequestLog.id).label("total_requests"),
+            func.coalesce(
+                func.sum(case((RequestLog.status == "success", 1), else_=0)),
+                0,
+            ).label("success_count"),
+            func.coalesce(
+                func.sum(case((RequestLog.status == "error", 1), else_=0)),
+                0,
+            ).label("error_count"),
+            func.coalesce(func.sum(RequestLog.input_tokens), 0).label("total_input_tokens"),
+            func.coalesce(func.sum(RequestLog.output_tokens), 0).label("total_output_tokens"),
+            func.coalesce(func.avg(RequestLog.response_time_ms), 0.0).label("avg_response_time_ms"),
         )
-        
-        # 按模型统计
-        model_stats: Dict[str, int] = {}
-        for log in logs:
-            if log.model:
-                model_stats[log.model] = model_stats.get(log.model, 0) + 1
+        if where_clause is not None:
+            aggregate_query = aggregate_query.where(where_clause)
+        aggregate_row = (await session.execute(aggregate_query)).one()
+
+        total_requests = int(aggregate_row.total_requests or 0)
+        success_count = int(aggregate_row.success_count or 0)
+        error_count = int(aggregate_row.error_count or 0)
+        total_input_tokens = int(aggregate_row.total_input_tokens or 0)
+        total_output_tokens = int(aggregate_row.total_output_tokens or 0)
+        avg_response_time = float(aggregate_row.avg_response_time_ms or 0.0)
+
+        # 按模型统计（分组聚合）
+        model_query = select(
+            RequestLog.model,
+            func.count(RequestLog.id),
+        ).where(RequestLog.model.isnot(None))
+        if where_clause is not None:
+            model_query = model_query.where(where_clause)
+        model_query = model_query.group_by(RequestLog.model)
+        model_result = await session.execute(model_query)
+        model_stats: Dict[str, int] = {
+            str(model): int(count or 0)
+            for model, count in model_result.fetchall()
+            if model
+        }
         
         return {
             "total_requests": total_requests,
@@ -640,7 +655,7 @@ class LoggerService:
         Returns:
             错误率（0-100）
         """
-        start_time = datetime.utcnow() - timedelta(minutes=time_window_minutes)
+        start_time = utc_now_naive() - timedelta(minutes=time_window_minutes)
         
         stats = await self.get_log_statistics(session, start_time=start_time)
         
@@ -663,30 +678,26 @@ class LoggerService:
     ) -> int:
         """
         清理旧日志
-        
+
         Args:
             session: 数据库会话
             days_to_keep: 保留天数
-            
+
         Returns:
             删除的日志数量
         """
-        cutoff_date = datetime.utcnow() - timedelta(days=days_to_keep)
-        
-        # 查询要删除的日志
-        result = await session.execute(
-            select(RequestLog).where(RequestLog.timestamp < cutoff_date)
+        cutoff_date = utc_now_naive() - timedelta(days=days_to_keep)
+
+        count_query = select(func.count(RequestLog.id)).where(RequestLog.timestamp < cutoff_date)
+        count = int((await session.execute(count_query)).scalar() or 0)
+        if count <= 0:
+            return 0
+
+        await session.execute(
+            delete(RequestLog).where(RequestLog.timestamp < cutoff_date)
         )
-        logs_to_delete = list(result.scalars().all())
-        
-        count = len(logs_to_delete)
-        
-        # 删除日志
-        for log in logs_to_delete:
-            await session.delete(log)
-        
         await session.flush()
-        
+
         logger.info(f"Cleaned up {count} old logs (older than {days_to_keep} days)")
         return count
 

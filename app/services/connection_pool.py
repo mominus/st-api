@@ -11,6 +11,7 @@ Connection Pool Management
 
 import os
 import asyncio
+import time
 from typing import Optional, Dict, Any
 from contextlib import asynccontextmanager
 import logging
@@ -20,24 +21,77 @@ import httpx
 logger = logging.getLogger(__name__)
 
 
+def _get_int_env(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None or str(raw).strip() == "":
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        logger.warning("Invalid integer env %s=%r, fallback=%s", name, raw, default)
+        return default
+
+
+def _db_pool_capacity(db_pool_size: int, db_max_overflow: int) -> int:
+    return max(1, int(db_pool_size) + int(db_max_overflow))
+
+
+def _resolve_max_concurrent_db_ops(
+    configured_value: int,
+    *,
+    db_pool_size: int,
+    db_max_overflow: int,
+) -> int:
+    pool_capacity = _db_pool_capacity(db_pool_size, db_max_overflow)
+    sanitized = max(1, int(configured_value))
+
+    if sanitized > pool_capacity:
+        logger.warning(
+            (
+                "MAX_CONCURRENT_DB_OPS=%s exceeds DB pool capacity=%s "
+                "(pool_size=%s, max_overflow=%s); clamped to %s"
+            ),
+            sanitized,
+            pool_capacity,
+            db_pool_size,
+            db_max_overflow,
+            pool_capacity,
+        )
+        return pool_capacity
+
+    return sanitized
+
+
 class ConnectionPoolConfig:
     """连接池配置"""
-    
+
     # 数据库连接池配置
-    DB_POOL_SIZE: int = int(os.getenv("DB_POOL_SIZE", "20"))
-    DB_MAX_OVERFLOW: int = int(os.getenv("DB_MAX_OVERFLOW", "30"))
-    DB_POOL_TIMEOUT: int = int(os.getenv("DB_POOL_TIMEOUT", "30"))
-    DB_POOL_RECYCLE: int = int(os.getenv("DB_POOL_RECYCLE", "3600"))
-    
+    DB_POOL_SIZE: int = _get_int_env("DB_POOL_SIZE", 8)
+    DB_MAX_OVERFLOW: int = _get_int_env("DB_MAX_OVERFLOW", 2)
+    DB_POOL_TIMEOUT: int = _get_int_env("DB_POOL_TIMEOUT", 5)
+    DB_POOL_RECYCLE: int = _get_int_env("DB_POOL_RECYCLE", 1800)
+
     # HTTP 客户端连接池配置
     HTTP_MAX_CONNECTIONS: int = int(os.getenv("HTTP_MAX_CONNECTIONS", "100"))
     HTTP_MAX_KEEPALIVE: int = int(os.getenv("HTTP_MAX_KEEPALIVE", "20"))
     HTTP_TIMEOUT: float = float(os.getenv("HTTP_TIMEOUT", "60.0"))
     HTTP_CONNECT_TIMEOUT: float = float(os.getenv("HTTP_CONNECT_TIMEOUT", "10.0"))
-    
+
     # 并发限制
-    MAX_CONCURRENT_REQUESTS: int = int(os.getenv("MAX_CONCURRENT_REQUESTS", "100"))
-    MAX_CONCURRENT_DB_OPS: int = int(os.getenv("MAX_CONCURRENT_DB_OPS", "50"))
+    MAX_CONCURRENT_REQUESTS: int = int(os.getenv("MAX_CONCURRENT_REQUESTS", "60"))
+    MAX_CONCURRENT_STREAMS: int = _get_int_env(
+        "MAX_CONCURRENT_STREAMS",
+        MAX_CONCURRENT_REQUESTS,
+    )
+    CONFIGURED_MAX_CONCURRENT_DB_OPS: int = _get_int_env(
+        "MAX_CONCURRENT_DB_OPS",
+        _db_pool_capacity(DB_POOL_SIZE, DB_MAX_OVERFLOW),
+    )
+    MAX_CONCURRENT_DB_OPS: int = _resolve_max_concurrent_db_ops(
+        CONFIGURED_MAX_CONCURRENT_DB_OPS,
+        db_pool_size=DB_POOL_SIZE,
+        db_max_overflow=DB_MAX_OVERFLOW,
+    )
 
 
 class HTTPClientPool:
@@ -101,14 +155,27 @@ class ConcurrencyLimiter:
         if cls._instance is None:
             cls._instance = super().__new__(cls)
             cls._instance._request_semaphore = None
+            cls._instance._stream_semaphore = None
             cls._instance._db_semaphore = None
             cls._instance._active_requests = 0
+            cls._instance._queued_requests = 0
             cls._instance._total_requests = 0
             cls._instance._rejected_requests = 0
+            cls._instance._active_streams = 0
+            cls._instance._queued_streams = 0
+            cls._instance._total_streams = 0
+            cls._instance._rejected_streams = 0
+            cls._instance._active_db_ops = 0
+            cls._instance._queued_db_ops = 0
+            cls._instance._total_db_ops = 0
+            cls._instance._rejected_db_ops = 0
             cls._instance._lock = None
             cls._instance._loop_id = None
             # 响应时间统计
             cls._instance._response_times = []
+            cls._instance._request_wait_times = []
+            cls._instance._stream_wait_times = []
+            cls._instance._db_wait_times = []
             cls._instance._max_response_samples = 1000  # 保留最近1000个样本
         return cls._instance
     
@@ -125,12 +192,34 @@ class ConcurrencyLimiter:
             self._request_semaphore = asyncio.Semaphore(
                 ConnectionPoolConfig.MAX_CONCURRENT_REQUESTS
             )
+            self._stream_semaphore = asyncio.Semaphore(
+                ConnectionPoolConfig.MAX_CONCURRENT_STREAMS
+            )
             self._db_semaphore = asyncio.Semaphore(
                 ConnectionPoolConfig.MAX_CONCURRENT_DB_OPS
             )
             self._lock = asyncio.Lock()
             self._loop_id = current_loop_id
-    
+
+    def _record_sample(self, samples: list[float], value: float) -> None:
+        samples.append(max(0.0, float(value)))
+        if len(samples) > self._max_response_samples:
+            del samples[:-self._max_response_samples]
+
+    def _calc_latency_stats(self, samples: list[float]) -> Dict[str, float]:
+        if not samples:
+            return {"avg": 0.0, "p95": 0.0, "p99": 0.0}
+
+        sorted_times = sorted(samples)
+        avg_value = sum(sorted_times) / len(sorted_times)
+        p95_idx = int(len(sorted_times) * 0.95)
+        p99_idx = int(len(sorted_times) * 0.99)
+        return {
+            "avg": round(avg_value, 2),
+            "p95": round(sorted_times[min(p95_idx, len(sorted_times) - 1)], 2),
+            "p99": round(sorted_times[min(p99_idx, len(sorted_times) - 1)], 2),
+        }
+
     @asynccontextmanager
     async def acquire_request(self, timeout: float = 30.0):
         """
@@ -143,27 +232,34 @@ class ConcurrencyLimiter:
             asyncio.TimeoutError: 等待超时
         """
         self._ensure_initialized()
-        
+        wait_started_at = time.monotonic()
+        async with self._lock:
+            self._queued_requests += 1
+
         try:
             # 尝试在超时时间内获取信号量
             await asyncio.wait_for(
                 self._request_semaphore.acquire(),
                 timeout=timeout
             )
-            
+            wait_ms = (time.monotonic() - wait_started_at) * 1000
+
             async with self._lock:
+                self._queued_requests = max(0, self._queued_requests - 1)
                 self._active_requests += 1
                 self._total_requests += 1
-            
+                self._record_sample(self._request_wait_times, wait_ms)
+
             try:
                 yield
             finally:
                 self._request_semaphore.release()
                 async with self._lock:
-                    self._active_requests -= 1
-                    
+                    self._active_requests = max(0, self._active_requests - 1)
+
         except asyncio.TimeoutError:
             async with self._lock:
+                self._queued_requests = max(0, self._queued_requests - 1)
                 self._rejected_requests += 1
             logger.warning(
                 f"Request rejected due to concurrency limit. "
@@ -171,7 +267,50 @@ class ConcurrencyLimiter:
                 f"Max: {ConnectionPoolConfig.MAX_CONCURRENT_REQUESTS}"
             )
             raise
-    
+
+    @asynccontextmanager
+    async def acquire_stream(self, timeout: float = 10.0):
+        """
+        获取流式会话许可。
+
+        该许可会在 SSE 生命周期内持有，用于避免长流占满普通请求槽位。
+        """
+        self._ensure_initialized()
+        wait_started_at = time.monotonic()
+        async with self._lock:
+            self._queued_streams += 1
+
+        try:
+            await asyncio.wait_for(
+                self._stream_semaphore.acquire(),
+                timeout=timeout
+            )
+            wait_ms = (time.monotonic() - wait_started_at) * 1000
+
+            async with self._lock:
+                self._queued_streams = max(0, self._queued_streams - 1)
+                self._active_streams += 1
+                self._total_streams += 1
+                self._record_sample(self._stream_wait_times, wait_ms)
+
+            try:
+                yield
+            finally:
+                self._stream_semaphore.release()
+                async with self._lock:
+                    self._active_streams = max(0, self._active_streams - 1)
+
+        except asyncio.TimeoutError:
+            async with self._lock:
+                self._queued_streams = max(0, self._queued_streams - 1)
+                self._rejected_streams += 1
+            logger.warning(
+                f"Stream rejected due to concurrency limit. "
+                f"Active: {self._active_streams}, "
+                f"Max: {ConnectionPoolConfig.MAX_CONCURRENT_STREAMS}"
+            )
+            raise
+
     @asynccontextmanager
     async def acquire_db(self, timeout: float = 10.0):
         """
@@ -181,44 +320,69 @@ class ConcurrencyLimiter:
             timeout: 等待超时时间（秒）
         """
         self._ensure_initialized()
-        
+        wait_started_at = time.monotonic()
+        async with self._lock:
+            self._queued_db_ops += 1
+
         try:
             await asyncio.wait_for(
                 self._db_semaphore.acquire(),
                 timeout=timeout
             )
+            wait_ms = (time.monotonic() - wait_started_at) * 1000
+            async with self._lock:
+                self._queued_db_ops = max(0, self._queued_db_ops - 1)
+                self._active_db_ops += 1
+                self._total_db_ops += 1
+                self._record_sample(self._db_wait_times, wait_ms)
             try:
                 yield
             finally:
                 self._db_semaphore.release()
+                async with self._lock:
+                    self._active_db_ops = max(0, self._active_db_ops - 1)
         except asyncio.TimeoutError:
+            async with self._lock:
+                self._queued_db_ops = max(0, self._queued_db_ops - 1)
+                self._rejected_db_ops += 1
             logger.warning("Database operation rejected due to concurrency limit")
             raise
-    
+
     def get_stats(self) -> Dict[str, Any]:
         """获取并发统计信息"""
-        # 计算响应时间统计
-        avg_response = 0
-        p95_response = 0
-        p99_response = 0
-        
-        if self._response_times:
-            sorted_times = sorted(self._response_times)
-            avg_response = sum(sorted_times) / len(sorted_times)
-            p95_idx = int(len(sorted_times) * 0.95)
-            p99_idx = int(len(sorted_times) * 0.99)
-            p95_response = sorted_times[min(p95_idx, len(sorted_times) - 1)]
-            p99_response = sorted_times[min(p99_idx, len(sorted_times) - 1)]
-        
+        response_stats = self._calc_latency_stats(self._response_times)
+        request_wait_stats = self._calc_latency_stats(self._request_wait_times)
+        stream_wait_stats = self._calc_latency_stats(self._stream_wait_times)
+        db_wait_stats = self._calc_latency_stats(self._db_wait_times)
+
         return {
             "active_requests": self._active_requests,
+            "queued_requests": self._queued_requests,
             "total_requests": self._total_requests,
             "rejected_requests": self._rejected_requests,
+            "active_streams": self._active_streams,
+            "queued_streams": self._queued_streams,
+            "total_streams": self._total_streams,
+            "rejected_streams": self._rejected_streams,
+            "active_db_ops": self._active_db_ops,
+            "queued_db_ops": self._queued_db_ops,
+            "total_db_ops": self._total_db_ops,
+            "rejected_db_ops": self._rejected_db_ops,
             "max_concurrent_requests": ConnectionPoolConfig.MAX_CONCURRENT_REQUESTS,
+            "max_concurrent_streams": ConnectionPoolConfig.MAX_CONCURRENT_STREAMS,
             "max_concurrent_db_ops": ConnectionPoolConfig.MAX_CONCURRENT_DB_OPS,
-            "avg_response_time": round(avg_response, 2),
-            "p95_response_time": round(p95_response, 2),
-            "p99_response_time": round(p99_response, 2),
+            "avg_response_time": response_stats["avg"],
+            "p95_response_time": response_stats["p95"],
+            "p99_response_time": response_stats["p99"],
+            "avg_request_wait_ms": request_wait_stats["avg"],
+            "p95_request_wait_ms": request_wait_stats["p95"],
+            "p99_request_wait_ms": request_wait_stats["p99"],
+            "avg_stream_wait_ms": stream_wait_stats["avg"],
+            "p95_stream_wait_ms": stream_wait_stats["p95"],
+            "p99_stream_wait_ms": stream_wait_stats["p99"],
+            "avg_db_wait_ms": db_wait_stats["avg"],
+            "p95_db_wait_ms": db_wait_stats["p95"],
+            "p99_db_wait_ms": db_wait_stats["p99"],
         }
     
     def record_response_time(self, elapsed_ms: float):
@@ -232,7 +396,14 @@ class ConcurrencyLimiter:
         """重置统计信息"""
         self._total_requests = 0
         self._rejected_requests = 0
+        self._total_streams = 0
+        self._rejected_streams = 0
+        self._total_db_ops = 0
+        self._rejected_db_ops = 0
         self._response_times = []
+        self._request_wait_times = []
+        self._stream_wait_times = []
+        self._db_wait_times = []
 
 
 class RequestQueue:

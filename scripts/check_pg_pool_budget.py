@@ -53,13 +53,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--pool-size",
         type=int,
-        default=env_int("DB_POOL_SIZE", 20),
+        default=env_int("DB_POOL_SIZE", 8),
         help="SQLAlchemy DB_POOL_SIZE.",
     )
     parser.add_argument(
         "--max-overflow",
         type=int,
-        default=env_int("DB_MAX_OVERFLOW", 30),
+        default=env_int("DB_MAX_OVERFLOW", 2),
         help="SQLAlchemy DB_MAX_OVERFLOW.",
     )
     return parser.parse_args()
@@ -107,4 +107,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
-

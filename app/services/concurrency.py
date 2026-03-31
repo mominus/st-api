@@ -421,9 +421,9 @@ def get_concurrency_manager() -> ConcurrencyManager:
     global _concurrency_manager
     if _concurrency_manager is None:
         import os
-        max_concurrent = int(os.getenv("MAX_CONCURRENT_REQUESTS", "100"))
+        max_concurrent = int(os.getenv("MAX_CONCURRENT_REQUESTS", "60"))
         max_per_group = int(os.getenv("MAX_CONCURRENT_PER_MODEL_GROUP", "20"))
-        queue_timeout = float(os.getenv("QUEUE_TIMEOUT_SECONDS", "30"))
+        queue_timeout = float(os.getenv("QUEUE_TIMEOUT_SECONDS", "8"))
         
         _concurrency_manager = ConcurrencyManager(
             max_concurrent=max_concurrent,
@@ -459,7 +459,7 @@ def get_connection_pool() -> ConnectionPool:
 
 
 def init_concurrency_services(
-    max_concurrent: int = 100,
+    max_concurrent: int = 60,
     max_per_model_group: int = 20,
     rate_limit: float = 100.0,
     rate_burst: int = 200

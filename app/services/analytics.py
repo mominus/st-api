@@ -13,6 +13,7 @@ from dataclasses import dataclass
 
 import httpx
 from app.services.st_usage import STUsage, extract_usage_from_analytics_run
+from app.services.time_utils import utc_now, utc_today
 
 logger = logging.getLogger(__name__)
 
@@ -123,7 +124,7 @@ class AnalyticsService:
         Returns:
             今日统计数据
         """
-        today = datetime.utcnow().strftime("%Y-%m-%d")
+        today = utc_today().isoformat()
         
         # 不传日期参数，获取最近的记录，然后在本地过滤今日数据
         all_runs = await self._get_all_runs(
@@ -166,7 +167,7 @@ class AnalyticsService:
         Returns:
             统计数据
         """
-        end_date = datetime.utcnow()
+        end_date = utc_now()
         start_date = end_date - timedelta(days=days)
         today = end_date.strftime("%Y-%m-%d")
         start_date_str = start_date.strftime("%Y-%m-%d")
@@ -354,7 +355,7 @@ class AnalyticsService:
             return AnalyticsStats()
         
         if today_str is None:
-            today_str = datetime.utcnow().strftime("%Y-%m-%d")
+            today_str = utc_today().isoformat()
         
         total_runs = len(runs)
         successful_runs = sum(1 for r in runs if r.get("is_flow_successful") is True)

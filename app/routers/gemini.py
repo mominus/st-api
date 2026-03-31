@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import logging
 import time
-import uuid
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, Header, Query, Request
@@ -36,10 +35,17 @@ def _gemini_error_payload(error_handler, error: APIError) -> Dict[str, Any]:
 
 
 
-def _gemini_error_response(error_handler, error: APIError) -> JSONResponse:
+def _gemini_error_response(
+    error_handler,
+    error: APIError,
+    *,
+    request_id: Optional[str] = None,
+) -> JSONResponse:
+    headers = {"X-Request-ID": request_id} if request_id else None
     return JSONResponse(
         status_code=error.status_code,
         content=_gemini_error_payload(error_handler, error),
+        headers=headers,
     )
 
 
@@ -81,12 +87,11 @@ async def generate_content(
     key_query: Optional[str] = Query(None, alias="key"),
     session: AsyncSession = Depends(get_session),
 ):
-    request_id = uuid.uuid4().hex[:24]
-    start_time = time.time()
-
     bridge = get_protocol_bridge()
     runtime = get_gateway_runtime()
     error_handler = get_error_handler()
+    request_id = runtime.resolve_request_id(headers=http_request.headers)
+    start_time = time.time()
 
     try:
         body_json = await http_request.json()
@@ -94,7 +99,7 @@ async def generate_content(
         canonical = bridge.parse_gemini_content(model, body_json, stream=False)
     except Exception as exc:
         error = error_handler.create_invalid_request_error(str(exc))
-        return _gemini_error_response(error_handler, error)
+        return _gemini_error_response(error_handler, error, request_id=request_id)
 
     raw_key = bridge.extract_api_key(
         authorization=authorization,
@@ -138,7 +143,11 @@ async def generate_content(
             user_id=backend_user_id,
         )
 
-        backend_response = await runtime.run_sync(resolved=resolved, payload=payload)
+        backend_response = await runtime.run_sync(
+            resolved=resolved,
+            payload=payload,
+            session=session,
+        )
         raw_output = runtime.extract_content(backend_response)
         parsed = bridge.parse_model_output(raw_output)
         usage = runtime.usage_from_sync(
@@ -168,7 +177,7 @@ async def generate_content(
         return JSONResponse(content=response_data, headers={"X-Request-ID": request_id})
 
     except GatewayAuthError as exc:
-        return _gemini_error_response(error_handler, exc.error)
+        return _gemini_error_response(error_handler, exc.error, request_id=request_id)
     except Exception as exc:
         logger.exception("Gemini streamGenerateContent failed")
         api_error = runtime.map_backend_exception(exc)
@@ -182,8 +191,9 @@ async def generate_content(
             response_time_ms=runtime.elapsed_ms(start_time),
             client_ip=client_ip,
             error_message=api_error.message,
+            api_error=api_error,
         )
-        return _gemini_error_response(error_handler, api_error)
+        return _gemini_error_response(error_handler, api_error, request_id=request_id)
     except Exception as exc:
         logger.exception("Gemini generateContent failed")
         api_error = runtime.map_backend_exception(exc)
@@ -197,8 +207,9 @@ async def generate_content(
             response_time_ms=runtime.elapsed_ms(start_time),
             client_ip=client_ip,
             error_message=api_error.message,
+            api_error=api_error,
         )
-        return _gemini_error_response(error_handler, api_error)
+        return _gemini_error_response(error_handler, api_error, request_id=request_id)
 
 
 @router.post("/models/{model}:streamGenerateContent")
@@ -210,12 +221,11 @@ async def stream_generate_content(
     key_query: Optional[str] = Query(None, alias="key"),
     session: AsyncSession = Depends(get_session),
 ):
-    request_id = uuid.uuid4().hex[:24]
-    start_time = time.time()
-
     bridge = get_protocol_bridge()
     runtime = get_gateway_runtime()
     error_handler = get_error_handler()
+    request_id = runtime.resolve_request_id(headers=http_request.headers)
+    start_time = time.time()
 
     try:
         body_json = await http_request.json()
@@ -223,7 +233,7 @@ async def stream_generate_content(
         canonical = bridge.parse_gemini_content(model, body_json, stream=True)
     except Exception as exc:
         error = error_handler.create_invalid_request_error(str(exc))
-        return _gemini_error_response(error_handler, error)
+        return _gemini_error_response(error_handler, error, request_id=request_id)
 
     raw_key = bridge.extract_api_key(
         authorization=authorization,
@@ -267,17 +277,48 @@ async def stream_generate_content(
             user_id=backend_user_id,
         )
 
-        stream_gen = await runtime.run_stream(resolved=resolved, payload=payload)
+        stream_gen = await runtime.run_stream(
+            resolved=resolved,
+            payload=payload,
+            session=session,
+        )
+
+        try:
+            first_raw_chunk = await anext(stream_gen)
+        except StopAsyncIteration:
+            first_raw_chunk = None
+        except Exception as exc:
+            logger.exception("Gemini stream bootstrap failed")
+            api_error = runtime.map_backend_exception(exc)
+
+            await runtime.persist_error(
+                session,
+                resolved=resolved,
+                api_type="gemini",
+                model=canonical.model,
+                input_preview=canonical.input_preview(),
+                response_time_ms=runtime.elapsed_ms(start_time),
+                client_ip=client_ip,
+                error_message=api_error.message,
+                api_error=api_error,
+            )
+            return _gemini_error_response(error_handler, api_error, request_id=request_id)
 
         async def generate_stream():
             raw_tokens: List[str] = []
             best_usage = None
             run_id = None
 
+            async def iter_raw_stream():
+                if first_raw_chunk is not None:
+                    yield first_raw_chunk
+                async for raw_chunk in stream_gen:
+                    yield raw_chunk
+
             try:
                 if canonical.tools:
                     # Buffer for safe functionCall emission.
-                    async for raw_chunk in stream_gen:
+                    async for raw_chunk in iter_raw_stream():
                         token, usage_candidate, run_candidate = runtime.parse_stream_chunk(raw_chunk)
                         if run_candidate and not run_id:
                             run_id = run_candidate
@@ -300,7 +341,7 @@ async def stream_generate_content(
                         }
                     )
                 else:
-                    async for raw_chunk in stream_gen:
+                    async for raw_chunk in iter_raw_stream():
                         token, usage_candidate, run_candidate = runtime.parse_stream_chunk(raw_chunk)
                         if run_candidate and not run_id:
                             run_id = run_candidate
@@ -379,6 +420,8 @@ async def stream_generate_content(
                     response_time_ms=runtime.elapsed_ms(start_time),
                     client_ip=client_ip,
                     error_message=api_error.message,
+                    api_error=api_error,
+                    defer_noncritical_logs=True,
                 )
 
         return StreamingResponse(
@@ -392,7 +435,7 @@ async def stream_generate_content(
         )
 
     except GatewayAuthError as exc:
-        return _gemini_error_response(error_handler, exc.error)
+        return _gemini_error_response(error_handler, exc.error, request_id=request_id)
 
 
 @router.get("/models")
@@ -403,6 +446,7 @@ async def list_models(
     session: AsyncSession = Depends(get_session),
 ):
     bridge = get_protocol_bridge()
+    runtime = get_gateway_runtime()
     error_handler = get_error_handler()
     api_key_service = get_api_key_service()
 
@@ -415,7 +459,13 @@ async def list_models(
         error = error_handler.create_authentication_error("Missing API key")
         return _gemini_error_response(error_handler, error)
 
-    api_key_obj = await api_key_service.get_key_by_raw(session, raw_key)
+    try:
+        api_key_obj = await runtime.run_db_guarded(
+            session,
+            lambda: api_key_service.get_key_by_raw(session, raw_key),
+        )
+    except GatewayAuthError as exc:
+        return _gemini_error_response(error_handler, exc.error)
     if api_key_obj is None or api_key_obj.status == "revoked":
         error = error_handler.create_authentication_error("Invalid API key")
         return _gemini_error_response(error_handler, error)
@@ -450,6 +500,7 @@ async def get_model(
     session: AsyncSession = Depends(get_session),
 ):
     bridge = get_protocol_bridge()
+    runtime = get_gateway_runtime()
     error_handler = get_error_handler()
     api_key_service = get_api_key_service()
 
@@ -464,7 +515,13 @@ async def get_model(
         error = error_handler.create_authentication_error("Missing API key")
         return _gemini_error_response(error_handler, error)
 
-    api_key_obj = await api_key_service.get_key_by_raw(session, raw_key)
+    try:
+        api_key_obj = await runtime.run_db_guarded(
+            session,
+            lambda: api_key_service.get_key_by_raw(session, raw_key),
+        )
+    except GatewayAuthError as exc:
+        return _gemini_error_response(error_handler, exc.error)
     if api_key_obj is None or api_key_obj.status == "revoked":
         error = error_handler.create_authentication_error("Invalid API key")
         return _gemini_error_response(error_handler, error)

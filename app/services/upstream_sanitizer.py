@@ -4,11 +4,14 @@ Upstream Sanitizer Service
 """
 
 import json
+import os
 import re
+from functools import lru_cache
 from typing import Any
+from urllib.parse import urlparse
 
 
-_SENSITIVE_REPLACEMENTS = (
+_STATIC_SENSITIVE_REPLACEMENTS = (
     (re.compile(r"support@stack-ai\.com", re.IGNORECASE), "upstream support"),
     (
         re.compile(r"\b(?:https?://)?(?:[\w-]+\.)*stack-ai\.com\b", re.IGNORECASE),
@@ -34,6 +37,42 @@ _TOOL_USE_XML_PATTERN = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 _ARGUMENTS_KEY_PATTERN = re.compile(r'"arguments"\s*:\s*', re.IGNORECASE)
+
+
+def _derive_domain_candidates(raw_url: str | None) -> set[str]:
+    if not raw_url:
+        return set()
+
+    parsed = urlparse(raw_url)
+    hostname = (parsed.hostname or "").strip().lower().strip(".")
+    if not hostname:
+        return set()
+
+    candidates = {hostname}
+    labels = [label for label in hostname.split(".") if label]
+    if len(labels) >= 2:
+        candidates.add(".".join(labels[-2:]))
+    return {item for item in candidates if item}
+
+
+@lru_cache(maxsize=8)
+def _build_sensitive_replacements(raw_backend_url: str | None):
+    replacements = list(_STATIC_SENSITIVE_REPLACEMENTS)
+    for domain in sorted(_derive_domain_candidates(raw_backend_url)):
+        escaped = re.escape(domain)
+        replacements.append(
+            (
+                re.compile(rf"\b[A-Z0-9._%+-]+@(?:[\w-]+\.)*{escaped}\b", re.IGNORECASE),
+                "upstream support",
+            )
+        )
+        replacements.append(
+            (
+                re.compile(rf"\b(?:https?://)?(?:[\w-]+\.)*{escaped}\b", re.IGNORECASE),
+                "upstream service",
+            )
+        )
+    return tuple(replacements)
 
 
 def _find_json_like_value_end(text: str, start: int) -> int:
@@ -147,7 +186,8 @@ def sanitize_exposed_text(text: str | None) -> str | None:
         return None
 
     sanitized = text
-    for pattern, replacement in _SENSITIVE_REPLACEMENTS:
+    replacements = _build_sensitive_replacements(os.getenv("BACKEND_API_URL"))
+    for pattern, replacement in replacements:
         sanitized = pattern.sub(replacement, sanitized)
     sanitized = _redact_tool_payloads(sanitized)
 

@@ -9,7 +9,7 @@ PYTHON_BIN="${PYTHON_BIN:-/home/ww/Project/.venv/bin/python}"
 HOST="${HOST:-127.0.0.1}"
 PORT="${PORT:-18080}"
 BASE_URL="${BASE_URL:-http://${HOST}:${PORT}}"
-STRESS_ARGS=("$@")
+ARGS=("$@")
 
 extract_arg_value() {
   local arg_name="$1"
@@ -40,14 +40,14 @@ fi
 
 rm -f "$SERVER_LOG"
 
-CLIENT_CONCURRENCY="$(extract_arg_value --concurrency "${STRESS_ARGS[@]}" || true)"
+CLIENT_CONCURRENCY="$(extract_arg_value --concurrency "${ARGS[@]}" || true)"
 if [[ -z "$CLIENT_CONCURRENCY" ]]; then
-  CLIENT_CONCURRENCY="120"
+  CLIENT_CONCURRENCY="50"
 fi
 
-REQUEST_TIMEOUT_ARG="$(extract_arg_value --request-timeout "${STRESS_ARGS[@]}" || true)"
+REQUEST_TIMEOUT_ARG="$(extract_arg_value --request-timeout "${ARGS[@]}" || true)"
 if [[ -z "$REQUEST_TIMEOUT_ARG" ]]; then
-  REQUEST_TIMEOUT_ARG="45"
+  REQUEST_TIMEOUT_ARG="180"
 fi
 
 if [[ -z "${MAX_CONCURRENT_REQUESTS:-}" ]]; then
@@ -95,9 +95,8 @@ ST_API_KEY_VALUE="${ST_API_KEY:-}"
 if [[ -z "$ST_API_KEY_VALUE" && -f /tmp/st_api_cli_test_key.txt ]]; then
   ST_API_KEY_VALUE="$(cat /tmp/st_api_cli_test_key.txt)"
 fi
-
 export ST_API_KEY="$ST_API_KEY_VALUE"
 
-"$PYTHON_BIN" scripts/stress_conversation_load.py --base-url "$BASE_URL" "${STRESS_ARGS[@]}"
+"$PYTHON_BIN" scripts/stress_claude_code_dialogue.py --base-url "$BASE_URL" "${ARGS[@]}"
 
 echo "server_log=$SERVER_LOG"

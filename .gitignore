@@ -69,5 +69,7 @@ test_*.py
 !tests/test_account_pool_selection.py
 !tests/test_gateway_runtime_routing.py
 !tests/test_call_logger_cleanup.py
+!tests/test_call_logger_aggregates.py
 !tests/test_gateway_runtime_user_identity.py
 !tests/test_session_isolation_stress.py
+!tests/test_connection_pool_config.py

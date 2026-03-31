@@ -76,7 +76,7 @@ function bindEvents() {
     
     // 窗口大小变化时关闭移动菜单
     window.addEventListener('resize', () => {
-        if (window.innerWidth > 768) {
+        if (window.innerWidth > 1024) {
             closeMobileMenu();
         }
     });
@@ -3222,42 +3222,152 @@ async function loadPerformanceStats() {
     }
 }
 
+function perfNumber(value, digits = 0) {
+    const num = Number(value || 0);
+    if (!Number.isFinite(num)) {
+        return digits > 0 ? (0).toFixed(digits) : '0';
+    }
+    return digits > 0 ? num.toFixed(digits) : Math.round(num).toString();
+}
+
+function perfMs(value, digits = 0) {
+    return `${perfNumber(value, digits)} ms`;
+}
+
+function setPerfText(id, value) {
+    const el = document.getElementById(id);
+    if (el) {
+        el.textContent = value;
+    }
+}
+
 function updatePerformanceDisplay(data) {
     const stats = data.stats || {};
     const config = data.config || {};
     const system = data.system || {};
     const responseTimes = data.response_times || {};
+    const queueWaits = data.queue_waits || {};
+    const backendHttp = data.backend_http || {};
+    const usageAggregation = data.usage_aggregation || {};
+    const backgroundLogs = data.background_logs || {};
+    const successRate = stats.success_rate === null || stats.success_rate === undefined
+        ? 100
+        : stats.success_rate;
+    const rejectedRequests = Number(stats.rejected_requests || 0);
+    const rejectedStreams = Number(stats.rejected_streams || 0);
+    const rejectedDbOps = Number(stats.rejected_db_ops || 0);
+    const totalRejected = rejectedRequests + rejectedStreams + rejectedDbOps;
     
     // 更新实时指标
-    document.getElementById('perf-active-requests').textContent = stats.active_requests || 0;
-    document.getElementById('perf-max-concurrent').textContent = `/ ${stats.max_concurrent_requests || 100}`;
-    document.getElementById('perf-current-qps').textContent = stats.current_qps || 0;
-    document.getElementById('perf-avg-response').textContent = responseTimes.avg || 0;
-    document.getElementById('perf-success-rate').textContent = `${stats.success_rate || 100}%`;
-    document.getElementById('perf-rejected').textContent = `拒绝: ${stats.rejected_requests || 0}`;
+    setPerfText('perf-active-requests', formatNumber(stats.active_requests || 0));
+    setPerfText('perf-max-concurrent', `/ ${formatNumber(stats.max_concurrent_requests || 100)}`);
+    setPerfText('perf-active-streams', formatNumber(stats.active_streams || 0));
+    setPerfText('perf-max-streams', `/ ${formatNumber(stats.max_concurrent_streams || 0)}`);
+    setPerfText('perf-active-db-ops', formatNumber(stats.active_db_ops || 0));
+    setPerfText('perf-max-db-ops', `/ ${formatNumber(stats.max_concurrent_db_ops || 0)}`);
+    setPerfText('perf-current-qps', perfNumber(stats.current_qps || 0, 2));
+    setPerfText('perf-avg-response', perfNumber(responseTimes.avg || 0));
+    setPerfText('perf-success-rate', `${perfNumber(successRate, 2)}%`);
+    setPerfText(
+        'perf-rejected',
+        `拒绝 req/stream/db: ${formatNumber(rejectedRequests)}/${formatNumber(rejectedStreams)}/${formatNumber(rejectedDbOps)}`
+    );
     
     // 更新限流配置显示
     const rpmLimit = config.rpm_limit || 0;
-    document.getElementById('config-rpm-value').textContent = rpmLimit > 0 ? rpmLimit : '无限制';
-    document.getElementById('config-rpm-max').textContent = config.max_rpm || 6000;
-    document.getElementById('config-concurrent-value').textContent = config.max_concurrent_requests || 100;
-    document.getElementById('config-db-concurrent-value').textContent = config.max_concurrent_db_ops || 50;
-    document.getElementById('config-http-pool-value').textContent = config.http_max_connections || 100;
+    const dbPoolSize = Number(config.db_pool_size || 0);
+    const dbMaxOverflow = Number(config.db_max_overflow || 0);
+    const dbPoolCapacity = Number(
+        config.db_pool_capacity !== null && config.db_pool_capacity !== undefined
+            ? config.db_pool_capacity
+            : dbPoolSize + dbMaxOverflow
+    );
+    setPerfText('config-rpm-value', rpmLimit > 0 ? formatNumber(rpmLimit) : '无限制');
+    setPerfText('config-rpm-max', formatNumber(config.max_rpm || 6000));
+    setPerfText('config-concurrent-value', formatNumber(config.max_concurrent_requests || 100));
+    setPerfText('config-db-concurrent-value', formatNumber(config.max_concurrent_db_ops || 50));
+    setPerfText(
+        'config-db-concurrent-hint',
+        `池容量 ${formatNumber(dbPoolSize)} + ${formatNumber(dbMaxOverflow)} = ${formatNumber(dbPoolCapacity)}`
+    );
+    setPerfText('config-http-pool-value', formatNumber(config.http_max_connections || 100));
     
     // 更新性能统计
-    document.getElementById('perf-total-requests').textContent = formatNumber(stats.total_requests || 0);
-    document.getElementById('perf-total-rejected').textContent = formatNumber(stats.rejected_requests || 0);
-    document.getElementById('perf-p95-response').textContent = `${responseTimes.p95 || 0} ms`;
-    document.getElementById('perf-p99-response').textContent = `${responseTimes.p99 || 0} ms`;
+    setPerfText('perf-total-requests', formatNumber(stats.total_requests || 0));
+    setPerfText('perf-total-rejected', formatNumber(totalRejected));
+    setPerfText('perf-p95-response', perfMs(responseTimes.p95 || 0));
+    setPerfText('perf-p99-response', perfMs(responseTimes.p99 || 0));
+
+    // 更新排队与限流
+    setPerfText('perf-request-queue-p95', perfMs(queueWaits.request_p95_ms || 0));
+    setPerfText('perf-request-queue-avg', `均值 ${perfMs(queueWaits.request_avg_ms || 0)}`);
+    setPerfText('perf-stream-queue-p95', perfMs(queueWaits.stream_p95_ms || 0));
+    setPerfText('perf-stream-queue-avg', `均值 ${perfMs(queueWaits.stream_avg_ms || 0)}`);
+    setPerfText('perf-db-queue-p95', perfMs(queueWaits.db_p95_ms || 0));
+    setPerfText('perf-db-queue-avg', `均值 ${perfMs(queueWaits.db_avg_ms || 0)}`);
+    setPerfText('perf-queued-requests', formatNumber(stats.queued_requests || 0));
+    setPerfText('perf-queued-requests-sub', `累计拒绝 ${formatNumber(rejectedRequests)}`);
+    setPerfText('perf-queued-streams', formatNumber(stats.queued_streams || 0));
+    setPerfText('perf-queued-streams-sub', `累计拒绝 ${formatNumber(rejectedStreams)}`);
+    setPerfText('perf-queued-db', formatNumber(stats.queued_db_ops || 0));
+    setPerfText('perf-queued-db-sub', `累计拒绝 ${formatNumber(rejectedDbOps)}`);
+
+    // 更新上游 HTTP 池
+    setPerfText('perf-backend-active-total', formatNumber(backendHttp.active_total_requests || 0));
+    setPerfText(
+        'perf-backend-active-total-sub',
+        `有效连接上限 ${formatNumber(backendHttp.effective_max_connections || 0)}`
+    );
+    setPerfText('perf-backend-active-streams', formatNumber(backendHttp.active_stream_requests || 0));
+    setPerfText(
+        'perf-backend-active-streams-sub',
+        `stream 上限 ${formatNumber(backendHttp.backend_max_concurrent_streams || 0)}`
+    );
+    setPerfText('perf-backend-wait-p95', perfMs(backendHttp.p95_wait_ms || 0));
+    setPerfText('perf-backend-wait-avg', `均值 ${perfMs(backendHttp.avg_wait_ms || 0)}`);
+    setPerfText('perf-backend-pool-timeouts', formatNumber(backendHttp.pool_timeout_count || 0));
+    setPerfText(
+        'perf-backend-pool-timeouts-sub',
+        `总获取 ${formatNumber(backendHttp.backend_total_acquires || 0)}`
+    );
+    setPerfText('perf-backend-timeouts', formatNumber(backendHttp.timeout_error_count || 0));
+    setPerfText(
+        'perf-backend-timeouts-sub',
+        `sync/stream 重试 ${formatNumber(backendHttp.sync_retry_count || 0)}/${formatNumber(backendHttp.stream_retry_count || 0)}`
+    );
+    setPerfText(
+        'perf-backend-connect-errors',
+        `${formatNumber(backendHttp.connect_error_count || 0)} / ${formatNumber(backendHttp.transport_error_count || 0)}`
+    );
+    setPerfText(
+        'perf-backend-connect-errors-sub',
+        `per-host ${formatNumber(backendHttp.max_connections_per_host || 0)} keepalive ${formatNumber(backendHttp.max_keepalive_connections || 0)}`
+    );
+
+    // 更新异步落库与日志
+    setPerfText('perf-usage-queue', formatNumber(usageAggregation.queue_size || 0));
+    setPerfText(
+        'perf-usage-queue-sub',
+        `workers ${formatNumber(usageAggregation.active_workers || 0)}/${formatNumber(usageAggregation.configured_workers || 0)} / flush ${formatNumber(usageAggregation.active_flush_workers || 0)}`
+    );
+    setPerfText('perf-usage-flushed', formatNumber(usageAggregation.flushed_events || 0));
+    setPerfText('perf-usage-flushed-sub', `批次 ${formatNumber(usageAggregation.flushed_batches || 0)}`);
+    setPerfText('perf-usage-dropped', formatNumber(usageAggregation.dropped_events || 0));
+    setPerfText('perf-log-queue', formatNumber(backgroundLogs.queue_size || 0));
+    setPerfText('perf-log-queue-sub', `容量 ${formatNumber(backgroundLogs.queue_capacity || 0)}`);
+    setPerfText('perf-log-processed', formatNumber(backgroundLogs.processed_events || 0));
+    setPerfText('perf-log-processed-sub', `进行中 ${formatNumber(backgroundLogs.inflight_events || 0)}`);
+    setPerfText('perf-log-dropped', formatNumber(backgroundLogs.dropped_events || 0));
+    setPerfText('perf-log-dropped-sub', `活跃 workers ${formatNumber(backgroundLogs.active_workers || 0)}`);
     
     // 更新系统配置
-    document.getElementById('sys-db-pool').textContent = system.db_pool || '-';
-    document.getElementById('sys-db-type').textContent = system.db_type || '-';
-    document.getElementById('sys-http-timeout').textContent = system.http_timeout || '-';
-    document.getElementById('sys-uptime').textContent = system.uptime || '-';
+    setPerfText('sys-db-pool', system.db_pool || '-');
+    setPerfText('sys-db-type', system.db_type || '-');
+    setPerfText('sys-http-timeout', system.http_timeout || '-');
+    setPerfText('sys-uptime', system.uptime || '-');
     
     // 更新最后更新时间
-    document.getElementById('perf-last-update').textContent = `最后更新: ${new Date().toLocaleTimeString('zh-CN')}`;
+    setPerfText('perf-last-update', `最后更新: ${new Date().toLocaleTimeString('zh-CN')}`);
 }
 
 function startPerformanceAutoRefresh() {
@@ -3295,6 +3405,10 @@ function showPerformanceSettingsModal() {
             document.getElementById('setting-db-concurrent').value = config.max_concurrent_db_ops || 50;
             document.getElementById('setting-http-connections').value = config.http_max_connections || 100;
             document.getElementById('setting-http-timeout').value = config.http_timeout || 60;
+            setPerfText(
+                'setting-db-concurrent-help',
+                `当前 DB 池容量为 ${formatNumber(config.db_pool_size || 0)} + ${formatNumber(config.db_max_overflow || 0)} = ${formatNumber(config.db_pool_capacity || ((config.db_pool_size || 0) + (config.db_max_overflow || 0)))}，超过后会自动钳制`
+            );
         }
         openModal('performance-settings-modal');
     }).catch(error => {

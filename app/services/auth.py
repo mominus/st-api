@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.database import Admin, LoginAttempt, get_session_factory
 from app.services.crypto import CryptoService
 from app.services.config import get_config_service
+from app.services.time_utils import ensure_utc, utc_now, utc_now_naive
 
 
 class AuthenticationError(Exception):
@@ -108,7 +109,7 @@ class AuthService:
             
         Requirements: 4.2
         """
-        now = datetime.utcnow()
+        now = utc_now()
         expire = now + timedelta(hours=self.jwt_expire_hours)
         
         payload = {
@@ -257,11 +258,12 @@ class AuthService:
                 return True, None
             
             # 检查是否仍在锁定期
-            if attempt.locked_until and attempt.locked_until > datetime.utcnow():
+            locked_until = ensure_utc(attempt.locked_until)
+            if locked_until and locked_until > utc_now():
                 return False, attempt.locked_until
-            
+
             # 锁定期已过，重置计数
-            if attempt.locked_until and attempt.locked_until <= datetime.utcnow():
+            if locked_until and locked_until <= utc_now():
                 attempt.attempts = 0
                 attempt.locked_until = None
                 await session.commit()
@@ -310,7 +312,7 @@ class AuthService:
             
             # 检查是否需要锁定
             if attempt.attempts >= self.max_login_attempts:
-                attempt.locked_until = datetime.utcnow() + timedelta(
+                attempt.locked_until = utc_now_naive() + timedelta(
                     minutes=self.lockout_minutes
                 )
                 await session.commit()
@@ -340,7 +342,8 @@ class AuthService:
                 return self.max_login_attempts
             
             # 如果锁定期已过，返回最大次数
-            if attempt.locked_until and attempt.locked_until <= datetime.utcnow():
+            locked_until = ensure_utc(attempt.locked_until)
+            if locked_until and locked_until <= utc_now():
                 return self.max_login_attempts
             
             return max(0, self.max_login_attempts - attempt.attempts)
@@ -427,13 +430,13 @@ class AuthService:
             if result.scalar_one_or_none():
                 raise ValueError(f"Username '{username}' already exists")
             
-            # 创建管理员
-            admin = Admin(
-                id=str(uuid.uuid4()),
-                username=username,
-                password_hash=self.hash_password(password),
-                created_at=datetime.utcnow()
-            )
+                # 创建管理员
+                admin = Admin(
+                    id=str(uuid.uuid4()),
+                    username=username,
+                    password_hash=self.hash_password(password),
+                    created_at=utc_now_naive()
+                )
             session.add(admin)
             await session.commit()
             
@@ -524,7 +527,7 @@ class AuthService:
                     id=str(uuid.uuid4()),
                     username=default_username,
                     password_hash=self.hash_password(default_password),
-                    created_at=datetime.utcnow()
+                    created_at=utc_now_naive()
                 )
                 session.add(admin)
                 await session.commit()

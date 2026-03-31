@@ -16,7 +16,7 @@ import asyncio
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pathlib import Path
 import os
 import secrets
@@ -24,6 +24,8 @@ import secrets
 from app.routers import openai_router, anthropic_router, gemini_router, admin_router
 from app.models.database import init_database, close_database
 from app.services.backend_client import close_backend_client
+from app.services.gateway_runtime import close_gateway_runtime
+from app.services.usage_aggregator import close_usage_aggregator
 from app.services.auth import get_auth_service
 from app import __version__ as APP_VERSION
 import logging
@@ -34,6 +36,27 @@ logger = logging.getLogger(__name__)
 # 降低第三方 HTTP 客户端日志噪音
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    return os.getenv(name, str(default)).strip().lower() in {"1", "true", "yes", "on"}
+
+
+async def _close_body_iterator_safely(iterator) -> None:
+    close_async = getattr(iterator, "aclose", None)
+    if callable(close_async):
+        try:
+            await close_async()
+        except Exception:
+            logger.exception("Failed to close streaming body iterator asynchronously")
+        return
+
+    close_sync = getattr(iterator, "close", None)
+    if callable(close_sync):
+        try:
+            close_sync()
+        except Exception:
+            logger.exception("Failed to close streaming body iterator")
 
 
 # 从环境变量获取隐藏的后台路径，默认生成随机路径
@@ -64,6 +87,14 @@ async def lifespan(app: FastAPI):
     
     yield
     # 关闭时：清理数据库连接
+    try:
+        await close_gateway_runtime()
+    except Exception:
+        logger.exception("Failed to close gateway runtime during shutdown")
+    try:
+        await close_usage_aggregator()
+    except Exception:
+        logger.exception("Failed to close async usage aggregator during shutdown")
     await close_backend_client()
     await close_database()
 
@@ -147,7 +178,7 @@ async def log_requests(request: Request, call_next):
     """记录所有请求的路径和方法，并统计性能数据"""
     import time
     from app.services.connection_pool import get_concurrency_limiter
-    
+
     path = request.url.path
     # 仅记录 API 请求，降低静态资源和页面请求日志噪音
     if (
@@ -160,11 +191,14 @@ async def log_requests(request: Request, call_next):
     
     # 只统计 API 请求（排除静态文件和管理后台）
     should_track = (
-        path.startswith("/v1/") or 
-        path.startswith("/anthropic/") or 
+        path == "/v1" or
+        path.startswith("/v1/") or
+        path == "/v1beta" or
+        path.startswith("/v1beta/") or
+        path.startswith("/anthropic/") or
         path.startswith("/gemini/")
     )
-    
+
     if should_track:
         limiter = get_concurrency_limiter()
         request_queue_timeout = float(
@@ -175,12 +209,86 @@ async def log_requests(request: Request, call_next):
         )
         start_time = time.time()
         try:
-            async with limiter.acquire_request(timeout=request_queue_timeout):
+            permit = limiter.acquire_request(timeout=request_queue_timeout)
+            await permit.__aenter__()
+            released = False
+
+            async def _release_permit() -> None:
+                nonlocal released
+                if released:
+                    return
+                released = True
+                await permit.__aexit__(None, None, None)
+
+            try:
                 response = await call_next(request)
-                # 记录响应时间
-                elapsed = (time.time() - start_time) * 1000  # 毫秒
-                limiter.record_response_time(elapsed)
+            except Exception:
+                await _release_permit()
+                raise
+
+            if isinstance(response, StreamingResponse):
+                original_iterator = response.body_iterator
+                hold_stream_slot_until_finish = _env_bool(
+                    "HOLD_STREAM_REQUEST_SLOT_UNTIL_FINISH",
+                    True,
+                )
+                stream_queue_timeout = max(
+                    0.1,
+                    float(
+                        os.getenv(
+                            "STREAM_QUEUE_TIMEOUT_SECONDS",
+                            str(request_queue_timeout),
+                        )
+                    ),
+                )
+
+                if not hold_stream_slot_until_finish:
+                    await _release_permit()
+                    stream_permit = None
+                else:
+                    await _release_permit()
+                    stream_permit = limiter.acquire_stream(timeout=stream_queue_timeout)
+                    try:
+                        await stream_permit.__aenter__()
+                    except asyncio.TimeoutError:
+                        elapsed = (time.time() - start_time) * 1000  # 毫秒
+                        limiter.record_response_time(elapsed)
+                        await _close_body_iterator_safely(original_iterator)
+                        return JSONResponse(
+                            status_code=429,
+                            content={
+                                "error": {
+                                    "message": "Server is busy with active streams. Please retry later.",
+                                    "type": "rate_limit_error",
+                                }
+                            },
+                        )
+
+                stream_released = False
+
+                async def _release_stream_permit() -> None:
+                    nonlocal stream_released
+                    if stream_released or stream_permit is None:
+                        return
+                    stream_released = True
+                    await stream_permit.__aexit__(None, None, None)
+
+                async def _stream_with_metrics():
+                    try:
+                        async for chunk in original_iterator:
+                            yield chunk
+                    finally:
+                        elapsed = (time.time() - start_time) * 1000  # 毫秒
+                        limiter.record_response_time(elapsed)
+                        await _release_stream_permit()
+
+                response.body_iterator = _stream_with_metrics()
                 return response
+
+            elapsed = (time.time() - start_time) * 1000  # 毫秒
+            limiter.record_response_time(elapsed)
+            await _release_permit()
+            return response
         except asyncio.TimeoutError:
             return JSONResponse(
                 status_code=429,

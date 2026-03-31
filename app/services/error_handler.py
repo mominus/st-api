@@ -199,6 +199,9 @@ class ErrorHandler:
         # 然后通过 HTTP 状态码映射
         if status_code == 400:
             return ErrorType.INVALID_REQUEST
+        elif status_code == 402:
+            # Upstream payment/quota failures should not be surfaced as 500.
+            return ErrorType.QUOTA_EXCEEDED
         elif status_code == 401:
             return ErrorType.AUTHENTICATION
         elif status_code == 403:
@@ -491,20 +494,34 @@ class ErrorHandler:
         )
 
         if isinstance(exc, BackendAPIError):
-            return self.parse_backend_error(
+            parsed = self.parse_backend_error(
                 exc.response_data or {},
                 exc.status_code or 502
             )
+            # 上游 5xx 在高并发/抖动场景下通常是暂时性故障，避免误报为内部错误。
+            if (exc.status_code or 0) >= 500 and parsed.error_type == ErrorType.SERVER_ERROR:
+                return self.create_service_unavailable_error("Upstream service unavailable")
+            return parsed
 
         if isinstance(exc, BackendTimeoutError):
-            return self.create_service_unavailable_error("Upstream request timed out")
+            return self.create_service_unavailable_error(
+                "Upstream request timed out",
+                details={"message": "Upstream request timed out", "reason": "timeout"},
+            )
 
         if isinstance(exc, BackendConnectionError):
             return self.create_service_unavailable_error(
-                "Failed to connect to upstream service"
+                "Failed to connect to upstream service",
+                details={
+                    "message": "Failed to connect to upstream service",
+                    "reason": "connection_error",
+                },
             )
 
-        return self.create_backend_error("Upstream service error")
+        return self.create_backend_error(
+            "Upstream service error",
+            details={"message": "Upstream service error", "reason": "backend_error"},
+        )
     
     # ========================================================================
     # Common Error Creators
@@ -513,7 +530,8 @@ class ErrorHandler:
     def create_invalid_request_error(
         self,
         message: str,
-        param: Optional[str] = None
+        param: Optional[str] = None,
+        details: Optional[Dict[str, Any]] = None,
     ) -> APIError:
         """创建无效请求错误"""
         return APIError(
@@ -521,103 +539,120 @@ class ErrorHandler:
             message=message,
             code="invalid_request",
             status_code=400,
-            param=param
+            param=param,
+            details=details,
         )
     
     def create_authentication_error(
         self,
-        message: str = "Unauthorized"
+        message: str = "Unauthorized",
+        details: Optional[Dict[str, Any]] = None,
     ) -> APIError:
         """创建认证错误"""
         return APIError(
             error_type=ErrorType.AUTHENTICATION,
             message="Unauthorized",  # 始终使用简洁消息，不暴露详细信息
             code="unauthorized",
-            status_code=401
+            status_code=401,
+            details=details,
         )
     
     def create_permission_error(
         self,
-        message: str = "Temporary permission jitter"
+        message: str = "Temporary permission jitter",
+        details: Optional[Dict[str, Any]] = None,
     ) -> APIError:
         """创建权限错误"""
         return APIError(
             error_type=ErrorType.PERMISSION,
             message=message,
             code="permission_denied",
-            status_code=403
+            status_code=403,
+            details=details,
         )
     
     def create_not_found_error(
         self,
-        message: str = "The requested resource was not found"
+        message: str = "The requested resource was not found",
+        details: Optional[Dict[str, Any]] = None,
     ) -> APIError:
         """创建资源未找到错误"""
         return APIError(
             error_type=ErrorType.NOT_FOUND,
             message=message,
             code="not_found",
-            status_code=404
+            status_code=404,
+            details=details,
         )
     
     def create_rate_limit_error(
         self,
-        message: str = "Rate limit exceeded. Please try again later"
+        message: str = "Rate limit exceeded. Please try again later",
+        details: Optional[Dict[str, Any]] = None,
     ) -> APIError:
         """创建速率限制错误"""
         return APIError(
             error_type=ErrorType.RATE_LIMIT,
             message=message,
             code="rate_limit_exceeded",
-            status_code=429
+            status_code=429,
+            details=details,
         )
     
     def create_quota_exceeded_error(
         self,
-        message: str = "API key quota exceeded"
+        message: str = "API key quota exceeded",
+        details: Optional[Dict[str, Any]] = None,
     ) -> APIError:
         """创建配额超限错误"""
         return APIError(
             error_type=ErrorType.QUOTA_EXCEEDED,
             message=message,
             code="quota_exceeded",
-            status_code=429
+            status_code=429,
+            details=details,
         )
     
     def create_server_error(
         self,
-        message: str = "Internal server error"
+        message: str = "Internal server error",
+        details: Optional[Dict[str, Any]] = None,
     ) -> APIError:
         """创建服务器错误"""
         return APIError(
             error_type=ErrorType.SERVER_ERROR,
             message="Internal server error",  # 简洁消息
             code="internal_error",
-            status_code=500
+            status_code=500,
+            details=details,
         )
     
     def create_backend_error(
         self,
-        message: str = "Service error"
+        message: str = "Service error",
+        details: Optional[Dict[str, Any]] = None,
     ) -> APIError:
         """创建后端错误"""
         return APIError(
             error_type=ErrorType.BACKEND_ERROR,
             message="Upstream service error",
             code="upstream_error",
-            status_code=502
+            status_code=502,
+            details=details,
         )
     
     def create_service_unavailable_error(
         self,
-        message: str = "Service unavailable"
+        message: str = "Service unavailable",
+        details: Optional[Dict[str, Any]] = None,
     ) -> APIError:
         """创建服务不可用错误"""
         return APIError(
             error_type=ErrorType.SERVICE_UNAVAILABLE,
             message="Upstream service unavailable",
             code="service_unavailable",
-            status_code=503
+            status_code=503,
+            details=details,
         )
 
 

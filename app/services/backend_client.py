@@ -7,6 +7,8 @@ import asyncio
 import os
 import logging
 import random
+import time
+from contextlib import asynccontextmanager
 from typing import Optional, Dict, Any, AsyncGenerator, Set
 
 import httpx
@@ -45,6 +47,11 @@ class BackendTimeoutError(BackendClientError):
 
 class BackendAPIError(BackendClientError):
     """API 返回错误"""
+    pass
+
+
+class BackendAcquireTimeoutError(Exception):
+    """上游并发闸门等待超时"""
     pass
 
 
@@ -94,11 +101,54 @@ class BackendClient:
         self.stream_timeout = stream_timeout
         self.connect_timeout = float(os.getenv("HTTP_CONNECT_TIMEOUT", "10.0"))
         self.http_max_connections = int(os.getenv("HTTP_MAX_CONNECTIONS", "100"))
+        self.http_max_connections_per_host = max(
+            1,
+            int(os.getenv("HTTP_MAX_CONNECTIONS_PER_HOST", str(self.http_max_connections))),
+        )
+        self.effective_http_max_connections = max(
+            1,
+            min(self.http_max_connections, self.http_max_connections_per_host),
+        )
         self.http_max_keepalive = int(os.getenv("HTTP_MAX_KEEPALIVE", "20"))
         self.http_trust_env = os.getenv("HTTP_TRUST_ENV", "false").lower() == "true"
+        configured_pool_timeout = float(
+            os.getenv(
+                "HTTP_POOL_TIMEOUT_SECONDS",
+                os.getenv(
+                    "REQUEST_QUEUE_TIMEOUT_SECONDS",
+                    os.getenv("QUEUE_TIMEOUT_SECONDS", "8"),
+                ),
+            )
+        )
+        self.http_pool_timeout = max(
+            0.1,
+            min(
+                configured_pool_timeout,
+                max(self.timeout, self.connect_timeout),
+                max(self.stream_timeout, self.connect_timeout),
+            ),
+        )
+        self.http_keepalive_expiry_seconds = max(
+            1.0,
+            float(os.getenv("HTTP_KEEPALIVE_EXPIRY_SECONDS", "15.0")),
+        )
+        configured_backend_stream_cap = os.getenv("BACKEND_MAX_CONCURRENT_STREAMS")
+        if configured_backend_stream_cap is None or str(configured_backend_stream_cap).strip() == "":
+            if self.effective_http_max_connections <= 1:
+                self.backend_max_concurrent_streams = self.effective_http_max_connections
+            else:
+                self.backend_max_concurrent_streams = max(1, self.effective_http_max_connections - 1)
+        else:
+            self.backend_max_concurrent_streams = max(
+                0,
+                min(
+                    self.effective_http_max_connections,
+                    int(configured_backend_stream_cap),
+                ),
+            )
 
         self.sync_max_retries = max(0, int(os.getenv("BACKEND_SYNC_MAX_RETRIES", "2")))
-        self.stream_max_retries = max(0, int(os.getenv("BACKEND_STREAM_MAX_RETRIES", "1")))
+        self.stream_max_retries = max(0, int(os.getenv("BACKEND_STREAM_MAX_RETRIES", "2")))
         self.retry_base_delay_seconds = max(0.0, float(os.getenv("BACKEND_RETRY_BASE_DELAY_SECONDS", "0.25")))
         self.retry_max_delay_seconds = max(
             self.retry_base_delay_seconds,
@@ -106,7 +156,7 @@ class BackendClient:
         )
         self.retry_jitter_seconds = max(0.0, float(os.getenv("BACKEND_RETRY_JITTER_SECONDS", "0.10")))
         self.retry_on_connect_error = os.getenv("BACKEND_RETRY_ON_CONNECT_ERROR", "true").lower() == "true"
-        self.retry_on_timeout = os.getenv("BACKEND_RETRY_ON_TIMEOUT", "false").lower() == "true"
+        self.retry_on_timeout = os.getenv("BACKEND_RETRY_ON_TIMEOUT", "true").lower() == "true"
         self.retry_on_transport_error = os.getenv("BACKEND_RETRY_ON_TRANSPORT_ERROR", "true").lower() == "true"
         self.retryable_status_codes = _parse_retry_status_codes(
             os.getenv("BACKEND_RETRY_STATUS_CODES", "429,500,502,503,504")
@@ -115,6 +165,21 @@ class BackendClient:
         self._client: Optional[httpx.AsyncClient] = None
         self._client_lock: Optional[asyncio.Lock] = None
         self._loop_id: Optional[int] = None
+        self._backend_slot_semaphore: Optional[asyncio.Semaphore] = None
+        self._backend_stream_slot_semaphore: Optional[asyncio.Semaphore] = None
+        self._sync_retry_count = 0
+        self._stream_retry_count = 0
+        self._pool_timeout_count = 0
+        self._connect_error_count = 0
+        self._timeout_error_count = 0
+        self._transport_error_count = 0
+        self._backend_slot_timeout_count = 0
+        self._backend_stream_slot_timeout_count = 0
+        self._backend_total_acquires = 0
+        self._active_sync_requests = 0
+        self._active_stream_requests = 0
+        self._backend_wait_times_ms: list[float] = []
+        self._max_wait_samples = 1000
 
     def _ensure_runtime_state(self) -> None:
         """确保当前事件循环下的锁和客户端状态可用。"""
@@ -123,6 +188,14 @@ class BackendClient:
             # 跨事件循环时丢弃旧客户端引用，避免 loop 绑定问题。
             self._client = None
             self._client_lock = asyncio.Lock()
+            self._backend_slot_semaphore = asyncio.Semaphore(self.effective_http_max_connections)
+            self._backend_stream_slot_semaphore = (
+                asyncio.Semaphore(self.backend_max_concurrent_streams)
+                if self.backend_max_concurrent_streams > 0
+                else None
+            )
+            self._active_sync_requests = 0
+            self._active_stream_requests = 0
             self._loop_id = loop_id
 
     async def _get_client(self) -> httpx.AsyncClient:
@@ -134,20 +207,29 @@ class BackendClient:
                     self._client = httpx.AsyncClient(
                         trust_env=self.http_trust_env,
                         limits=httpx.Limits(
-                            max_connections=self.http_max_connections,
+                            max_connections=self.effective_http_max_connections,
                             max_keepalive_connections=min(
                                 self.http_max_keepalive,
-                                self.http_max_connections
+                                self.effective_http_max_connections
                             ),
+                            keepalive_expiry=self.http_keepalive_expiry_seconds,
                         )
                     )
                     logger.info(
                         (
-                            "Backend HTTP client initialized: max_connections=%s, max_keepalive=%s, "
+                            "Backend HTTP client initialized: max_connections=%s, "
+                            "configured_max_connections=%s, max_connections_per_host=%s, "
+                            "max_keepalive=%s, keepalive_expiry=%ss, pool_timeout=%ss, "
+                            "backend_max_streams=%s, "
                             "trust_env=%s, sync_retries=%s, stream_retries=%s"
                         ),
+                        self.effective_http_max_connections,
                         self.http_max_connections,
-                        min(self.http_max_keepalive, self.http_max_connections),
+                        self.http_max_connections_per_host,
+                        min(self.http_max_keepalive, self.effective_http_max_connections),
+                        self.http_keepalive_expiry_seconds,
+                        self.http_pool_timeout,
+                        self.backend_max_concurrent_streams,
                         self.http_trust_env,
                         self.sync_max_retries,
                         self.stream_max_retries,
@@ -158,6 +240,7 @@ class BackendClient:
         return httpx.Timeout(
             timeout=self.timeout,
             connect=self.connect_timeout,
+            pool=self.http_pool_timeout,
         )
 
     def _stream_timeout(self) -> httpx.Timeout:
@@ -165,7 +248,7 @@ class BackendClient:
             connect=self.connect_timeout,
             read=self.stream_timeout,
             write=self.timeout,
-            pool=self.timeout,
+            pool=self.http_pool_timeout,
         )
 
     def _is_retryable_status_code(self, status_code: int) -> bool:
@@ -247,7 +330,115 @@ class BackendClient:
             delay,
             reason,
         )
+        if mode == "stream":
+            self._stream_retry_count += 1
+        else:
+            self._sync_retry_count += 1
         await asyncio.sleep(delay)
+
+    def _record_backend_wait_time(self, wait_ms: float) -> None:
+        self._backend_wait_times_ms.append(wait_ms)
+        if len(self._backend_wait_times_ms) > self._max_wait_samples:
+            self._backend_wait_times_ms = self._backend_wait_times_ms[-self._max_wait_samples:]
+
+    @asynccontextmanager
+    async def _acquire_backend_slot(self, *, kind: str):
+        self._ensure_runtime_state()
+        assert self._backend_slot_semaphore is not None
+
+        start = time.monotonic()
+        acquired_total = False
+        acquired_stream = False
+        try:
+            await asyncio.wait_for(
+                self._backend_slot_semaphore.acquire(),
+                timeout=self.http_pool_timeout,
+            )
+            acquired_total = True
+
+            if kind == "stream" and self._backend_stream_slot_semaphore is not None:
+                remaining_timeout = max(
+                    0.001,
+                    self.http_pool_timeout - max(0.0, time.monotonic() - start),
+                )
+                await asyncio.wait_for(
+                    self._backend_stream_slot_semaphore.acquire(),
+                    timeout=remaining_timeout,
+                )
+                acquired_stream = True
+        except asyncio.TimeoutError as exc:
+            if kind == "stream" and acquired_total and not acquired_stream:
+                self._backend_stream_slot_timeout_count += 1
+                self._backend_slot_semaphore.release()
+            else:
+                self._backend_slot_timeout_count += 1
+            raise BackendAcquireTimeoutError(
+                f"Backend concurrency gate timed out after {self.http_pool_timeout}s"
+            ) from exc
+
+        wait_ms = max(0.0, (time.monotonic() - start) * 1000)
+        self._record_backend_wait_time(wait_ms)
+        self._backend_total_acquires += 1
+
+        if kind == "stream":
+            self._active_stream_requests += 1
+        else:
+            self._active_sync_requests += 1
+
+        try:
+            yield
+        finally:
+            if acquired_stream and self._backend_stream_slot_semaphore is not None:
+                self._backend_stream_slot_semaphore.release()
+            self._backend_slot_semaphore.release()
+            if kind == "stream":
+                self._active_stream_requests = max(0, self._active_stream_requests - 1)
+            else:
+                self._active_sync_requests = max(0, self._active_sync_requests - 1)
+
+    def stats(self) -> Dict[str, Any]:
+        wait_times = self._backend_wait_times_ms
+        avg_wait_ms = 0.0
+        p95_wait_ms = 0.0
+        p99_wait_ms = 0.0
+        if wait_times:
+            sorted_times = sorted(wait_times)
+            avg_wait_ms = sum(sorted_times) / len(sorted_times)
+            p95_idx = int(len(sorted_times) * 0.95)
+            p99_idx = int(len(sorted_times) * 0.99)
+            p95_wait_ms = sorted_times[min(p95_idx, len(sorted_times) - 1)]
+            p99_wait_ms = sorted_times[min(p99_idx, len(sorted_times) - 1)]
+
+        return {
+            "configured_max_connections": self.http_max_connections,
+            "max_connections_per_host": self.http_max_connections_per_host,
+            "effective_max_connections": self.effective_http_max_connections,
+            "backend_max_concurrent_streams": self.backend_max_concurrent_streams,
+            "max_keepalive_connections": min(
+                self.http_max_keepalive,
+                self.effective_http_max_connections,
+            ),
+            "keepalive_expiry_seconds": self.http_keepalive_expiry_seconds,
+            "connect_timeout_seconds": self.connect_timeout,
+            "pool_timeout_seconds": self.http_pool_timeout,
+            "sync_timeout_seconds": self.timeout,
+            "stream_timeout_seconds": self.stream_timeout,
+            "sync_retry_count": self._sync_retry_count,
+            "stream_retry_count": self._stream_retry_count,
+            "pool_timeout_count": self._pool_timeout_count,
+            "connect_error_count": self._connect_error_count,
+            "timeout_error_count": self._timeout_error_count,
+            "transport_error_count": self._transport_error_count,
+            "backend_slot_timeout_count": self._backend_slot_timeout_count,
+            "backend_stream_slot_timeout_count": self._backend_stream_slot_timeout_count,
+            "backend_total_acquires": self._backend_total_acquires,
+            "active_sync_requests": self._active_sync_requests,
+            "active_stream_requests": self._active_stream_requests,
+            "active_total_requests": self._active_sync_requests + self._active_stream_requests,
+            "avg_wait_ms": round(avg_wait_ms, 2),
+            "p95_wait_ms": round(p95_wait_ms, 2),
+            "p99_wait_ms": round(p99_wait_ms, 2),
+        }
 
     async def close(self) -> None:
         if self._client and not self._client.is_closed:
@@ -272,13 +463,14 @@ class BackendClient:
         for attempt in range(1, max_attempts + 1):
             is_last_attempt = attempt >= max_attempts
             try:
-                client = await self._get_client()
-                response = await client.post(
-                    url,
-                    headers=headers,
-                    json=payload,
-                    timeout=self._sync_timeout(),
-                )
+                async with self._acquire_backend_slot(kind="sync"):
+                    client = await self._get_client()
+                    response = await client.post(
+                        url,
+                        headers=headers,
+                        json=payload,
+                        timeout=self._sync_timeout(),
+                    )
 
                 if response.status_code >= 400:
                     error_data = self._parse_error_response_data(response)
@@ -303,7 +495,35 @@ class BackendClient:
                 logger.debug(f"Backend sync response received: {len(str(result))} bytes")
                 return result
 
+            except BackendAcquireTimeoutError as e:
+                if (not is_last_attempt) and self.retry_on_timeout:
+                    await self._sleep_before_retry(
+                        mode="sync",
+                        attempt=attempt,
+                        max_attempts=max_attempts,
+                        reason=f"backend slot timeout: {e}",
+                    )
+                    continue
+                logger.error(f"Backend concurrency gate timed out: {e}")
+                raise BackendTimeoutError(message=str(e))
+
+            except httpx.PoolTimeout as e:
+                self._pool_timeout_count += 1
+                if (not is_last_attempt) and self.retry_on_timeout:
+                    await self._sleep_before_retry(
+                        mode="sync",
+                        attempt=attempt,
+                        max_attempts=max_attempts,
+                        reason=f"pool timeout: {e}",
+                    )
+                    continue
+                logger.error(f"Backend connection pool timed out: {e}")
+                raise BackendTimeoutError(
+                    message=f"Backend connection pool timed out after {self.http_pool_timeout}s"
+                )
+
             except httpx.ConnectError as e:
+                self._connect_error_count += 1
                 if (not is_last_attempt) and self.retry_on_connect_error:
                     await self._sleep_before_retry(
                         mode="sync",
@@ -316,6 +536,7 @@ class BackendClient:
                 raise BackendConnectionError(message=f"Failed to connect to backend: {e}")
 
             except httpx.TimeoutException as e:
+                self._timeout_error_count += 1
                 if (not is_last_attempt) and self.retry_on_timeout:
                     await self._sleep_before_retry(
                         mode="sync",
@@ -328,6 +549,7 @@ class BackendClient:
                 raise BackendTimeoutError(message=f"Backend request timed out after {self.timeout}s")
 
             except httpx.TransportError as e:
+                self._transport_error_count += 1
                 if (not is_last_attempt) and self.retry_on_transport_error:
                     await self._sleep_before_retry(
                         mode="sync",
@@ -385,58 +607,87 @@ class BackendClient:
         for attempt in range(1, max_attempts + 1):
             is_last_attempt = attempt >= max_attempts
             try:
-                client = await self._get_client()
-                async with client.stream(
-                    "POST",
-                    url,
-                    headers=headers,
-                    json=payload,
-                    timeout=self._stream_timeout(),
-                ) as response:
-                    if response.status_code >= 400:
-                        error_body = await response.aread()
-                        error_data = self._parse_stream_error_body(error_body)
+                async with self._acquire_backend_slot(kind="stream"):
+                    client = await self._get_client()
+                    async with client.stream(
+                        "POST",
+                        url,
+                        headers=headers,
+                        json=payload,
+                        timeout=self._stream_timeout(),
+                    ) as response:
+                        if response.status_code >= 400:
+                            error_body = await response.aread()
+                            error_data = self._parse_stream_error_body(error_body)
 
-                        if (
-                            (not is_last_attempt)
-                            and (not yielded_any)
-                            and self._is_retryable_status_code(response.status_code)
-                        ):
-                            await self._sleep_before_retry(
-                                mode="stream",
-                                attempt=attempt,
-                                max_attempts=max_attempts,
-                                reason=f"HTTP {response.status_code}",
-                                response_headers=dict(response.headers),
+                            if (
+                                (not is_last_attempt)
+                                and (not yielded_any)
+                                and self._is_retryable_status_code(response.status_code)
+                            ):
+                                await self._sleep_before_retry(
+                                    mode="stream",
+                                    attempt=attempt,
+                                    max_attempts=max_attempts,
+                                    reason=f"HTTP {response.status_code}",
+                                    response_headers=dict(response.headers),
+                                )
+                                continue
+
+                            logger.error(f"Backend API error: status={response.status_code}")
+                            raise BackendAPIError(
+                                message=f"Backend API returned error: {response.status_code}",
+                                status_code=response.status_code,
+                                response_data=error_data
                             )
-                            continue
 
-                        logger.error(f"Backend API error: status={response.status_code}")
-                        raise BackendAPIError(
-                            message=f"Backend API returned error: {response.status_code}",
-                            status_code=response.status_code,
-                            response_data=error_data
-                        )
+                        buffer = ""
+                        async for chunk in response.aiter_text():
+                            buffer += chunk
 
-                    buffer = ""
-                    async for chunk in response.aiter_text():
-                        buffer += chunk
+                            while "\n" in buffer:
+                                line, buffer = buffer.split("\n", 1)
+                                line = line.strip()
+                                if line:
+                                    yielded_any = True
+                                    yield line
 
-                        while "\n" in buffer:
-                            line, buffer = buffer.split("\n", 1)
-                            line = line.strip()
-                            if line:
-                                yielded_any = True
-                                yield line
+                        if buffer.strip():
+                            yielded_any = True
+                            yield buffer.strip()
 
-                    if buffer.strip():
-                        yielded_any = True
-                        yield buffer.strip()
+                        logger.debug("Backend stream completed")
+                        return
 
-                    logger.debug("Backend stream completed")
-                    return
+            except BackendAcquireTimeoutError as e:
+                if (not is_last_attempt) and (not yielded_any) and self.retry_on_timeout:
+                    await self._sleep_before_retry(
+                        mode="stream",
+                        attempt=attempt,
+                        max_attempts=max_attempts,
+                        reason=f"backend slot timeout: {e}",
+                    )
+                    continue
+                logger.error(f"Backend stream concurrency gate timed out: {e}")
+                raise BackendTimeoutError(message=str(e))
+
+            except httpx.PoolTimeout as e:
+                self._pool_timeout_count += 1
+                if (not is_last_attempt) and (not yielded_any) and self.retry_on_timeout:
+                    await self._sleep_before_retry(
+                        mode="stream",
+                        attempt=attempt,
+                        max_attempts=max_attempts,
+                        reason=f"pool timeout: {e}",
+                    )
+                    continue
+                logger.error(f"Backend stream connection pool timed out: {e}")
+                raise BackendTimeoutError(
+                    message=f"Backend stream connection pool timed out after {self.http_pool_timeout}s"
+                )
 
             except httpx.ConnectError as e:
+                self._connect_error_count += 1
                 if (not is_last_attempt) and (not yielded_any) and self.retry_on_connect_error:
                     await self._sleep_before_retry(
                         mode="stream",
@@ -449,6 +700,7 @@ class BackendClient:
                 raise BackendConnectionError(message=f"Failed to connect to backend: {e}")
 
             except httpx.TimeoutException as e:
+                self._timeout_error_count += 1
                 if (not is_last_attempt) and (not yielded_any) and self.retry_on_timeout:
                     await self._sleep_before_retry(
                         mode="stream",
@@ -461,6 +713,7 @@ class BackendClient:
                 raise BackendTimeoutError(message=f"Backend stream timed out after {self.stream_timeout}s")
 
             except httpx.TransportError as e:
+                self._transport_error_count += 1
                 if (not is_last_attempt) and (not yielded_any) and self.retry_on_transport_error:
                     await self._sleep_before_retry(
                         mode="stream",

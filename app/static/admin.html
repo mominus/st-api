@@ -169,6 +169,18 @@
                         <div class="stat-sub" id="perf-max-concurrent">/ 100</div>
                     </div>
                     <div class="stat-card">
+                        <div class="stat-icon" style="background: #e0f2fe;">🌊</div>
+                        <div class="stat-label">流式并发</div>
+                        <div class="stat-value" id="perf-active-streams">0</div>
+                        <div class="stat-sub" id="perf-max-streams">/ 40</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon" style="background: #ecfccb;">🗄️</div>
+                        <div class="stat-label">DB 并发</div>
+                        <div class="stat-value" id="perf-active-db-ops">0</div>
+                        <div class="stat-sub" id="perf-max-db-ops">/ 10</div>
+                    </div>
+                    <div class="stat-card">
                         <div class="stat-icon" style="background: #d1fae5;">📈</div>
                         <div class="stat-label">实时 QPS</div>
                         <div class="stat-value" id="perf-current-qps">0</div>
@@ -184,7 +196,7 @@
                         <div class="stat-icon" style="background: #fce7f3;">🎯</div>
                         <div class="stat-label">成功率</div>
                         <div class="stat-value" id="perf-success-rate">100%</div>
-                        <div class="stat-sub" id="perf-rejected">拒绝: 0</div>
+                        <div class="stat-sub" id="perf-rejected">拒绝 req/stream/db: 0/0/0</div>
                     </div>
                 </div>
                 
@@ -222,7 +234,7 @@
                             </div>
                             <div class="perf-config-value">
                                 <span id="config-db-concurrent-value">50</span>
-                                <span class="perf-config-max">推荐: 20-100</span>
+                                <span class="perf-config-max" id="config-db-concurrent-hint">受 DB 池容量限制</span>
                             </div>
                         </div>
                         <div class="perf-config-item">
@@ -250,7 +262,7 @@
                             <div class="stat-value" id="perf-total-requests">0</div>
                         </div>
                         <div class="stat-card-mini">
-                            <div class="stat-label">拒绝请求</div>
+                            <div class="stat-label">总拒绝数</div>
                             <div class="stat-value" id="perf-total-rejected">0</div>
                         </div>
                         <div class="stat-card-mini">
@@ -260,6 +272,123 @@
                         <div class="stat-card-mini">
                             <div class="stat-label">P99 响应时间</div>
                             <div class="stat-value" id="perf-p99-response">0 ms</div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="card" style="margin-top: 20px;">
+                    <div class="card-header-bar">
+                        <h3>🧭 排队与限流</h3>
+                        <span class="text-muted">区分入口请求、流式会话和数据库瓶颈</span>
+                    </div>
+                    <div class="perf-metrics-grid">
+                        <div class="perf-metric-card">
+                            <div class="perf-metric-title">请求排队 P95</div>
+                            <div class="perf-metric-value" id="perf-request-queue-p95">0 ms</div>
+                            <div class="perf-metric-sub" id="perf-request-queue-avg">均值 0 ms</div>
+                        </div>
+                        <div class="perf-metric-card">
+                            <div class="perf-metric-title">流式排队 P95</div>
+                            <div class="perf-metric-value" id="perf-stream-queue-p95">0 ms</div>
+                            <div class="perf-metric-sub" id="perf-stream-queue-avg">均值 0 ms</div>
+                        </div>
+                        <div class="perf-metric-card">
+                            <div class="perf-metric-title">DB 排队 P95</div>
+                            <div class="perf-metric-value" id="perf-db-queue-p95">0 ms</div>
+                            <div class="perf-metric-sub" id="perf-db-queue-avg">均值 0 ms</div>
+                        </div>
+                        <div class="perf-metric-card">
+                            <div class="perf-metric-title">当前请求排队</div>
+                            <div class="perf-metric-value" id="perf-queued-requests">0</div>
+                            <div class="perf-metric-sub" id="perf-queued-requests-sub">累计拒绝 0</div>
+                        </div>
+                        <div class="perf-metric-card">
+                            <div class="perf-metric-title">当前流式排队</div>
+                            <div class="perf-metric-value" id="perf-queued-streams">0</div>
+                            <div class="perf-metric-sub" id="perf-queued-streams-sub">累计拒绝 0</div>
+                        </div>
+                        <div class="perf-metric-card">
+                            <div class="perf-metric-title">当前 DB 排队</div>
+                            <div class="perf-metric-value" id="perf-queued-db">0</div>
+                            <div class="perf-metric-sub" id="perf-queued-db-sub">累计拒绝 0</div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="card" style="margin-top: 20px;">
+                    <div class="card-header-bar">
+                        <h3>🌐 上游 HTTP 池</h3>
+                        <span class="text-muted">判断瓶颈是否落在上游连接池、超时或传输层</span>
+                    </div>
+                    <div class="perf-metrics-grid">
+                        <div class="perf-metric-card">
+                            <div class="perf-metric-title">活跃上游请求</div>
+                            <div class="perf-metric-value" id="perf-backend-active-total">0</div>
+                            <div class="perf-metric-sub" id="perf-backend-active-total-sub">有效连接上限 0</div>
+                        </div>
+                        <div class="perf-metric-card">
+                            <div class="perf-metric-title">活跃上游流</div>
+                            <div class="perf-metric-value" id="perf-backend-active-streams">0</div>
+                            <div class="perf-metric-sub" id="perf-backend-active-streams-sub">stream 上限 0</div>
+                        </div>
+                        <div class="perf-metric-card">
+                            <div class="perf-metric-title">取连接等待 P95</div>
+                            <div class="perf-metric-value" id="perf-backend-wait-p95">0 ms</div>
+                            <div class="perf-metric-sub" id="perf-backend-wait-avg">均值 0 ms</div>
+                        </div>
+                        <div class="perf-metric-card">
+                            <div class="perf-metric-title">Pool 超时累计</div>
+                            <div class="perf-metric-value" id="perf-backend-pool-timeouts">0</div>
+                            <div class="perf-metric-sub" id="perf-backend-pool-timeouts-sub">总获取 0</div>
+                        </div>
+                        <div class="perf-metric-card">
+                            <div class="perf-metric-title">上游超时累计</div>
+                            <div class="perf-metric-value" id="perf-backend-timeouts">0</div>
+                            <div class="perf-metric-sub" id="perf-backend-timeouts-sub">sync/stream 重试 0/0</div>
+                        </div>
+                        <div class="perf-metric-card">
+                            <div class="perf-metric-title">连接/传输错误</div>
+                            <div class="perf-metric-value" id="perf-backend-connect-errors">0 / 0</div>
+                            <div class="perf-metric-sub" id="perf-backend-connect-errors-sub">per-host 0 keepalive 0</div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="card" style="margin-top: 20px;">
+                    <div class="card-header-bar">
+                        <h3>🪵 异步落库与日志</h3>
+                        <span class="text-muted">观察后台聚合队列是否积压或丢弃</span>
+                    </div>
+                    <div class="perf-metrics-grid">
+                        <div class="perf-metric-card">
+                            <div class="perf-metric-title">Usage 队列</div>
+                            <div class="perf-metric-value" id="perf-usage-queue">0</div>
+                            <div class="perf-metric-sub" id="perf-usage-queue-sub">workers 0 / flush 0</div>
+                        </div>
+                        <div class="perf-metric-card">
+                            <div class="perf-metric-title">Usage 已落库</div>
+                            <div class="perf-metric-value" id="perf-usage-flushed">0</div>
+                            <div class="perf-metric-sub" id="perf-usage-flushed-sub">批次 0</div>
+                        </div>
+                        <div class="perf-metric-card">
+                            <div class="perf-metric-title">Usage 丢弃</div>
+                            <div class="perf-metric-value" id="perf-usage-dropped">0</div>
+                            <div class="perf-metric-sub">队列满时会回退/丢弃</div>
+                        </div>
+                        <div class="perf-metric-card">
+                            <div class="perf-metric-title">日志队列</div>
+                            <div class="perf-metric-value" id="perf-log-queue">0</div>
+                            <div class="perf-metric-sub" id="perf-log-queue-sub">容量 0</div>
+                        </div>
+                        <div class="perf-metric-card">
+                            <div class="perf-metric-title">日志已处理</div>
+                            <div class="perf-metric-value" id="perf-log-processed">0</div>
+                            <div class="perf-metric-sub" id="perf-log-processed-sub">进行中 0</div>
+                        </div>
+                        <div class="perf-metric-card">
+                            <div class="perf-metric-title">日志丢弃</div>
+                            <div class="perf-metric-value" id="perf-log-dropped">0</div>
+                            <div class="perf-metric-sub" id="perf-log-dropped-sub">活跃 workers 0</div>
                         </div>
                     </div>
                 </div>
@@ -353,22 +482,24 @@
                     <h1>📁 模型组管理</h1>
                     <button class="btn btn-primary" onclick="showAddGroupModal()">+ 添加模型组</button>
                 </div>
-                
-                <table class="data-table">
-                    <thead>
-                        <tr>
-                            <th>名称</th>
-                            <th>描述</th>
-                            <th>计价 ($/1M Token)</th>
-                            <th>可用额度</th>
-                            <th>账号</th>
-                            <th>操作</th>
-                        </tr>
-                    </thead>
-                    <tbody id="groups-table-body">
-                        <tr><td colspan="6" class="text-center">加载中...</td></tr>
-                    </tbody>
-                </table>
+
+                <div class="table-wrapper">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>名称</th>
+                                <th>描述</th>
+                                <th>计价 ($/1M Token)</th>
+                                <th>可用额度</th>
+                                <th>账号</th>
+                                <th>操作</th>
+                            </tr>
+                        </thead>
+                        <tbody id="groups-table-body">
+                            <tr><td colspan="6" class="text-center">加载中...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
             </div>
 
             <!-- API Key 管理页面 -->
@@ -387,21 +518,23 @@
                     </select>
                 </div>
                 
-                <table class="data-table">
-                    <thead>
-                        <tr>
-                            <th>名称</th>
-                            <th>Key</th>
-                            <th>模型组</th>
-                            <th>限制</th>
-                            <th>状态</th>
-                            <th>操作</th>
-                        </tr>
-                    </thead>
-                    <tbody id="apikeys-table-body">
-                        <tr><td colspan="6" class="text-center">加载中...</td></tr>
-                    </tbody>
-                </table>
+                <div class="table-wrapper">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>名称</th>
+                                <th>Key</th>
+                                <th>模型组</th>
+                                <th>限制</th>
+                                <th>状态</th>
+                                <th>操作</th>
+                            </tr>
+                        </thead>
+                        <tbody id="apikeys-table-body">
+                            <tr><td colspan="6" class="text-center">加载中...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
             </div>
 
             <!-- 调用日志页面 -->
@@ -862,7 +995,7 @@
                 <div class="form-group">
                     <label for="setting-db-concurrent">最大数据库并发</label>
                     <input type="number" id="setting-db-concurrent" min="1" max="200" value="50">
-                    <small class="text-muted">推荐值: 20-100，SQLite 建议不超过 50</small>
+                    <small class="text-muted" id="setting-db-concurrent-help">会被钳制到 DB_POOL_SIZE + DB_MAX_OVERFLOW 的实际池容量</small>
                 </div>
                 <div class="form-group">
                     <label for="setting-http-connections">HTTP 连接池大小</label>

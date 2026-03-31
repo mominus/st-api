@@ -6,7 +6,6 @@ import json
 import logging
 import re
 import time
-import uuid
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, Header, Query, Request
@@ -64,10 +63,17 @@ def _openai_error_payload(error_handler, error: APIError) -> Dict[str, Any]:
     return error_handler.to_openai_error(error)
 
 
-def _openai_error_response(error_handler, error: APIError) -> JSONResponse:
+def _openai_error_response(
+    error_handler,
+    error: APIError,
+    *,
+    request_id: Optional[str] = None,
+) -> JSONResponse:
+    headers = {"X-Request-ID": request_id} if request_id else None
     return JSONResponse(
         status_code=error.status_code,
         content=_openai_error_payload(error_handler, error),
+        headers=headers,
     )
 
 
@@ -353,12 +359,11 @@ async def chat_completions(
     x_api_key: Optional[str] = Header(None, alias="x-api-key"),
     session: AsyncSession = Depends(get_session),
 ):
-    request_id = uuid.uuid4().hex[:24]
-    start_time = time.time()
-
     bridge = get_protocol_bridge()
     runtime = get_gateway_runtime()
     error_handler = get_error_handler()
+    request_id = runtime.resolve_request_id(headers=http_request.headers)
+    start_time = time.time()
 
     try:
         body_json = await http_request.json()
@@ -367,7 +372,7 @@ async def chat_completions(
         canonical = bridge.parse_openai_chat(body_json)
     except Exception as exc:
         error = error_handler.create_invalid_request_error(str(exc))
-        return _openai_error_response(error_handler, error)
+        return _openai_error_response(error_handler, error, request_id=request_id)
 
     raw_key = bridge.extract_api_key(
         authorization=authorization,
@@ -411,7 +416,11 @@ async def chat_completions(
         )
 
         if canonical.stream:
-            stream_gen = await runtime.run_stream(resolved=resolved, payload=payload)
+            stream_gen = await runtime.run_stream(
+                resolved=resolved,
+                payload=payload,
+                session=session,
+            )
 
             async def generate_stream():
                 raw_tokens: List[str] = []
@@ -616,6 +625,8 @@ async def chat_completions(
                         response_time_ms=runtime.elapsed_ms(start_time),
                         client_ip=client_ip,
                         error_message=api_error.message,
+                        api_error=api_error,
+                        defer_noncritical_logs=True,
                     )
 
             return StreamingResponse(
@@ -628,7 +639,11 @@ async def chat_completions(
                 },
             )
 
-        backend_response = await runtime.run_sync(resolved=resolved, payload=payload)
+        backend_response = await runtime.run_sync(
+            resolved=resolved,
+            payload=payload,
+            session=session,
+        )
         raw_output = runtime.extract_content(backend_response)
         parsed = _normalize_tool_turn_output(
             bridge.parse_model_output(raw_output),
@@ -662,7 +677,7 @@ async def chat_completions(
         return JSONResponse(content=response_data, headers={"X-Request-ID": request_id})
 
     except GatewayAuthError as exc:
-        return _openai_error_response(error_handler, exc.error)
+        return _openai_error_response(error_handler, exc.error, request_id=request_id)
     except Exception as exc:
         logger.exception("OpenAI chat request failed")
         api_error = runtime.map_backend_exception(exc)
@@ -676,8 +691,9 @@ async def chat_completions(
             response_time_ms=runtime.elapsed_ms(start_time),
             client_ip=client_ip,
             error_message=api_error.message,
+            api_error=api_error,
         )
-        return _openai_error_response(error_handler, api_error)
+        return _openai_error_response(error_handler, api_error, request_id=request_id)
 
 
 @router.post("/responses")
@@ -687,12 +703,11 @@ async def create_response(
     x_api_key: Optional[str] = Header(None, alias="x-api-key"),
     session: AsyncSession = Depends(get_session),
 ):
-    request_id = uuid.uuid4().hex[:24]
-    start_time = time.time()
-
     bridge = get_protocol_bridge()
     runtime = get_gateway_runtime()
     error_handler = get_error_handler()
+    request_id = runtime.resolve_request_id(headers=http_request.headers)
+    start_time = time.time()
 
     try:
         body_json = await http_request.json()
@@ -700,7 +715,7 @@ async def create_response(
         canonical = bridge.parse_openai_responses(body_json)
     except Exception as exc:
         error = error_handler.create_invalid_request_error(str(exc))
-        return _openai_error_response(error_handler, error)
+        return _openai_error_response(error_handler, error, request_id=request_id)
 
     raw_key = bridge.extract_api_key(
         authorization=authorization,
@@ -744,7 +759,11 @@ async def create_response(
         )
 
         if canonical.stream:
-            stream_gen = await runtime.run_stream(resolved=resolved, payload=payload)
+            stream_gen = await runtime.run_stream(
+                resolved=resolved,
+                payload=payload,
+                session=session,
+            )
 
             async def generate_stream():
                 raw_tokens: List[str] = []
@@ -989,6 +1008,8 @@ async def create_response(
                         response_time_ms=runtime.elapsed_ms(start_time),
                         client_ip=client_ip,
                         error_message=api_error.message,
+                        api_error=api_error,
+                        defer_noncritical_logs=True,
                     )
 
             return StreamingResponse(
@@ -1001,7 +1022,11 @@ async def create_response(
                 },
             )
 
-        backend_response = await runtime.run_sync(resolved=resolved, payload=payload)
+        backend_response = await runtime.run_sync(
+            resolved=resolved,
+            payload=payload,
+            session=session,
+        )
         raw_output = runtime.extract_content(backend_response)
         parsed = _normalize_tool_turn_output(
             bridge.parse_model_output(raw_output),
@@ -1035,7 +1060,7 @@ async def create_response(
         return JSONResponse(content=response_data, headers={"X-Request-ID": request_id})
 
     except GatewayAuthError as exc:
-        return _openai_error_response(error_handler, exc.error)
+        return _openai_error_response(error_handler, exc.error, request_id=request_id)
     except Exception as exc:
         logger.exception("OpenAI responses request failed")
         api_error = runtime.map_backend_exception(exc)
@@ -1049,8 +1074,9 @@ async def create_response(
             response_time_ms=runtime.elapsed_ms(start_time),
             client_ip=client_ip,
             error_message=api_error.message,
+            api_error=api_error,
         )
-        return _openai_error_response(error_handler, api_error)
+        return _openai_error_response(error_handler, api_error, request_id=request_id)
 
 
 @router.get("/models", response_model=ModelsResponse)
@@ -1060,6 +1086,7 @@ async def list_models(
     session: AsyncSession = Depends(get_session),
 ):
     bridge = get_protocol_bridge()
+    runtime = get_gateway_runtime()
     error_handler = get_error_handler()
     api_key_service = get_api_key_service()
 
@@ -1068,7 +1095,13 @@ async def list_models(
         error = error_handler.create_authentication_error("Missing API key")
         return _openai_error_response(error_handler, error)
 
-    api_key_obj = await api_key_service.get_key_by_raw(session, raw_key)
+    try:
+        api_key_obj = await runtime.run_db_guarded(
+            session,
+            lambda: api_key_service.get_key_by_raw(session, raw_key),
+        )
+    except GatewayAuthError as exc:
+        return _openai_error_response(error_handler, exc.error)
     if api_key_obj is None or api_key_obj.status == "revoked":
         error = error_handler.create_authentication_error("Invalid API key")
         return _openai_error_response(error_handler, error)
@@ -1090,6 +1123,7 @@ async def get_model(
     session: AsyncSession = Depends(get_session),
 ):
     bridge = get_protocol_bridge()
+    runtime = get_gateway_runtime()
     error_handler = get_error_handler()
     api_key_service = get_api_key_service()
 
@@ -1098,7 +1132,13 @@ async def get_model(
         error = error_handler.create_authentication_error("Missing API key")
         return _openai_error_response(error_handler, error)
 
-    api_key_obj = await api_key_service.get_key_by_raw(session, raw_key)
+    try:
+        api_key_obj = await runtime.run_db_guarded(
+            session,
+            lambda: api_key_service.get_key_by_raw(session, raw_key),
+        )
+    except GatewayAuthError as exc:
+        return _openai_error_response(error_handler, exc.error)
     if api_key_obj is None or api_key_obj.status == "revoked":
         error = error_handler.create_authentication_error("Invalid API key")
         return _openai_error_response(error_handler, error)
@@ -1140,27 +1180,44 @@ async def get_current_key_info(
         error = error_handler.create_authentication_error("Missing API key")
         return _openai_error_response(error_handler, error)
 
-    api_key_obj = await api_key_service.get_key_by_raw(session, raw_key)
-    if api_key_obj is None or api_key_obj.status == "revoked":
+    async def _load_key_info_payload():
+        api_key_obj = await api_key_service.get_key_by_raw(session, raw_key)
+        if api_key_obj is None or api_key_obj.status == "revoked":
+            return None, None
+
+        allowed_models = api_key_service.get_model_groups(api_key_obj)
+        usage_by_model = await call_logger.get_api_key_usage_by_model(
+            session,
+            api_key_obj.id,
+            allowed_models=allowed_models,
+            since=api_key_obj.created_at,
+        )
+        accounts_by_model = await runtime.account_pool.get_accounts_by_model_groups(
+            session,
+            allowed_models,
+        )
+
+        models: List[Dict[str, Any]] = []
+        for model_name in allowed_models:
+            models.append(
+                {
+                    "id": model_name,
+                    "accounts": accounts_by_model.get(model_name, []),
+                    "usage": usage_by_model.get(model_name),
+                }
+            )
+        return api_key_obj, models
+
+    try:
+        api_key_obj, models = await runtime.run_db_guarded(
+            session,
+            _load_key_info_payload,
+        )
+    except GatewayAuthError as exc:
+        return _openai_error_response(error_handler, exc.error)
+
+    if api_key_obj is None or models is None:
         error = error_handler.create_authentication_error("Invalid API key")
         return _openai_error_response(error_handler, error)
-
-    allowed_models = api_key_service.get_model_groups(api_key_obj)
-    usage_by_model = await call_logger.get_api_key_usage_by_model(
-        session,
-        api_key_obj.id,
-        allowed_models=allowed_models,
-        since=api_key_obj.created_at,
-    )
-
-    models: List[Dict[str, Any]] = []
-    for model_name in allowed_models:
-        models.append(
-            {
-                "id": model_name,
-                "accounts": await runtime.account_pool.get_accounts_by_model_group(session, model_name),
-                "usage": usage_by_model.get(model_name),
-            }
-        )
 
     return build_public_key_info_payload(api_key_obj, models)

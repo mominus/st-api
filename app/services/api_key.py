@@ -7,15 +7,17 @@ Requirements: 5.1, 5.2, 5.3, 5.5, 5.6, 5.7, 5.8, 6.3
 
 import uuid
 import json
+from decimal import Decimal, InvalidOperation
 from datetime import datetime
 from typing import Optional, List, Tuple
 import logging
 
-from sqlalchemy import select, and_
+from sqlalchemy import select, and_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.database import APIKey, get_session_factory
 from app.services.crypto import CryptoService, get_crypto_service
+from app.services.time_utils import ensure_utc, utc_now, utc_now_naive
 
 logger = logging.getLogger(__name__)
 
@@ -83,7 +85,7 @@ class APIKeyService:
             total_cost="0",
             expires_at=expires_at,
             status="active",
-            created_at=datetime.utcnow()
+            created_at=utc_now_naive()
         )
         
         session.add(api_key)
@@ -128,35 +130,68 @@ class APIKeyService:
         
         if api_key is None:
             return False, "Invalid API key", None
-        
+
+        total_requests = int(api_key.total_requests or 0)
+        total_tokens = int(api_key.total_tokens or 0)
+        legacy_used = int(api_key.used or 0)
+
+        def _cost_limit_exceeded() -> bool:
+            if api_key.cost_limit is None:
+                return False
+            try:
+                return Decimal(api_key.total_cost or "0") >= Decimal(api_key.cost_limit)
+            except (InvalidOperation, TypeError, ValueError):
+                # 避免异常放大到鉴权路径，格式错误时跳过费用限制判定。
+                return False
+
+        def _quota_error_message() -> str:
+            if api_key.request_quota is not None and total_requests >= api_key.request_quota:
+                return "API key request quota exceeded"
+            if api_key.token_quota is not None and total_tokens >= api_key.token_quota:
+                return "API key token quota exceeded"
+            if api_key.quota is not None and legacy_used >= api_key.quota:
+                return "API key token quota exceeded"
+            if _cost_limit_exceeded():
+                return "API key cost limit exceeded"
+            return "API key quota exceeded"
+
         # 检查状态
         if api_key.status == "revoked":
             return False, "API key has been revoked", None
-        
+
         if api_key.status == "exhausted":
-            return False, "API key request quota exceeded", None
-        
+            return False, _quota_error_message(), None
+
         # 检查过期时间
-        if api_key.expires_at and api_key.expires_at < datetime.utcnow():
+        expires_at = ensure_utc(api_key.expires_at)
+        if expires_at and expires_at < utc_now():
             return False, "API key has expired", None
-        
+
         # 检查 Token 额度
-        if api_key.quota is not None and api_key.used >= api_key.quota:
+        if api_key.quota is not None and legacy_used >= api_key.quota:
             return False, "API key token quota exceeded", None
-        
+
         # 检查请求数额度
-        if api_key.request_quota is not None and (api_key.total_requests or 0) >= api_key.request_quota:
-            # 自动将状态设置为 exhausted
-            api_key.status = "exhausted"
-            await session.flush()
+        if api_key.request_quota is not None and total_requests >= api_key.request_quota:
             return False, "API key request quota exceeded", None
-        
+
+        # 检查新版 Token 额度
+        if api_key.token_quota is not None and total_tokens >= api_key.token_quota:
+            return False, "API key token quota exceeded", None
+
+        # 检查费用额度
+        if _cost_limit_exceeded():
+            return False, "API key cost limit exceeded", None
+
         # 检查模型权限
         if requested_model:
-            allowed_groups = json.loads(api_key.model_groups)
+            try:
+                allowed_groups = json.loads(api_key.model_groups)
+            except Exception:
+                return False, "API key model groups config invalid", None
             if requested_model not in allowed_groups:
                 return False, f"Model '{requested_model}' not authorized for this API key", None
-        
+
         return True, None, api_key
     
     async def get_key_by_hash(
@@ -383,14 +418,19 @@ class APIKeyService:
         Returns:
             更新后的 APIKey 对象，如果不存在则返回 None
         """
+        await session.execute(
+            update(APIKey)
+            .where(APIKey.id == key_id)
+            .values(
+                used=APIKey.used + max(0, int(tokens)),
+                last_used_at=utc_now_naive(),
+            )
+        )
+
         api_key = await self.get_key_by_id(session, key_id)
         if api_key is None:
             return None
-        
-        api_key.used += tokens
-        api_key.last_used_at = datetime.utcnow()
-        await session.flush()
-        
+
         logger.debug(f"Updated usage for API Key {key_id}: +{tokens} (total: {api_key.used})")
         return api_key
     
@@ -400,7 +440,9 @@ class APIKeyService:
         key_id: str,
         input_tokens: int,
         output_tokens: int,
-        cost: Optional[str] = None
+        cost: Optional[str] = None,
+        *,
+        request_count: int = 1,
     ) -> Optional[APIKey]:
         """
         更新 API Key 的累计统计（请求数、Token 使用量和费用）
@@ -417,17 +459,24 @@ class APIKeyService:
         """
         from decimal import Decimal
         
-        api_key = await self.get_key_by_id(session, key_id)
+        # 并发安全：统计写入前先加行锁，避免高并发下丢增量。
+        result = await session.execute(
+            select(APIKey)
+            .where(APIKey.id == key_id)
+            .with_for_update()
+        )
+        api_key = result.scalar_one_or_none()
         if api_key is None:
             logger.warning(f"update_key_stats: API Key not found: {key_id}")
             return None
         
-        total_tokens = input_tokens + output_tokens
+        safe_request_count = max(1, int(request_count))
+        total_tokens = max(0, int(input_tokens)) + max(0, int(output_tokens))
         
         # 更新累计统计
-        api_key.total_requests = (api_key.total_requests or 0) + 1
+        api_key.total_requests = (api_key.total_requests or 0) + safe_request_count
         api_key.total_tokens = (api_key.total_tokens or 0) + total_tokens
-        api_key.last_used_at = datetime.utcnow()
+        api_key.last_used_at = utc_now_naive()
         
         # 更新费用
         if cost:

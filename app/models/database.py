@@ -18,6 +18,8 @@ from sqlalchemy.ext.asyncio import (
 )
 from sqlalchemy.orm import declarative_base
 
+from app.services.time_utils import utc_now_naive
+
 # 创建基类
 Base = declarative_base()
 logger = logging.getLogger(__name__)
@@ -42,11 +44,13 @@ class BackendAccount(Base):
     model_group = Column(String(255), nullable=False)
     daily_quota = Column(Integer, default=1000000)
     daily_used = Column(Integer, default=0)
+    inflight_requests = Column(Integer, default=0, nullable=False)
+    inflight_updated_at = Column(DateTime, nullable=True)
     status = Column(String(20), default="active")  # active, exhausted, disabled
     last_used_at = Column(DateTime, nullable=True)
     last_sync_at = Column(DateTime, nullable=True)  # 最后同步时间
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=utc_now_naive)
+    updated_at = Column(DateTime, default=utc_now_naive, onupdate=utc_now_naive)
 
 
 class AccountModelRoute(Base):
@@ -62,8 +66,8 @@ class AccountModelRoute(Base):
     enabled = Column(Boolean, default=True, nullable=False)
     weight = Column(Integer, default=100, nullable=False)
     priority = Column(Integer, default=0, nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=utc_now_naive)
+    updated_at = Column(DateTime, default=utc_now_naive, onupdate=utc_now_naive)
 
 
 class ModelGroup(Base):
@@ -74,7 +78,7 @@ class ModelGroup(Base):
     name = Column(String(255), unique=True, nullable=False)
     description = Column(Text, nullable=True)
     input_mapping = Column(Text, nullable=False)  # JSON: 输入字段映射配置
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=utc_now_naive)
 
 
 class APIKey(Base):
@@ -94,7 +98,7 @@ class APIKey(Base):
     cost_limit = Column(String(20), nullable=True)  # 费用限制（美元），NULL 表示无限制
     expires_at = Column(DateTime, nullable=True)
     status = Column(String(20), default="active")  # active, revoked, exhausted
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=utc_now_naive)
     last_used_at = Column(DateTime, nullable=True)
     # 累计统计（从创建日期开始）
     total_requests = Column(Integer, default=0)  # 总请求数
@@ -120,7 +124,7 @@ class RequestLog(Base):
     __tablename__ = "request_logs"
     
     id = Column(String(36), primary_key=True)
-    timestamp = Column(DateTime, default=datetime.utcnow)
+    timestamp = Column(DateTime, default=utc_now_naive)
     api_key_prefix = Column(String(20), nullable=True)
     client_ip = Column(String(45), nullable=True)
     model = Column(String(255), nullable=True)
@@ -137,7 +141,7 @@ class CallLog(Base):
     __tablename__ = "call_logs"
     
     id = Column(String(36), primary_key=True)
-    timestamp = Column(DateTime, default=datetime.utcnow, index=True)
+    timestamp = Column(DateTime, default=utc_now_naive, index=True)
     
     # 调用方信息
     api_key_id = Column(String(36), nullable=True)
@@ -184,7 +188,7 @@ class SystemStats(Base):
     total_tokens = Column(Integer, default=0)  # 历史总 Token 使用量
     total_input_tokens = Column(Integer, default=0)  # 历史总输入 Token
     total_output_tokens = Column(Integer, default=0)  # 历史总输出 Token
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    updated_at = Column(DateTime, default=utc_now_naive, onupdate=utc_now_naive)
 
 
 class Admin(Base):
@@ -194,7 +198,7 @@ class Admin(Base):
     id = Column(String(36), primary_key=True)
     username = Column(String(255), unique=True, nullable=False)
     password_hash = Column(String(255), nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=utc_now_naive)
 
 
 class LoginAttempt(Base):
@@ -337,10 +341,10 @@ async def init_database() -> None:
     db_url = _normalize_database_url_for_asyncpg(get_database_url())
     
     # 连接池配置
-    pool_size = int(os.getenv("DB_POOL_SIZE", "20"))
-    max_overflow = int(os.getenv("DB_MAX_OVERFLOW", "30"))
-    pool_timeout = int(os.getenv("DB_POOL_TIMEOUT", "30"))
-    pool_recycle = int(os.getenv("DB_POOL_RECYCLE", "3600"))
+    pool_size = int(os.getenv("DB_POOL_SIZE", "8"))
+    max_overflow = int(os.getenv("DB_MAX_OVERFLOW", "2"))
+    pool_timeout = int(os.getenv("DB_POOL_TIMEOUT", "5"))
+    pool_recycle = int(os.getenv("DB_POOL_RECYCLE", "1800"))
     
     # SQLite 连接参数：增加超时时间和启用 WAL 模式以支持更好的并发
     connect_args = {}
@@ -379,11 +383,12 @@ async def init_database() -> None:
             connect_args["command_timeout"] = pg_command_timeout
 
         server_settings = {}
-        statement_timeout_ms = os.getenv("POSTGRES_STATEMENT_TIMEOUT_MS", "").strip()
+        # 默认开启语句/锁超时保护，避免高并发下慢锁拖垮请求。
+        statement_timeout_ms = os.getenv("POSTGRES_STATEMENT_TIMEOUT_MS", "").strip() or "30000"
         if statement_timeout_ms:
             server_settings["statement_timeout"] = statement_timeout_ms
 
-        lock_timeout_ms = os.getenv("POSTGRES_LOCK_TIMEOUT_MS", "").strip()
+        lock_timeout_ms = os.getenv("POSTGRES_LOCK_TIMEOUT_MS", "").strip() or "5000"
         if lock_timeout_ms:
             server_settings["lock_timeout"] = lock_timeout_ms
 
@@ -417,6 +422,14 @@ async def init_database() -> None:
             await conn.execute(text("PRAGMA busy_timeout=30000"))
             # 执行 SQLite 迁移（添加新列）
             await _migrate_sqlite_columns(conn)
+        else:
+            await _ensure_backend_account_runtime_columns(conn)
+        # token_usage_history 并发聚合桶唯一索引（支持 PostgreSQL 表达式 UPSERT）
+        await _ensure_token_usage_history_bucket_index(conn)
+        # 日志查询索引（高并发下后台查询/聚合性能关键）
+        await _ensure_log_query_indexes(conn)
+        # 账号选号与模型路由索引
+        await _ensure_account_routing_indexes(conn)
 
 
 async def _migrate_sqlite_columns(conn) -> None:
@@ -429,6 +442,8 @@ async def _migrate_sqlite_columns(conn) -> None:
         ("api_keys", "token_quota", "INTEGER"),
         ("api_keys", "cost_limit", "VARCHAR(20)"),
         ("api_keys", "total_cost", "VARCHAR(20) DEFAULT '0'"),
+        ("backend_accounts", "inflight_requests", "INTEGER DEFAULT 0 NOT NULL"),
+        ("backend_accounts", "inflight_updated_at", "DATETIME"),
     ]
     
     for table_name, column_name, column_def in migrations:
@@ -497,6 +512,135 @@ async def _migrate_sqlite_columns(conn) -> None:
         print("[Migration] account_model_routes ready")
     except Exception as e:
         print(f"[Migration] Failed to migrate account_model_routes: {e}")
+
+
+async def _ensure_backend_account_runtime_columns(conn) -> None:
+    """确保 PostgreSQL 等现有环境补齐 backend_accounts 并发运行时列。"""
+    statements = [
+        "ALTER TABLE backend_accounts ADD COLUMN IF NOT EXISTS inflight_requests INTEGER DEFAULT 0 NOT NULL",
+        "ALTER TABLE backend_accounts ADD COLUMN IF NOT EXISTS inflight_updated_at TIMESTAMP NULL",
+    ]
+    for statement in statements:
+        try:
+            await conn.execute(text(statement))
+        except Exception as exc:
+            logger.warning("Failed to ensure backend_accounts runtime column with [%s]: %s", statement, exc)
+
+
+async def _ensure_token_usage_history_bucket_index(conn) -> None:
+    """
+    为 token_usage_history 建立并发聚合桶唯一索引：
+    (date, COALESCE(account_id,''), COALESCE(api_key_id,''))。
+    """
+    try:
+        await conn.execute(text("""
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_token_usage_history_bucket
+            ON token_usage_history (
+                date,
+                COALESCE(account_id, ''),
+                COALESCE(api_key_id, '')
+            )
+        """))
+    except Exception as e:
+        logger.warning(
+            "Failed to ensure token usage history bucket index; fallback path will be used: %s",
+            e,
+        )
+
+
+async def _ensure_log_query_indexes(conn) -> None:
+    """为 request_logs/call_logs 创建查询索引。"""
+    index_statements = [
+        "CREATE INDEX IF NOT EXISTS ix_request_logs_timestamp ON request_logs(timestamp)",
+        "CREATE INDEX IF NOT EXISTS ix_request_logs_account_id_timestamp ON request_logs(account_id, timestamp)",
+        "CREATE INDEX IF NOT EXISTS ix_request_logs_api_key_prefix_timestamp ON request_logs(api_key_prefix, timestamp)",
+        "CREATE INDEX IF NOT EXISTS ix_request_logs_status_timestamp ON request_logs(status, timestamp)",
+        "CREATE INDEX IF NOT EXISTS ix_request_logs_model_timestamp ON request_logs(model, timestamp)",
+        "CREATE INDEX IF NOT EXISTS ix_call_logs_api_key_id_timestamp ON call_logs(api_key_id, timestamp)",
+        "CREATE INDEX IF NOT EXISTS ix_call_logs_account_id_timestamp ON call_logs(account_id, timestamp)",
+        "CREATE INDEX IF NOT EXISTS ix_call_logs_status_timestamp ON call_logs(status, timestamp)",
+        "CREATE INDEX IF NOT EXISTS ix_call_logs_model_timestamp ON call_logs(model, timestamp)",
+    ]
+    for statement in index_statements:
+        try:
+            await conn.execute(text(statement))
+        except Exception as exc:
+            logger.warning("Failed to ensure index with statement [%s]: %s", statement, exc)
+
+
+async def _ensure_account_routing_indexes(conn) -> None:
+    """为高并发账号选号路径创建索引。"""
+    dialect_name = str(getattr(getattr(conn, "dialect", None), "name", "") or "").lower()
+
+    common_statements = [
+        (
+            "CREATE INDEX IF NOT EXISTS "
+            "ix_account_model_routes_model_enabled_priority_account "
+            "ON account_model_routes(model_name, enabled, priority, account_id)"
+        ),
+        (
+            "CREATE INDEX IF NOT EXISTS "
+            "ix_backend_accounts_model_group_id "
+            "ON backend_accounts(model_group, id)"
+        ),
+    ]
+
+    postgres_statements = [
+        (
+            "CREATE INDEX IF NOT EXISTS "
+            "ix_account_model_routes_enabled_model_account "
+            "ON account_model_routes(model_name, account_id) "
+            "WHERE enabled = TRUE"
+        ),
+        (
+            "CREATE INDEX IF NOT EXISTS "
+            "ix_backend_accounts_active_used_lastused_order "
+            "ON backend_accounts("
+            "daily_used ASC, "
+            "last_used_at ASC NULLS FIRST, "
+            "updated_at ASC NULLS FIRST, "
+            "id ASC"
+            ") "
+            "WHERE status = 'active' AND daily_used < daily_quota"
+        ),
+        (
+            "CREATE INDEX IF NOT EXISTS "
+            "ix_backend_accounts_legacy_active_used_lastused_order "
+            "ON backend_accounts("
+            "model_group, "
+            "daily_used ASC, "
+            "last_used_at ASC NULLS FIRST, "
+            "updated_at ASC NULLS FIRST, "
+            "id ASC"
+            ") "
+            "WHERE status = 'active' AND daily_used < daily_quota"
+        ),
+    ]
+
+    fallback_statements = [
+        (
+            "CREATE INDEX IF NOT EXISTS "
+            "ix_backend_accounts_status_last_used_updated_id "
+            "ON backend_accounts(status, last_used_at, updated_at, id)"
+        ),
+        (
+            "CREATE INDEX IF NOT EXISTS "
+            "ix_backend_accounts_routable_order "
+            "ON backend_accounts(last_used_at, updated_at, id) "
+            "WHERE status IN ('active', 'exhausted')"
+        ),
+    ]
+    index_statements = list(common_statements)
+    if dialect_name == "postgresql":
+        index_statements.extend(postgres_statements)
+    else:
+        index_statements.extend(fallback_statements)
+
+    for statement in index_statements:
+        try:
+            await conn.execute(text(statement))
+        except Exception as exc:
+            logger.warning("Failed to ensure routing index with statement [%s]: %s", statement, exc)
 
 
 async def close_database() -> None:

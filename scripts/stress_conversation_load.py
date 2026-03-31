@@ -21,6 +21,12 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 
+ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+from app.services.time_utils import utc_now_naive
+
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -67,6 +73,88 @@ def build_deep_user_prompt(session_idx: int, turn_idx: int) -> str:
     return scenario + "\n\n" + audit
 
 
+def build_project_mix_user_prompt(base_prompt: str, turn_idx: int) -> str:
+    prompt = (base_prompt or "").strip()
+    if not prompt:
+        prompt = "@ipfs-file-manager 分析项目"
+
+    if turn_idx == 0:
+        return (
+            f"{prompt}\n\n"
+            "请通过 Claude Code 风格工具调用执行仓库级分析："
+            "先调用 Explore，再按需调用 Read/Grep/Glob/LS。"
+            "先给出工具调用，不要直接输出最终结论。"
+        )
+
+    return (
+        f"{prompt}\n\n"
+        f"这是第 {turn_idx + 1} 轮，请继续通过工具调用补充证据，"
+        "并在信息充分后给出简明结论。"
+    )
+
+
+def build_default_claude_code_tools() -> List[Dict[str, Any]]:
+    return [
+        {
+            "name": "Explore",
+            "description": "Explore repository structure and identify relevant files.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Repository path to inspect"}
+                },
+                "required": ["path"],
+            },
+        },
+        {
+            "name": "Read",
+            "description": "Read file content.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "file_path": {"type": "string", "description": "File path"},
+                    "offset": {"type": "integer", "description": "Start line offset"},
+                    "limit": {"type": "integer", "description": "Max lines to read"},
+                },
+                "required": ["file_path"],
+            },
+        },
+        {
+            "name": "Grep",
+            "description": "Search text pattern in files.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "pattern": {"type": "string", "description": "Pattern to search"},
+                    "path": {"type": "string", "description": "Directory path"},
+                },
+                "required": ["pattern"],
+            },
+        },
+        {
+            "name": "Glob",
+            "description": "Find files with glob patterns.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "pattern": {"type": "string", "description": "Glob pattern"},
+                    "path": {"type": "string", "description": "Directory path"},
+                },
+                "required": ["pattern"],
+            },
+        },
+        {
+            "name": "LS",
+            "description": "List files in a directory.",
+            "input_schema": {
+                "type": "object",
+                "properties": {"path": {"type": "string", "description": "Directory path"}},
+                "required": ["path"],
+            },
+        },
+    ]
+
+
 def parse_sse_data_line(line: str) -> Optional[Dict[str, Any]]:
     if not line.startswith("data: "):
         return None
@@ -82,6 +170,8 @@ def parse_sse_data_line(line: str) -> Optional[Dict[str, Any]]:
 @dataclass
 class SessionState:
     session_id: str
+    prompt_group: str = "deep"
+    base_prompt: str = ""
     messages: List[Dict[str, Any]] = field(default_factory=list)
     success_count: int = 0
     fail_count: int = 0
@@ -92,6 +182,7 @@ class ReqResult:
     session_id: str
     turn: int
     stream: bool
+    queue_wait_ms: int
     ok: bool
     status_code: int
     latency_ms: int
@@ -105,6 +196,10 @@ class StressRunner:
         self.args = args
         self.rand = random.Random(args.seed)
         self.results: List[ReqResult] = []
+        self.session_group_map: Dict[str, str] = {}
+        self.claude_code_tools: List[Dict[str, Any]] = []
+        if args.enable_claude_code_tools or args.prompt_mode == "project_mix":
+            self.claude_code_tools = build_default_claude_code_tools()
 
     async def ensure_valid_key(self, client: httpx.AsyncClient, key: str) -> Optional[str]:
         try:
@@ -172,7 +267,7 @@ class StressRunner:
             key_hash = CryptoService.hash_api_key(raw_key)
             key_prefix = raw_key[:7]
             key_suffix = raw_key[-4:]
-            now = datetime.utcnow().isoformat(sep=" ")
+            now = utc_now_naive().isoformat(sep=" ")
 
             conn = sqlite3.connect(self.args.local_db_path)
             try:
@@ -243,15 +338,18 @@ class StressRunner:
         turn_idx: int,
         stream: bool,
     ) -> Dict[str, Any]:
-        user_prompt = build_deep_user_prompt(
-            int(state.session_id.split("-")[-1]),
-            turn_idx,
-        )
+        if self.args.prompt_mode == "project_mix":
+            user_prompt = build_project_mix_user_prompt(state.base_prompt, turn_idx)
+        else:
+            user_prompt = build_deep_user_prompt(
+                int(state.session_id.split("-")[-1]),
+                turn_idx,
+            )
         state.messages.append({"role": "user", "content": user_prompt})
 
         # Keep long history window to preserve deep multi-turn context.
         history = state.messages[-self.args.max_history_messages :]
-        return {
+        payload: Dict[str, Any] = {
             "model": self.args.model,
             "max_tokens": self.args.max_tokens,
             "stream": stream,
@@ -259,12 +357,49 @@ class StressRunner:
             "messages": history,
             "metadata": {"user_id": state.session_id},
         }
+        if self.claude_code_tools:
+            payload["tools"] = self.claude_code_tools
+            payload["tool_choice"] = {"type": "auto"}
+        return payload
+
+    def build_sessions(self) -> List[SessionState]:
+        session_indexes = list(range(self.args.sessions))
+        if self.args.shuffle_prompt_groups:
+            self.rand.shuffle(session_indexes)
+
+        bookmark_count = min(max(self.args.bookmark_sessions, 0), self.args.sessions)
+        bookmark_indexes = set(session_indexes[:bookmark_count])
+
+        sessions: List[SessionState] = []
+        for idx in range(self.args.sessions):
+            session_id = f"{self.args.session_prefix}-{idx:04d}"
+            if self.args.prompt_mode == "project_mix":
+                if idx in bookmark_indexes:
+                    prompt_group = "bookmark"
+                    base_prompt = self.args.bookmark_prompt
+                else:
+                    prompt_group = "ipfs"
+                    base_prompt = self.args.ipfs_prompt
+            else:
+                prompt_group = "deep"
+                base_prompt = ""
+
+            sessions.append(
+                SessionState(
+                    session_id=session_id,
+                    prompt_group=prompt_group,
+                    base_prompt=base_prompt,
+                )
+            )
+            self.session_group_map[session_id] = prompt_group
+        return sessions
 
     async def run_one_turn(
         self,
         client: httpx.AsyncClient,
         state: SessionState,
         turn_idx: int,
+        queue_wait_ms: int,
     ) -> ReqResult:
         stream = self.rand.random() < self.args.stream_ratio
         payload = self.make_request_payload(state, turn_idx, stream)
@@ -328,6 +463,7 @@ class StressRunner:
                         session_id=state.session_id,
                         turn=turn_idx,
                         stream=True,
+                        queue_wait_ms=queue_wait_ms,
                         ok=True,
                         status_code=status_code,
                         latency_ms=latency_ms,
@@ -343,6 +479,7 @@ class StressRunner:
                     session_id=state.session_id,
                     turn=turn_idx,
                     stream=True,
+                    queue_wait_ms=queue_wait_ms,
                     ok=False,
                     status_code=status_code,
                     latency_ms=latency_ms,
@@ -357,6 +494,7 @@ class StressRunner:
                     session_id=state.session_id,
                     turn=turn_idx,
                     stream=True,
+                    queue_wait_ms=queue_wait_ms,
                     ok=False,
                     status_code=0,
                     latency_ms=latency_ms,
@@ -394,6 +532,7 @@ class StressRunner:
                     session_id=state.session_id,
                     turn=turn_idx,
                     stream=False,
+                    queue_wait_ms=queue_wait_ms,
                     ok=False,
                     status_code=resp.status_code,
                     latency_ms=latency_ms,
@@ -410,6 +549,7 @@ class StressRunner:
                 session_id=state.session_id,
                 turn=turn_idx,
                 stream=False,
+                queue_wait_ms=queue_wait_ms,
                 ok=True,
                 status_code=resp.status_code,
                 latency_ms=latency_ms,
@@ -424,6 +564,7 @@ class StressRunner:
                 session_id=state.session_id,
                 turn=turn_idx,
                 stream=False,
+                queue_wait_ms=queue_wait_ms,
                 ok=False,
                 status_code=0,
                 latency_ms=latency_ms,
@@ -435,10 +576,7 @@ class StressRunner:
     async def run(self) -> Dict[str, Any]:
         self.args.api_key = await self.resolve_api_key()
 
-        sessions = [
-            SessionState(session_id=f"{self.args.session_prefix}-{idx:04d}")
-            for idx in range(self.args.sessions)
-        ]
+        sessions = self.build_sessions()
         sem = asyncio.Semaphore(self.args.concurrency)
 
         async with httpx.AsyncClient(
@@ -449,11 +587,17 @@ class StressRunner:
             ),
         ) as client:
             for turn_idx in range(self.args.turns):
+                round_sessions = list(sessions)
+                if self.args.shuffle_request_order_each_round:
+                    self.rand.shuffle(round_sessions)
+                round_started = time.perf_counter()
+
                 async def _bounded_one(state: SessionState) -> ReqResult:
                     async with sem:
-                        return await self.run_one_turn(client, state, turn_idx)
+                        queue_wait_ms = int((time.perf_counter() - round_started) * 1000)
+                        return await self.run_one_turn(client, state, turn_idx, queue_wait_ms)
 
-                tasks = [asyncio.create_task(_bounded_one(state)) for state in sessions]
+                tasks = [asyncio.create_task(_bounded_one(state)) for state in round_sessions]
                 round_results = await asyncio.gather(*tasks)
                 self.results.extend(round_results)
 
@@ -472,9 +616,21 @@ class StressRunner:
 
     def build_report(self) -> Dict[str, Any]:
         latencies = [x.latency_ms for x in self.results]
+        queue_waits = [x.queue_wait_ms for x in self.results]
         error_counter = Counter(x.error_type for x in self.results if not x.ok)
         status_counter = Counter(str(x.status_code) for x in self.results)
         stream_counter = Counter("stream" if x.stream else "non_stream" for x in self.results)
+        group_counter = Counter(self.session_group_map.values())
+
+        request_group_counter = Counter(
+            self.session_group_map.get(x.session_id, "unknown") for x in self.results
+        )
+        request_group_success_counter = Counter(
+            self.session_group_map.get(x.session_id, "unknown") for x in self.results if x.ok
+        )
+        request_group_failure_counter = Counter(
+            self.session_group_map.get(x.session_id, "unknown") for x in self.results if not x.ok
+        )
 
         total = len(self.results)
         success = sum(1 for x in self.results if x.ok)
@@ -493,6 +649,7 @@ class StressRunner:
                     "session_id": item.session_id,
                     "turn": item.turn,
                     "stream": item.stream,
+                    "queue_wait_ms": item.queue_wait_ms,
                     "status_code": item.status_code,
                     "error_type": item.error_type,
                     "error_message": item.error_message,
@@ -509,6 +666,13 @@ class StressRunner:
                 "sessions": self.args.sessions,
                 "turns": self.args.turns,
                 "concurrency": self.args.concurrency,
+                "prompt_mode": self.args.prompt_mode,
+                "bookmark_sessions": self.args.bookmark_sessions,
+                "bookmark_prompt": self.args.bookmark_prompt,
+                "ipfs_prompt": self.args.ipfs_prompt,
+                "shuffle_prompt_groups": self.args.shuffle_prompt_groups,
+                "shuffle_request_order_each_round": self.args.shuffle_request_order_each_round,
+                "enable_claude_code_tools": bool(self.claude_code_tools),
                 "stream_ratio": self.args.stream_ratio,
                 "max_history_messages": self.args.max_history_messages,
                 "max_tokens": self.args.max_tokens,
@@ -529,8 +693,25 @@ class StressRunner:
                 "p95": round(percentile(latencies, 0.95), 2) if latencies else 0,
                 "p99": round(percentile(latencies, 0.99), 2) if latencies else 0,
             },
+            "queue_wait_ms": {
+                "min": min(queue_waits) if queue_waits else 0,
+                "max": max(queue_waits) if queue_waits else 0,
+                "mean": round(statistics.fmean(queue_waits), 2) if queue_waits else 0,
+                "p50": round(percentile(queue_waits, 0.50), 2) if queue_waits else 0,
+                "p95": round(percentile(queue_waits, 0.95), 2) if queue_waits else 0,
+                "p99": round(percentile(queue_waits, 0.99), 2) if queue_waits else 0,
+            },
             "status_code_distribution": dict(status_counter),
             "request_mode_distribution": dict(stream_counter),
+            "session_group_distribution": dict(group_counter),
+            "request_group_distribution": {
+                group: {
+                    "requests": request_group_counter.get(group, 0),
+                    "success": request_group_success_counter.get(group, 0),
+                    "failed": request_group_failure_counter.get(group, 0),
+                }
+                for group in sorted(set(request_group_counter.keys()) | set(group_counter.keys()))
+            },
             "error_type_distribution": dict(error_counter),
             "failure_samples": failure_samples,
         }
@@ -549,6 +730,19 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
     parser.add_argument("--sessions", type=int, default=80)
     parser.add_argument("--turns", type=int, default=12)
     parser.add_argument("--concurrency", type=int, default=120)
+    parser.add_argument("--prompt-mode", choices=["deep", "project_mix"], default="deep")
+    parser.add_argument("--bookmark-sessions", type=int, default=5)
+    parser.add_argument("--bookmark-prompt", default="@BookmarkVault 分析项目")
+    parser.add_argument("--ipfs-prompt", default="@ipfs-file-manager 分析项目")
+    parser.add_argument("--shuffle-prompt-groups", action="store_true", default=True)
+    parser.add_argument("--no-shuffle-prompt-groups", dest="shuffle_prompt_groups", action="store_false")
+    parser.add_argument("--shuffle-request-order-each-round", action="store_true", default=True)
+    parser.add_argument(
+        "--no-shuffle-request-order-each-round",
+        dest="shuffle_request_order_each_round",
+        action="store_false",
+    )
+    parser.add_argument("--enable-claude-code-tools", action="store_true", default=False)
     parser.add_argument("--stream-ratio", type=float, default=0.7)
     parser.add_argument("--request-timeout", type=float, default=45.0)
     parser.add_argument("--max-history-messages", type=int, default=28)
@@ -591,6 +785,7 @@ async def async_main(args: argparse.Namespace) -> int:
                         "session_id": item.session_id,
                         "turn": item.turn,
                         "stream": item.stream,
+                        "queue_wait_ms": item.queue_wait_ms,
                         "ok": item.ok,
                         "status_code": item.status_code,
                         "latency_ms": item.latency_ms,
@@ -613,7 +808,10 @@ async def async_main(args: argparse.Namespace) -> int:
     )
     print(f"max_turn_depth={summary['max_turn_depth_observed']}")
     print(f"latency_ms={report['latency_ms']}")
+    print(f"queue_wait_ms={report.get('queue_wait_ms', {})}")
     print(f"status_distribution={report['status_code_distribution']}")
+    print(f"session_group_distribution={report.get('session_group_distribution', {})}")
+    print(f"request_group_distribution={report.get('request_group_distribution', {})}")
     print(f"error_types={report['error_type_distribution']}")
     print(f"report_file={report_path}")
     print(f"details_file={details_path}")

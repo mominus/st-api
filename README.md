@@ -102,20 +102,46 @@ Example response:
 }
 ```
 
-## Environment Variables
+## Environment Quick Start
 
-| Variable | Description |
-|----------|-------------|
-| `JWT_SECRET_KEY` | JWT signing key |
-| `ENCRYPTION_KEY` | Fernet encryption key |
-| `ADMIN_USERNAME` | Admin username |
-| `ADMIN_PASSWORD` | Admin password |
-| `ADMIN_PATH` | Hidden admin panel path |
-| `PROXY_SHARED_SECRET` | Shared secret between Cloudflare Worker and source site (`x-proxy-secret` validation for `/v1/*` and `/v1beta/*`) |
+Start from [`.env.example`](./.env.example). It is organized in the same order you usually configure the service:
+
+1. Minimal required values
+2. Common production settings
+3. PostgreSQL / 47-connection starter profile
+4. Gateway concurrency and queueing
+5. Upstream HTTP pool, retry, and account failover
+6. Async persistence and log shedding
+7. Tool Use
+8. Legacy compatibility vars
+
+Change these first:
+
+- `BACKEND_API_URL`
+- `DATABASE_URL`
+- `JWT_SECRET_KEY`
+- `ENCRYPTION_KEY`
+- `ADMIN_USERNAME`
+- `ADMIN_PASSWORD`
+
+Common optional production vars:
+
+- `ADMIN_PATH`
+- `PROXY_SHARED_SECRET`
+- `CORS_ORIGINS`
+- `UVICORN_WORKERS`
+- `LOG_LEVEL`
+- `LOG_FILE`
+
+Notes:
+
+- Values in `.env.example` are production-oriented starter values, not necessarily the code defaults.
+- For new deployments, prefer the newer vars and avoid the legacy compatibility vars at the bottom of the file.
+- For tool-heavy Claude Code workloads, focus tuning on request concurrency, HTTP pool sizing, DB pool sizing, and per-account inflight protection.
 
 ## PostgreSQL Profile (2c/4g + 47 Connections)
 
-SQLite is still supported. To switch to PostgreSQL, only change `DATABASE_URL` and pool-related env vars.
+SQLite is still supported. For PostgreSQL, start with the profile already grouped in [`.env.example`](./.env.example).
 
 Recommended start values for `2c/4g` app + managed PostgreSQL (`connection_limit=47`):
 
@@ -123,7 +149,8 @@ Recommended start values for `2c/4g` app + managed PostgreSQL (`connection_limit
 DATABASE_URL=postgresql+asyncpg://USER:PASSWORD@HOST:25060/defaultdb?ssl=require
 UVICORN_WORKERS=2
 MAX_CONCURRENT_REQUESTS=60
-MAX_CONCURRENT_DB_OPS=30
+MAX_CONCURRENT_STREAMS=40
+MAX_CONCURRENT_DB_OPS=10
 REQUEST_QUEUE_TIMEOUT_SECONDS=8
 HTTP_MAX_CONNECTIONS=160
 HTTP_MAX_CONNECTIONS_PER_HOST=40
@@ -135,6 +162,9 @@ DB_POOL_RECYCLE=1800
 DB_CONNECTION_LIMIT=47
 DB_CONNECTION_RESERVE=6
 APP_INSTANCE_COUNT=1
+ACCOUNT_MAX_INFLIGHT_REQUESTS_PER_ACCOUNT=8
+BACKGROUND_LOG_WORKERS=2
+ASYNC_USAGE_WORKERS=2
 ```
 
 Optional PostgreSQL timeout settings:

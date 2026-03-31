@@ -14,6 +14,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 import logging
 
+from app.services.time_utils import utc_now
+
 logger = logging.getLogger(__name__)
 
 
@@ -216,7 +218,7 @@ class ConfigService:
                 origin.strip() for origin in cors_origins.split(",")
             ]
         
-        self._config.last_loaded_at = datetime.utcnow()
+        self._config.last_loaded_at = utc_now()
         logger.info("Configuration loaded from environment variables")
     
     def load_from_file(self, file_path: Optional[str] = None) -> bool:
@@ -241,7 +243,7 @@ class ConfigService:
             
             self._apply_config_dict(data)
             self._config.config_file_path = str(path)
-            self._config.last_loaded_at = datetime.utcnow()
+            self._config.last_loaded_at = utc_now()
             self._last_file_mtime = path.stat().st_mtime
             
             logger.info(f"Configuration loaded from file: {path}")

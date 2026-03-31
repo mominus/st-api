@@ -13,7 +13,11 @@ import uuid
 from typing import Optional, Dict, Any, AsyncGenerator, Literal, List, TYPE_CHECKING
 from dataclasses import dataclass
 
-from app.services.upstream_sanitizer import is_stream_completion_marker
+from app.services.upstream_sanitizer import (
+    is_stream_completion_marker,
+    sanitize_exposed_payload,
+    sanitize_exposed_text,
+)
 
 if TYPE_CHECKING:
     from .tool_parser import ToolParser, ParsedToolCall
@@ -57,6 +61,14 @@ class ResponseTransformer:
     # ========================================================================
     # OpenAI Format Conversion (Requirement 1.1)
     # ========================================================================
+
+    @staticmethod
+    def _sanitize_text(value: Optional[str]) -> str:
+        return sanitize_exposed_text(value) or ""
+
+    @staticmethod
+    def _sanitize_payload(value: Any) -> Any:
+        return sanitize_exposed_payload(value)
     
     def to_openai_response(
         self,
@@ -78,7 +90,7 @@ class ResponseTransformer:
             OpenAI 格式的响应字典
         """
         # 提取输出内容
-        content = self._extract_content(backend_response)
+        content = self._sanitize_text(self._extract_content(backend_response))
         
         # 估算 token 使用量（传入输入文本用于计算 prompt_tokens）
         usage = self._estimate_token_usage(content, input_text=input_text)
@@ -157,7 +169,7 @@ class ResponseTransformer:
                     {
                         "index": 0,
                         "delta": {
-                            "content": token
+                            "content": self._sanitize_text(token)
                         },
                         "finish_reason": None
                     }
@@ -235,6 +247,8 @@ class ResponseTransformer:
             thinking_content, text_content = self._split_thinking_content(raw_content)
         else:
             thinking_content, text_content = "", raw_content
+        thinking_content = self._sanitize_text(thinking_content)
+        text_content = self._sanitize_text(text_content)
         
         # 构建 content 数组
         content_blocks = []
@@ -282,7 +296,8 @@ class ResponseTransformer:
         Returns:
             SSE 格式的事件字符串
         """
-        return f"event: {event_type}\ndata: {json.dumps(data)}\n\n"
+        sanitized = self._sanitize_payload(data)
+        return f"event: {event_type}\ndata: {json.dumps(sanitized)}\n\n"
     
     async def transform_backend_sse_to_anthropic(
         self,
@@ -815,20 +830,21 @@ class ResponseTransformer:
         if parse_result.text_before and parse_result.text_before.strip():
             content_blocks.append({
                 "type": "text",
-                "text": parse_result.text_before.strip()
+                "text": self._sanitize_text(parse_result.text_before.strip())
             })
         
         # 为每个工具调用创建 tool_use 块 (Requirements 4.1, 4.2)
         for tool_call in parse_result.tool_calls:
             tool_use_id = tool_parser.generate_tool_use_id()
             tool_use_block = self.create_tool_use_block(tool_call, tool_use_id)
+            tool_use_block["input"] = self._sanitize_payload(tool_use_block.get("input") or {})
             content_blocks.append(tool_use_block)
         
         # 如果工具调用之后有文本，添加文本块
         if parse_result.text_after and parse_result.text_after.strip():
             content_blocks.append({
                 "type": "text",
-                "text": parse_result.text_after.strip()
+                "text": self._sanitize_text(parse_result.text_after.strip())
             })
         
         # 如果没有任何内容块（理论上不应该发生），添加空文本块 (Requirement 4.3)
@@ -1458,7 +1474,7 @@ class ResponseTransformer:
         Returns:
             Gemini 格式的响应字典
         """
-        content = self._extract_content(backend_response)
+        content = self._sanitize_text(self._extract_content(backend_response))
         usage = self._estimate_token_usage(content)
         
         return {
@@ -1505,7 +1521,7 @@ class ResponseTransformer:
                     "candidates": [
                         {
                             "content": {
-                                "parts": [{"text": token}],
+                                "parts": [{"text": self._sanitize_text(token)}],
                                 "role": "model"
                             },
                             "finishReason": None,

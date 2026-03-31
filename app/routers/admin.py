@@ -29,7 +29,14 @@ from app.services.api_key import APIKeyService, get_api_key_service
 from app.services.stats import StatsService, get_stats_service
 from app.services.analytics import AnalyticsService, get_analytics_service
 from app.services.call_logger import get_call_logger_service
+from app.services.cost_recalculator import (
+    RecalculatedCostTotals,
+    recalculate_cost_totals,
+    recalculate_cost_totals_by_key,
+)
+from app.services.gateway_runtime import get_gateway_runtime
 from app.services.key_info import build_public_key_info_payload
+from app.services.time_utils import utc_now_naive
 from app.services.upstream_sanitizer import sanitize_exposed_text
 from app import __version__ as APP_VERSION
 
@@ -242,7 +249,7 @@ async def ensure_model_groups_exist(
         existing.update(row[0] for row in result.fetchall())
     missing = [name for name in normalized if name not in existing]
 
-    now = datetime.utcnow()
+    now = utc_now_naive()
     for name in missing:
         session.add(ModelGroup(
             id=str(uuid.uuid4()),
@@ -492,13 +499,18 @@ async def list_accounts(
         accounts = await account_pool.get_accounts_by_model_group(session, model_group)
     else:
         accounts = await account_pool.get_all_accounts(session)
-    
+
+    account_model_map = await account_pool.get_account_models_map(session, accounts)
+
     # 转换为响应格式（包含脱敏的 API Key）
     result = []
     for account in accounts:
         usage_percentage = account_pool.get_usage_percentage(account)
         usage_status = account_pool.get_usage_status(account)
-        model_groups = await account_pool.get_account_models(session, account.id)
+        model_groups = account_model_map.get(
+            account.id,
+            [account.model_group] if account.model_group else [],
+        )
         primary_model_group = model_groups[0] if model_groups else account.model_group
         
         # 获取脱敏的 API Key
@@ -977,7 +989,7 @@ async def batch_sync_account_usage(
         return_exceptions=True
     )
 
-    now = datetime.utcnow()
+    now = utc_now_naive()
     synced_count = 0
 
     for idx, output in enumerate(sync_outputs):
@@ -1218,7 +1230,7 @@ async def get_account_analytics(
         }
     
     # 更新账号的同步时间
-    account.last_sync_at = datetime.utcnow()
+    account.last_sync_at = utc_now_naive()
     await session.commit()
     
     return {
@@ -1292,7 +1304,7 @@ async def sync_account_usage(
     # 更新账号的使用量
     old_used = account.daily_used
     account.daily_used = stats.today_tokens
-    account.last_sync_at = datetime.utcnow()
+    account.last_sync_at = utc_now_naive()
     
     # 检查是否达到配额
     if account.daily_used >= account.daily_quota:
@@ -1375,10 +1387,14 @@ async def list_model_groups(
     # 获取每个组的账号统计
     account_pool = get_account_pool_service()
     pricing_service = get_pricing_service()
-    
+    accounts_by_group = await account_pool.get_accounts_by_model_groups(
+        session,
+        [group.name for group in groups if group.name],
+    )
+
     group_list = []
     for group in groups:
-        accounts = await account_pool.get_accounts_by_model_group(session, group.name)
+        accounts = accounts_by_group.get(group.name, [])
         active_count = sum(1 for a in accounts if a.status == "active")
         
         # 计算可用额度（所有活跃账号的剩余额度总和）
@@ -1474,7 +1490,7 @@ async def create_model_group(
         name=request.name,
         description=request.description,
         input_mapping=json.dumps(request.input_mapping),
-        created_at=datetime.utcnow()
+        created_at=utc_now_naive()
     )
     
     session.add(group)
@@ -1646,12 +1662,13 @@ async def get_api_key(
         allowed_models=model_groups,
         since=key.created_at,
     )
+    accounts_by_model = await account_pool.get_accounts_by_model_groups(session, model_groups)
     model_details = build_public_key_info_payload(
         key,
         [
             {
                 "id": model_name,
-                "accounts": await account_pool.get_accounts_by_model_group(session, model_name),
+                "accounts": accounts_by_model.get(model_name, []),
                 "usage": usage_by_model.get(model_name),
             }
             for model_name in model_groups
@@ -2558,13 +2575,12 @@ async def recalculate_api_key_cost(
 ):
     """
     追溯计算 API Key 的费用
-    
+
     根据调用日志重新计算该 Key 从创建日期开始的所有费用。
     """
-    from decimal import Decimal
-    from app.models.database import CallLog, APIKey
+    from app.models.database import CallLog
     from app.services.pricing import get_pricing_service
-    
+
     # 获取 API Key
     api_key_service = get_api_key_service()
     api_key = await api_key_service.get_key_by_id(session, key_id)
@@ -2576,50 +2592,40 @@ async def recalculate_api_key_cost(
     created_at = api_key.created_at
     
     result = await session.execute(
-        select(CallLog).where(
+        select(
+            CallLog.model,
+            CallLog.model_group,
+            CallLog.input_tokens,
+            CallLog.output_tokens,
+        ).where(
             CallLog.api_key_id == key_id,
             CallLog.timestamp >= created_at,
             CallLog.status == "success"
         )
     )
-    logs = list(result.scalars().all())
-    
-    # 计算费用
     pricing_service = get_pricing_service()
-    total_cost = Decimal("0")
-    total_requests = 0
-    total_tokens = 0
-    
-    for log in logs:
-        input_tokens = log.input_tokens or 0
-        output_tokens = log.output_tokens or 0
-        model = log.model or log.model_group or ""
-        
-        _, _, cost = pricing_service.calculate(model, input_tokens, output_tokens)
-        total_cost += Decimal(cost)
-        total_requests += 1
-        total_tokens += input_tokens + output_tokens
-    
+    totals = recalculate_cost_totals(result.fetchall(), pricing_service=pricing_service)
+
     # 更新 API Key 的统计
-    api_key.total_cost = str(total_cost)
-    api_key.total_requests = total_requests
-    api_key.total_tokens = total_tokens
-    
+    api_key.total_cost = totals.total_cost
+    api_key.total_requests = totals.total_requests
+    api_key.total_tokens = totals.total_tokens
+
     await session.commit()
-    
+
     logger.info(
         f"Recalculated cost for API Key {key_id}: "
-        f"requests={total_requests}, tokens={total_tokens}, cost=${total_cost}"
+        f"requests={totals.total_requests}, tokens={totals.total_tokens}, cost=${totals.total_cost}"
     )
-    
+
     return {
         "success": True,
         "message": f"费用重新计算完成",
         "key_id": key_id,
-        "logs_processed": len(logs),
-        "total_requests": total_requests,
-        "total_tokens": total_tokens,
-        "total_cost": str(total_cost)
+        "logs_processed": totals.total_requests,
+        "total_requests": totals.total_requests,
+        "total_tokens": totals.total_tokens,
+        "total_cost": totals.total_cost
     }
 
 
@@ -2630,60 +2636,68 @@ async def recalculate_all_api_key_costs(
 ):
     """
     追溯计算所有 API Key 的费用
-    
+
     根据调用日志重新计算所有 Key 从各自创建日期开始的费用。
     """
-    from decimal import Decimal
     from app.models.database import CallLog, APIKey
     from app.services.pricing import get_pricing_service
-    
+
     # 获取所有 API Key
     api_key_service = get_api_key_service()
     keys = await api_key_service.get_all_keys(session, include_revoked=True)
-    
+    if not keys:
+        return {
+            "success": True,
+            "message": "没有可重算的 API Key",
+            "keys_processed": 0,
+            "results": [],
+        }
+
     pricing_service = get_pricing_service()
+    totals_by_key: Dict[str, RecalculatedCostTotals] = {}
+    log_query = select(
+        CallLog.api_key_id,
+        CallLog.model,
+        CallLog.model_group,
+        CallLog.input_tokens,
+        CallLog.output_tokens,
+    ).join(
+        APIKey,
+        APIKey.id == CallLog.api_key_id,
+    ).where(
+        CallLog.status == "success",
+        CallLog.timestamp >= APIKey.created_at,
+        CallLog.api_key_id.in_([api_key.id for api_key in keys]),
+    )
+    log_result = await session.execute(log_query)
+    totals_by_key = recalculate_cost_totals_by_key(
+        log_result.fetchall(),
+        pricing_service=pricing_service,
+    )
     results = []
-    
+
     for api_key in keys:
-        # 获取该 Key 创建日期之后的所有调用日志
-        created_at = api_key.created_at
-        
-        result = await session.execute(
-            select(CallLog).where(
-                CallLog.api_key_id == api_key.id,
-                CallLog.timestamp >= created_at,
-                CallLog.status == "success"
-            )
+        totals = totals_by_key.get(
+            api_key.id,
+            RecalculatedCostTotals(
+                total_cost="0",
+                total_requests=0,
+                total_tokens=0,
+            ),
         )
-        logs = list(result.scalars().all())
-        
-        # 计算费用
-        total_cost = Decimal("0")
-        total_requests = 0
-        total_tokens = 0
-        
-        for log in logs:
-            input_tokens = log.input_tokens or 0
-            output_tokens = log.output_tokens or 0
-            model = log.model or log.model_group or ""
-            
-            _, _, cost = pricing_service.calculate(model, input_tokens, output_tokens)
-            total_cost += Decimal(cost)
-            total_requests += 1
-            total_tokens += input_tokens + output_tokens
-        
+
         # 更新 API Key 的统计
-        api_key.total_cost = str(total_cost)
-        api_key.total_requests = total_requests
-        api_key.total_tokens = total_tokens
-        
+        api_key.total_cost = totals.total_cost
+        api_key.total_requests = totals.total_requests
+        api_key.total_tokens = totals.total_tokens
+
         results.append({
             "key_id": api_key.id,
             "key_name": api_key.name,
-            "logs_processed": len(logs),
-            "total_requests": total_requests,
-            "total_tokens": total_tokens,
-            "total_cost": str(total_cost)
+            "logs_processed": totals.total_requests,
+            "total_requests": totals.total_requests,
+            "total_tokens": totals.total_tokens,
+            "total_cost": totals.total_cost
         })
     
     await session.commit()
@@ -2724,12 +2738,17 @@ async def get_performance_stats(
     import os
     import time
     from app.services.connection_pool import (
-        get_concurrency_limiter, 
+        get_concurrency_limiter,
         ConnectionPoolConfig
     )
-    
+    from app.services.backend_client import get_backend_client
+    from app.services.usage_aggregator import get_usage_aggregator
+
     limiter = get_concurrency_limiter()
     stats = limiter.get_stats()
+    usage_aggregator_stats = get_usage_aggregator().stats()
+    background_log_stats = get_gateway_runtime().background_log_stats()
+    backend_http_stats = get_backend_client().stats()
     
     # 获取系统配置
     db_url = os.getenv("DATABASE_URL", "sqlite")
@@ -2762,35 +2781,102 @@ async def get_performance_stats(
         "success": True,
         "stats": {
             "active_requests": stats.get("active_requests", 0),
+            "queued_requests": stats.get("queued_requests", 0),
             "total_requests": total_requests,
             "rejected_requests": rejected,
+            "active_streams": stats.get("active_streams", 0),
+            "queued_streams": stats.get("queued_streams", 0),
+            "total_streams": stats.get("total_streams", 0),
+            "rejected_streams": stats.get("rejected_streams", 0),
+            "active_db_ops": stats.get("active_db_ops", 0),
+            "queued_db_ops": stats.get("queued_db_ops", 0),
+            "total_db_ops": stats.get("total_db_ops", 0),
+            "rejected_db_ops": stats.get("rejected_db_ops", 0),
             "current_qps": round(current_qps, 2),
             "success_rate": round(success_rate, 2),
             "max_concurrent_requests": ConnectionPoolConfig.MAX_CONCURRENT_REQUESTS,
+            "max_concurrent_streams": ConnectionPoolConfig.MAX_CONCURRENT_STREAMS,
             "max_concurrent_db_ops": ConnectionPoolConfig.MAX_CONCURRENT_DB_OPS,
         },
         "config": {
             "rpm_limit": int(os.getenv("RPM_LIMIT", "0")),  # 0 表示无限制
             "max_rpm": max_rpm,
             "max_concurrent_requests": ConnectionPoolConfig.MAX_CONCURRENT_REQUESTS,
+            "max_concurrent_streams": ConnectionPoolConfig.MAX_CONCURRENT_STREAMS,
             "max_concurrent_db_ops": ConnectionPoolConfig.MAX_CONCURRENT_DB_OPS,
+            "db_pool_capacity": ConnectionPoolConfig.DB_POOL_SIZE + ConnectionPoolConfig.DB_MAX_OVERFLOW,
             "http_max_connections": ConnectionPoolConfig.HTTP_MAX_CONNECTIONS,
             "http_max_keepalive": ConnectionPoolConfig.HTTP_MAX_KEEPALIVE,
             "http_timeout": ConnectionPoolConfig.HTTP_TIMEOUT,
             "http_connect_timeout": ConnectionPoolConfig.HTTP_CONNECT_TIMEOUT,
-            "db_pool_size": int(os.getenv("DB_POOL_SIZE", "20")),
-            "db_max_overflow": int(os.getenv("DB_MAX_OVERFLOW", "30")),
+            "db_pool_size": ConnectionPoolConfig.DB_POOL_SIZE,
+            "db_max_overflow": ConnectionPoolConfig.DB_MAX_OVERFLOW,
         },
         "system": {
             "db_type": db_type,
-            "db_pool": f"{os.getenv('DB_POOL_SIZE', '20')} + {os.getenv('DB_MAX_OVERFLOW', '30')}",
+            "db_pool": f"{ConnectionPoolConfig.DB_POOL_SIZE} + {ConnectionPoolConfig.DB_MAX_OVERFLOW}",
             "http_timeout": f"{ConnectionPoolConfig.HTTP_TIMEOUT}s",
             "uptime": uptime_str,
+        },
+        "backend_http": {
+            "configured_max_connections": backend_http_stats.get("configured_max_connections", 0),
+            "max_connections_per_host": backend_http_stats.get("max_connections_per_host", 0),
+            "effective_max_connections": backend_http_stats.get("effective_max_connections", 0),
+            "backend_max_concurrent_streams": backend_http_stats.get("backend_max_concurrent_streams", 0),
+            "max_keepalive_connections": backend_http_stats.get("max_keepalive_connections", 0),
+            "keepalive_expiry_seconds": backend_http_stats.get("keepalive_expiry_seconds", 0),
+            "connect_timeout_seconds": backend_http_stats.get("connect_timeout_seconds", 0),
+            "pool_timeout_seconds": backend_http_stats.get("pool_timeout_seconds", 0),
+            "sync_timeout_seconds": backend_http_stats.get("sync_timeout_seconds", 0),
+            "stream_timeout_seconds": backend_http_stats.get("stream_timeout_seconds", 0),
+            "sync_retry_count": backend_http_stats.get("sync_retry_count", 0),
+            "stream_retry_count": backend_http_stats.get("stream_retry_count", 0),
+            "backend_slot_timeout_count": backend_http_stats.get("backend_slot_timeout_count", 0),
+            "backend_stream_slot_timeout_count": backend_http_stats.get("backend_stream_slot_timeout_count", 0),
+            "backend_total_acquires": backend_http_stats.get("backend_total_acquires", 0),
+            "active_sync_requests": backend_http_stats.get("active_sync_requests", 0),
+            "active_stream_requests": backend_http_stats.get("active_stream_requests", 0),
+            "active_total_requests": backend_http_stats.get("active_total_requests", 0),
+            "avg_wait_ms": backend_http_stats.get("avg_wait_ms", 0),
+            "p95_wait_ms": backend_http_stats.get("p95_wait_ms", 0),
+            "p99_wait_ms": backend_http_stats.get("p99_wait_ms", 0),
+            "pool_timeout_count": backend_http_stats.get("pool_timeout_count", 0),
+            "connect_error_count": backend_http_stats.get("connect_error_count", 0),
+            "timeout_error_count": backend_http_stats.get("timeout_error_count", 0),
+            "transport_error_count": backend_http_stats.get("transport_error_count", 0),
         },
         "response_times": {
             "avg": stats.get("avg_response_time", 0),
             "p95": stats.get("p95_response_time", 0),
             "p99": stats.get("p99_response_time", 0),
+        },
+        "queue_waits": {
+            "request_avg_ms": stats.get("avg_request_wait_ms", 0),
+            "request_p95_ms": stats.get("p95_request_wait_ms", 0),
+            "request_p99_ms": stats.get("p99_request_wait_ms", 0),
+            "stream_avg_ms": stats.get("avg_stream_wait_ms", 0),
+            "stream_p95_ms": stats.get("p95_stream_wait_ms", 0),
+            "stream_p99_ms": stats.get("p99_stream_wait_ms", 0),
+            "db_avg_ms": stats.get("avg_db_wait_ms", 0),
+            "db_p95_ms": stats.get("p95_db_wait_ms", 0),
+            "db_p99_ms": stats.get("p99_db_wait_ms", 0),
+        },
+        "usage_aggregation": {
+            "queue_size": usage_aggregator_stats.get("queue_size", 0),
+            "flushed_events": usage_aggregator_stats.get("flushed_events", 0),
+            "flushed_batches": usage_aggregator_stats.get("flushed_batches", 0),
+            "dropped_events": usage_aggregator_stats.get("dropped_events", 0),
+            "configured_workers": usage_aggregator_stats.get("configured_workers", 0),
+            "active_workers": usage_aggregator_stats.get("active_workers", 0),
+            "active_flush_workers": usage_aggregator_stats.get("active_flush_workers", 0),
+        },
+        "background_logs": {
+            "queue_size": background_log_stats.get("queue_size", 0),
+            "processed_events": background_log_stats.get("processed_events", 0),
+            "dropped_events": background_log_stats.get("dropped_events", 0),
+            "inflight_events": background_log_stats.get("inflight_events", 0),
+            "active_workers": background_log_stats.get("active_workers", 0),
+            "queue_capacity": background_log_stats.get("queue_capacity", 0),
         }
     }
 

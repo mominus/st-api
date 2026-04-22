@@ -845,14 +845,15 @@ class ProtocolBridge:
             return None
 
         existing = tool_result.get("content")
-        if (
-            isinstance(existing, list)
-            and any(
+        if isinstance(existing, list):
+            has_tool_references = any(
                 isinstance(item, dict) and str(item.get("type") or "") == "tool_reference"
                 for item in existing
             )
-        ):
-            return None
+            if has_tool_references and any(
+                str(item.get("type") or "") != "text" for item in extra_items
+            ):
+                return None
 
         if (
             (existing is None or isinstance(existing, str))

@@ -1283,6 +1283,64 @@ def test_parse_anthropic_messages_accepts_claude_code_mixed_tool_result_and_text
     assert canonical.messages[-1].content == "[tool_result id=toolu_1]\nok\n\n额外文本"
 
 
+def test_parse_anthropic_messages_accepts_claude_code_tool_reference_result_with_text_tail():
+    tool_references = [
+        {"type": "tool_reference", "uri": "tool://search/1", "title": "result-1"},
+        {"type": "tool_reference", "uri": "tool://search/2", "title": "result-2"},
+    ]
+    payload = {
+        "model": "claude-opus-4-6",
+        "messages": [
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "我先检索一下。"},
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_search_1",
+                        "name": "ToolSearch",
+                        "input": {"query": "st-api anthropic beta"},
+                    },
+                ],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_search_1",
+                        "content": tool_references,
+                    },
+                    {"type": "text", "text": "继续处理"},
+                ],
+            },
+        ],
+    }
+
+    canonical = bridge.parse_anthropic_messages(
+        payload,
+        anthropic_beta_header="claude-code-20250219,advanced-tool-use-2025-11-20",
+    )
+
+    assert canonical.anthropic_beta == [
+        "claude-code-20250219",
+        "advanced-tool-use-2025-11-20",
+    ]
+    assert canonical.raw_messages[-1]["content"] == [
+        {
+            "type": "tool_result",
+            "tool_use_id": "toolu_search_1",
+            "content": [
+                {"type": "tool_reference", "uri": "tool://search/1", "title": "result-1"},
+                {"type": "tool_reference", "uri": "tool://search/2", "title": "result-2"},
+                {"type": "text", "text": "继续处理"},
+            ],
+        }
+    ]
+    assert canonical.messages[-1].content.startswith("[tool_result id=toolu_search_1]")
+    assert "继续处理" in canonical.messages[-1].content
+
+
 def test_parse_anthropic_messages_rejects_tool_result_without_previous_tool_use():
     payload = {
         "model": "claude-opus-4-6",

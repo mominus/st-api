@@ -101,19 +101,37 @@ class ToolParser:
         re.IGNORECASE,
     )
 
+    # 匹配顶层数组形式的工具调用
+    # 示例:
+    # [
+    #   {"tool":"TaskCreate","arguments":{...}},
+    #   {"tool":"TaskCreate","arguments":{...}}
+    # ]
+    PLAIN_TOOL_JSON_ARRAY_START_PATTERN = re.compile(
+        r'(^|\n)\s*(\[\s*\{\s*"tool")',
+        re.IGNORECASE,
+    )
+
     JSON_STRING_ESCAPE_CHARS = frozenset('"\\/bfnrtu')
     
     # 工具调用 ID 前缀
     TOOL_USE_ID_PREFIX = "toolu_"
     
-    def __init__(self, registry: Optional[ToolRegistry] = None):
+    def __init__(
+        self,
+        registry: Optional[ToolRegistry] = None,
+        *,
+        allow_unknown_tools: bool = True,
+    ):
         """
         初始化工具解析器
         
         Args:
             registry: 工具注册表实例，用于验证工具调用
+            allow_unknown_tools: 当 registry 存在但工具名未注册时，是否仍允许通过
         """
         self._registry = registry
+        self._allow_unknown_tools = bool(allow_unknown_tools)
         self._generated_ids: set = set()
     
     def parse(self, content: str) -> ParseResult:
@@ -160,7 +178,7 @@ class ToolParser:
         # 最后尝试裸 JSON tool call
         plain_json_result = self._parse_plain_json_format(content)
         if plain_json_result.has_tool_calls:
-            logger.debug("Parsed tool call from plain JSON format")
+            logger.debug(f"Parsed {len(plain_json_result.tool_calls)} tool calls from plain JSON format")
             return plain_json_result
         
         # 没有找到工具调用
@@ -557,14 +575,10 @@ class ToolParser:
             json_str = match.group(1).strip()
             
             # 尝试解析 JSON
-            parsed_call = self._parse_json_block(json_str)
+            parsed_calls = self._parse_json_block(json_str)
             
-            if parsed_call is not None:
-                # 验证工具调用
-                if self._is_valid_tool_call(parsed_call):
-                    tool_calls.append(parsed_call)
-                else:
-                    logger.warning(f"Invalid tool call: {json_str}")
+            if parsed_calls:
+                tool_calls.extend(parsed_calls)
             else:
                 if self._looks_like_tool_json_block(json_str):
                     logger.warning(f"Failed to parse JSON block: {json_str}")
@@ -605,17 +619,24 @@ class ToolParser:
         """
         解析裸 JSON tool call。
 
-        支持模型直接输出单个 JSON 对象而不包裹 ```json 代码块。
+        支持模型直接输出单个 JSON 对象或 JSON 数组而不包裹 ```json 代码块。
         """
         result = ParseResult()
         if not content:
             return result
 
-        start_match = self.PLAIN_TOOL_JSON_START_PATTERN.search(content)
-        if not start_match:
+        start_candidates = []
+        array_match = self.PLAIN_TOOL_JSON_ARRAY_START_PATTERN.search(content)
+        if array_match is not None:
+            start_candidates.append(array_match.start(2))
+        object_match = self.PLAIN_TOOL_JSON_START_PATTERN.search(content)
+        if object_match is not None:
+            start_candidates.append(object_match.start(2))
+
+        if not start_candidates:
             return result
 
-        start_pos = start_match.start(2)
+        start_pos = min(start_candidates)
         trailing = content[start_pos:]
 
         decoded = self.load_jsonish_prefix(trailing)
@@ -623,23 +644,11 @@ class ToolParser:
             return result
         parsed_obj, end_idx = decoded
 
-        if not isinstance(parsed_obj, dict):
-            return result
-
-        tool_name = parsed_obj.get("tool")
-        if not tool_name or not isinstance(tool_name, str):
-            return result
-
-        arguments = parsed_obj.get("arguments", {})
-        if not isinstance(arguments, dict):
-            arguments = {}
-
-        parsed_call = ParsedToolCall(
-            tool_name=tool_name,
-            arguments=arguments,
+        parsed_calls = self.extract_tool_calls_from_jsonish(
+            parsed_obj,
             raw_json=json.dumps(parsed_obj, ensure_ascii=False, separators=(",", ":")),
         )
-        if not self._is_valid_tool_call(parsed_call):
+        if not parsed_calls:
             return result
 
         consumed_end = start_pos + end_idx
@@ -647,47 +656,84 @@ class ToolParser:
             consumed_end += 1
 
         result.text_before = content[:start_pos].rstrip()
-        result.tool_calls = [parsed_call]
+        result.tool_calls = parsed_calls
         result.has_tool_calls = True
         result.text_after = content[consumed_end:].lstrip()
         return result
     
-    def _parse_json_block(self, json_str: str) -> Optional[ParsedToolCall]:
+    def _parse_json_block(self, json_str: str) -> List[ParsedToolCall]:
         """
-        解析单个 JSON 代码块
+        解析单个 JSON 代码块，可返回一个或多个工具调用。
         
         Args:
             json_str: JSON 字符串
             
         Returns:
-            ParsedToolCall 或 None（如果解析失败）
+            解析出的工具调用列表
         """
         try:
             data = self.load_jsonish(json_str)
-
-            # 检查是否是工具调用格式
-            if not isinstance(data, dict):
-                return None
-
-            # 提取工具名称
-            tool_name = data.get("tool")
-            if not tool_name or not isinstance(tool_name, str):
-                return None
-
-            # 提取参数
-            arguments = data.get("arguments", {})
-            if not isinstance(arguments, dict):
-                arguments = {}
-
-            return ParsedToolCall(
-                tool_name=tool_name,
-                arguments=arguments,
-                raw_json=json_str
-            )
+            return self.extract_tool_calls_from_jsonish(data, raw_json=json_str)
 
         except Exception as e:
             logger.debug(f"Error parsing JSON block: {e}")
+            return []
+
+    def extract_tool_calls_from_jsonish(
+        self,
+        data: Any,
+        *,
+        raw_json: str = "",
+    ) -> List[ParsedToolCall]:
+        """
+        从已解析的 JSON-like 结构中提取一个或多个工具调用。
+
+        支持:
+        1. 单个对象: {"tool":"Write","arguments":{...}}
+        2. 对象数组: [{"tool":"TaskCreate","arguments":{...}}, ...]
+        """
+        if isinstance(data, dict):
+            parsed_call = self._build_tool_call_from_mapping(data, raw_json=raw_json)
+            if parsed_call is None or not self._is_valid_tool_call(parsed_call):
+                return []
+            return [parsed_call]
+
+        if isinstance(data, list):
+            if not data:
+                return []
+
+            tool_calls: List[ParsedToolCall] = []
+            for item in data:
+                if not isinstance(item, dict):
+                    return []
+                item_json = json.dumps(item, ensure_ascii=False, separators=(",", ":"))
+                parsed_call = self._build_tool_call_from_mapping(item, raw_json=item_json)
+                if parsed_call is None or not self._is_valid_tool_call(parsed_call):
+                    return []
+                tool_calls.append(parsed_call)
+            return tool_calls
+
+        return []
+
+    @staticmethod
+    def _build_tool_call_from_mapping(
+        data: Dict[str, Any],
+        *,
+        raw_json: str,
+    ) -> Optional[ParsedToolCall]:
+        tool_name = data.get("tool")
+        if not tool_name or not isinstance(tool_name, str):
             return None
+
+        arguments = data.get("arguments", {})
+        if not isinstance(arguments, dict):
+            arguments = {}
+
+        return ParsedToolCall(
+            tool_name=tool_name,
+            arguments=arguments,
+            raw_json=raw_json,
+        )
     
     def _is_valid_tool_call(self, tool_call: ParsedToolCall) -> bool:
         """
@@ -719,7 +765,7 @@ class ToolParser:
         
         验证逻辑：
         1. 如果没有注册表，只检查基本格式
-        2. 如果工具不在注册表中，仍然允许通过（宽松模式）
+        2. 如果工具不在注册表中，则按 allow_unknown_tools 决定是否允许
         3. 如果工具在注册表中，检查必需参数
         
         Args:
@@ -734,10 +780,12 @@ class ToolParser:
         # 检查工具是否已注册
         tool_schema = self._registry.get_tool(tool_call.tool_name)
         if tool_schema is None:
-            # 工具不在注册表中，但仍然允许通过（宽松模式）
-            # 这样可以支持 Claude Code 发送的自定义工具
-            logger.debug(f"Tool '{tool_call.tool_name}' not in registry, allowing anyway")
-            return True
+            if self._allow_unknown_tools:
+                # 宽松模式下允许未声明工具，兼容自定义工具场景。
+                logger.debug(f"Tool '{tool_call.tool_name}' not in registry, allowing anyway")
+                return True
+            logger.debug(f"Tool '{tool_call.tool_name}' not in registry, rejecting in strict mode")
+            return False
         
         # 检查必需参数
         input_schema = tool_schema.input_schema

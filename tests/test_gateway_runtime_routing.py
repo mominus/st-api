@@ -12,6 +12,7 @@ from app.services.backend_client import BackendAPIError
 from app.services.crypto import CryptoService
 from app.services.error_handler import ErrorHandler
 from app.models.database import APIKey
+from app.services.protocol_bridge import CanonicalMessage, CanonicalRequest
 
 
 class _FakeAPIKeyService:
@@ -295,6 +296,14 @@ class _TrackingUsageAggregator:
         return self.enqueue_result
 
 
+class _FakeTokenCounter:
+    def __init__(self, counts=None):
+        self._counts = dict(counts or {})
+
+    def count(self, text):
+        return int(self._counts.get(text, 0))
+
+
 async def _none_input_mapping(_session, _model):
     return None
 
@@ -544,6 +553,235 @@ def test_get_model_input_mapping_uses_cache():
     assert first == {"user_input": "in-0"}
     assert second == {"user_input": "in-0"}
     assert session.execute_calls == 1
+
+
+def test_usage_from_sync_estimates_input_tokens_when_backend_usage_missing():
+    runtime = GatewayRuntime(
+        token_counter=_FakeTokenCounter(
+            {
+                "prompt text": 13,
+                "output text": 8,
+            }
+        )
+    )
+
+    usage = runtime.usage_from_sync(
+        backend_response={"outputs": {"out-0": "output text"}},
+        prompt_text="prompt text",
+        output_text="output text",
+    )
+
+    assert usage.input_tokens == 13
+    assert usage.output_tokens == 8
+    assert usage.total_tokens == 21
+
+
+def test_build_backend_payload_keeps_full_prompt_when_context_fields_are_not_mapped():
+    runtime = GatewayRuntime()
+    resolved = SimpleNamespace(
+        input_mapping={
+            "user_input": "in-0",
+            "max_tokens": "in-1",
+            "model_id": "in-2",
+        },
+        model="claude-opus-4-6",
+    )
+    canonical = CanonicalRequest(
+        source="anthropic_messages",
+        model="claude-opus-4-6",
+        messages=[
+            CanonicalMessage(role="user", content="先读取 README"),
+            CanonicalMessage(role="assistant", content="好的，我继续看。"),
+            CanonicalMessage(role="user", content="请总结测试结构"),
+        ],
+        max_tokens=2048,
+    )
+
+    payload = runtime.build_backend_payload(
+        resolved=resolved,
+        prompt_text="[System]\nkeep full prompt",
+        user_id="api:key",
+        canonical=canonical,
+    )
+
+    assert payload["user_id"] == "api:key"
+    assert payload["in-0"] == "[System]\nkeep full prompt"
+    assert payload["in-1"] == 2048
+    assert payload["in-2"] == "claude-opus-4-6"
+    assert "conversation_id" in payload
+
+
+def test_build_backend_payload_maps_optional_canonical_fields_when_declared():
+    runtime = GatewayRuntime()
+    resolved = SimpleNamespace(
+        input_mapping={
+            "user_input": "in-0",
+            "system_prompt": "in-1",
+            "chat_history": "in-2",
+            "model_id": "in-3",
+            "max_tokens": "in-4",
+            "temperature": "in-5",
+            "tool_choice": "in-6",
+            "thinking": "in-7",
+            "metadata": "in-8",
+            "anthropic_beta": "in-9",
+        },
+        model="claude-opus-4-6",
+    )
+    canonical = CanonicalRequest(
+        source="anthropic_messages",
+        model="claude-opus-4-6",
+        system_prompt="你是代码助手",
+        messages=[
+            CanonicalMessage(role="user", content="先读 README"),
+            CanonicalMessage(role="assistant", content="我先看核心入口。"),
+            CanonicalMessage(role="user", content="继续分析 tests"),
+        ],
+        max_tokens=4096,
+        temperature=0.2,
+        tool_choice={"type": "auto"},
+        thinking={"type": "adaptive"},
+        metadata={"user_id": "session-123", "trace": "abc"},
+        anthropic_beta=["claude-code-20250219"],
+    )
+
+    payload = runtime.build_backend_payload(
+        resolved=resolved,
+        prompt_text="[System]\nlegacy merged prompt",
+        user_id="api:key",
+        canonical=canonical,
+    )
+
+    assert payload["in-0"] == "继续分析 tests"
+    assert payload["in-1"] == "你是代码助手"
+    assert payload["in-2"] == "[Human]\n先读 README\n\n[Assistant]\n我先看核心入口。"
+    assert payload["in-3"] == "claude-opus-4-6"
+    assert payload["in-4"] == 4096
+    assert payload["in-5"] == 0.2
+    assert payload["in-6"] == {"type": "auto"}
+    assert payload["in-7"] == {"type": "adaptive"}
+    assert payload["in-8"] == {"user_id": "session-123", "trace": "abc"}
+    assert payload["in-9"] == ["claude-code-20250219"]
+
+
+def test_build_backend_payload_uses_raw_anthropic_messages_for_structured_context():
+    runtime = GatewayRuntime()
+    resolved = SimpleNamespace(
+        input_mapping={
+            "user_input": "in-0",
+            "system_prompt": "in-1",
+            "chat_history": "in-2",
+            "model_id": "in-3",
+        },
+        model="claude-opus-4-6",
+    )
+    canonical = CanonicalRequest(
+        source="anthropic_messages",
+        model="claude-opus-4-6",
+        system_prompt="你是代码助手",
+        messages=[
+            CanonicalMessage(role="user", content="STALE_USER_MESSAGE"),
+        ],
+        raw_messages=[
+            {"role": "user", "content": [{"type": "text", "text": "先读取 README"}]},
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "临时草稿应被抑制"},
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_1",
+                        "name": "Read",
+                        "input": {"file_path": "README.md"},
+                    },
+                ],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {"type": "tool_result", "tool_use_id": "toolu_1", "content": "README 内容"},
+                ],
+            },
+            {"role": "user", "content": [{"type": "text", "text": "继续分析 tests"}]},
+        ],
+    )
+
+    payload = runtime.build_backend_payload(
+        resolved=resolved,
+        prompt_text="[System]\nlegacy merged prompt",
+        user_id="api:key",
+        canonical=canonical,
+    )
+
+    assert payload["in-0"] == "继续分析 tests"
+    assert payload["in-1"] == "你是代码助手"
+    assert payload["in-2"] == (
+        "[Human]\n先读取 README\n\n"
+        "[Assistant]\n[tool_call id=toolu_1 name=Read]\n{\"file_path\":\"README.md\"}\n\n"
+        "[Human]\n[tool_result id=toolu_1]\nREADME 内容"
+    )
+    assert payload["in-3"] == "claude-opus-4-6"
+
+
+def test_build_backend_payload_preserves_structured_tool_result_content():
+    runtime = GatewayRuntime()
+    resolved = SimpleNamespace(
+        input_mapping={
+            "user_input": "in-0",
+            "chat_history": "in-1",
+        },
+        model="claude-opus-4-6",
+    )
+    structured_payload = {
+        "stdout": "README 内容",
+        "exit_code": 0,
+        "artifacts": ["README.md"],
+    }
+    canonical = CanonicalRequest(
+        source="anthropic_messages",
+        model="claude-opus-4-6",
+        messages=[
+            CanonicalMessage(role="user", content="STALE_USER_MESSAGE"),
+        ],
+        raw_messages=[
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_structured",
+                        "name": "Read",
+                        "input": {"file_path": "README.md"},
+                    },
+                ],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_structured",
+                        "content": structured_payload,
+                    },
+                ],
+            },
+            {"role": "user", "content": [{"type": "text", "text": "继续分析"}]},
+        ],
+    )
+
+    payload = runtime.build_backend_payload(
+        resolved=resolved,
+        prompt_text="[System]\nlegacy merged prompt",
+        user_id="api:key",
+        canonical=canonical,
+    )
+
+    serialized_payload = json.dumps(structured_payload, ensure_ascii=False, separators=(",", ":"))
+
+    assert payload["in-0"] == "继续分析"
+    assert "[tool_result id=toolu_structured]" in payload["in-1"]
+    assert serialized_payload in payload["in-1"]
+    assert "STALE_USER_MESSAGE" not in payload["in-1"]
 
 
 def test_persist_success_degrades_gracefully_when_db_gate_busy():
@@ -855,6 +1093,63 @@ def test_error_handler_maps_upstream_402_to_quota_exceeded():
     assert api_error.code == "quota_exceeded"
 
 
+def test_error_handler_maps_upstream_529_to_overloaded_error():
+    handler = ErrorHandler()
+    exc = BackendAPIError(
+        message="Backend API returned error: 529",
+        status_code=529,
+        response_data={"message": "backend overloaded"},
+    )
+
+    api_error = handler.from_backend_exception(exc)
+    anthropic_payload = handler.to_anthropic_error(api_error)
+
+    assert api_error.status_code == 503
+    assert api_error.code == "service_unavailable"
+    assert anthropic_payload["error"]["type"] == "overloaded_error"
+
+
+def test_error_handler_preserves_prompt_too_long_message_for_claude_code():
+    handler = ErrorHandler()
+
+    api_error = handler.parse_backend_error(
+        {
+            "message": "Prompt is too long: 137500 tokens > 135000 maximum",
+        },
+        status_code=413,
+    )
+
+    anthropic_payload = handler.to_anthropic_error(api_error)
+
+    assert api_error.status_code == 400
+    assert api_error.code == "invalid_request"
+    assert api_error.message == "Prompt is too long: 137500 tokens > 135000 maximum"
+    assert anthropic_payload["error"]["type"] == "invalid_request_error"
+    assert anthropic_payload["error"]["message"] == api_error.message
+
+
+def test_error_handler_preserves_max_tokens_context_limit_message_for_claude_code():
+    handler = ErrorHandler()
+
+    api_error = handler.parse_backend_error(
+        {
+            "message": "input length and `max_tokens` exceed context limit: 188059 + 20000 > 200000",
+        },
+        status_code=400,
+    )
+
+    anthropic_payload = handler.to_anthropic_error(api_error)
+
+    assert api_error.status_code == 400
+    assert api_error.code == "invalid_request"
+    assert (
+        api_error.message
+        == "input length and `max_tokens` exceed context limit: 188059 + 20000 > 200000"
+    )
+    assert anthropic_payload["error"]["type"] == "invalid_request_error"
+    assert anthropic_payload["error"]["message"] == api_error.message
+
+
 def test_error_handler_hides_details_in_api_formats_but_keeps_logs():
     handler = ErrorHandler()
     api_error = handler.parse_backend_error(
@@ -874,6 +1169,36 @@ def test_error_handler_hides_details_in_api_formats_but_keeps_logs():
     assert "details" not in gemini_payload["error"]
     assert api_error.details is not None
     assert api_error.details["raw"] == "contact upstream support"
+
+
+def test_error_handler_maps_critical_error_types_to_anthropic_shapes():
+    handler = ErrorHandler()
+
+    invalid_request = handler.to_anthropic_error(
+        handler.create_invalid_request_error("Tool arguments invalid")
+    )
+    authentication = handler.to_anthropic_error(
+        handler.create_authentication_error("invalid key")
+    )
+    permission = handler.to_anthropic_error(
+        handler.create_permission_error("permission denied")
+    )
+    rate_limit = handler.to_anthropic_error(
+        handler.create_rate_limit_error("too many requests")
+    )
+    overloaded = handler.to_anthropic_error(
+        handler.create_service_unavailable_error("backend overloaded")
+    )
+    api_error = handler.to_anthropic_error(
+        handler.create_backend_error("upstream error")
+    )
+
+    assert invalid_request["error"]["type"] == "invalid_request_error"
+    assert authentication["error"]["type"] == "authentication_error"
+    assert permission["error"]["type"] == "permission_error"
+    assert rate_limit["error"]["type"] == "rate_limit_error"
+    assert overloaded["error"]["type"] == "overloaded_error"
+    assert api_error["error"]["type"] == "api_error"
 
 
 def test_error_handler_still_sanitizes_tool_arguments_in_details():

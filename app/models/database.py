@@ -78,6 +78,7 @@ class ModelGroup(Base):
     name = Column(String(255), unique=True, nullable=False)
     description = Column(Text, nullable=True)
     input_mapping = Column(Text, nullable=False)  # JSON: 输入字段映射配置
+    capability_overrides = Column(Text, nullable=True)  # JSON: 能力矩阵覆盖配置
     created_at = Column(DateTime, default=utc_now_naive)
 
 
@@ -334,74 +335,88 @@ def _normalize_database_url_for_asyncpg(db_url: str) -> str:
         return db_url
 
 
+def _build_async_engine_kwargs(db_url: str) -> dict[str, object]:
+    pool_size = _get_int_env("DB_POOL_SIZE", 8)
+    max_overflow = _get_int_env("DB_MAX_OVERFLOW", 2)
+    pool_timeout = _get_int_env("DB_POOL_TIMEOUT", 5)
+    pool_recycle = _get_int_env("DB_POOL_RECYCLE", 1800)
+
+    engine_kwargs: dict[str, object] = {
+        "echo": os.getenv("DEBUG", "false").lower() == "true",
+        "future": True,
+        "pool_pre_ping": True,
+    }
+
+    if "sqlite" in db_url:
+        engine_kwargs["connect_args"] = {
+            "timeout": 60,  # 增加锁等待超时时间
+            "check_same_thread": False,
+        }
+
+        if any(
+            os.getenv(name, "").strip()
+            for name in (
+                "SQLITE_POOL_SIZE",
+                "SQLITE_MAX_OVERFLOW",
+                "SQLITE_POOL_TIMEOUT",
+                "SQLITE_POOL_RECYCLE",
+            )
+        ):
+            logger.warning(
+                (
+                    "SQLite+aiosqlite uses NullPool by default; "
+                    "SQLITE_POOL_SIZE/SQLITE_MAX_OVERFLOW/"
+                    "SQLITE_POOL_TIMEOUT/SQLITE_POOL_RECYCLE are ignored."
+                )
+            )
+
+        return engine_kwargs
+
+    engine_kwargs["pool_size"] = pool_size
+    engine_kwargs["max_overflow"] = max_overflow
+    engine_kwargs["pool_timeout"] = pool_timeout
+    engine_kwargs["pool_recycle"] = pool_recycle
+
+    connect_args = {}
+
+    # PostgreSQL/asyncpg 可选连接参数（按需配置）
+    # 仅在设置环境变量时生效，未设置则保持默认行为。
+    pg_connect_timeout = _get_float_env("POSTGRES_CONNECT_TIMEOUT_SECONDS")
+    if pg_connect_timeout is not None:
+        connect_args["timeout"] = pg_connect_timeout
+
+    pg_command_timeout = _get_float_env("POSTGRES_COMMAND_TIMEOUT_SECONDS")
+    if pg_command_timeout is not None:
+        connect_args["command_timeout"] = pg_command_timeout
+
+    server_settings = {}
+    # 默认开启语句/锁超时保护，避免高并发下慢锁拖垮请求。
+    statement_timeout_ms = os.getenv("POSTGRES_STATEMENT_TIMEOUT_MS", "").strip() or "30000"
+    if statement_timeout_ms:
+        server_settings["statement_timeout"] = statement_timeout_ms
+
+    lock_timeout_ms = os.getenv("POSTGRES_LOCK_TIMEOUT_MS", "").strip() or "5000"
+    if lock_timeout_ms:
+        server_settings["lock_timeout"] = lock_timeout_ms
+
+    app_name = os.getenv("POSTGRES_APPLICATION_NAME", "").strip()
+    if app_name:
+        server_settings["application_name"] = app_name
+
+    if server_settings:
+        connect_args["server_settings"] = server_settings
+
+    engine_kwargs["connect_args"] = connect_args
+    _log_connection_budget_hint(pool_size=pool_size, max_overflow=max_overflow)
+    return engine_kwargs
+
+
 async def init_database() -> None:
     """初始化数据库，创建所有表"""
     global _engine, _async_session_factory
     
     db_url = _normalize_database_url_for_asyncpg(get_database_url())
-    
-    # 连接池配置
-    pool_size = int(os.getenv("DB_POOL_SIZE", "8"))
-    max_overflow = int(os.getenv("DB_MAX_OVERFLOW", "2"))
-    pool_timeout = int(os.getenv("DB_POOL_TIMEOUT", "5"))
-    pool_recycle = int(os.getenv("DB_POOL_RECYCLE", "1800"))
-    
-    # SQLite 连接参数：增加超时时间和启用 WAL 模式以支持更好的并发
-    connect_args = {}
-    engine_kwargs = {
-        "echo": os.getenv("DEBUG", "false").lower() == "true",
-        "future": True,
-        "pool_pre_ping": True
-    }
-    
-    if "sqlite" in db_url:
-        connect_args = {
-            "timeout": 60,  # 增加锁等待超时时间
-            "check_same_thread": False
-        }
-        # SQLite 默认也启用可配置连接池，避免高并发下过早触发 QueuePool 超时
-        # （默认继承 DB_*，可用 SQLITE_* 单独覆盖）
-        engine_kwargs["pool_size"] = int(os.getenv("SQLITE_POOL_SIZE", str(pool_size)))
-        engine_kwargs["max_overflow"] = int(os.getenv("SQLITE_MAX_OVERFLOW", str(max_overflow)))
-        engine_kwargs["pool_timeout"] = int(os.getenv("SQLITE_POOL_TIMEOUT", str(pool_timeout)))
-        engine_kwargs["pool_recycle"] = int(os.getenv("SQLITE_POOL_RECYCLE", str(pool_recycle)))
-    else:
-        # PostgreSQL 等数据库使用完整连接池配置
-        engine_kwargs["pool_size"] = pool_size
-        engine_kwargs["max_overflow"] = max_overflow
-        engine_kwargs["pool_timeout"] = pool_timeout
-        engine_kwargs["pool_recycle"] = pool_recycle
-
-        # PostgreSQL/asyncpg 可选连接参数（按需配置）
-        # 仅在设置环境变量时生效，未设置则保持默认行为。
-        pg_connect_timeout = _get_float_env("POSTGRES_CONNECT_TIMEOUT_SECONDS")
-        if pg_connect_timeout is not None:
-            connect_args["timeout"] = pg_connect_timeout
-
-        pg_command_timeout = _get_float_env("POSTGRES_COMMAND_TIMEOUT_SECONDS")
-        if pg_command_timeout is not None:
-            connect_args["command_timeout"] = pg_command_timeout
-
-        server_settings = {}
-        # 默认开启语句/锁超时保护，避免高并发下慢锁拖垮请求。
-        statement_timeout_ms = os.getenv("POSTGRES_STATEMENT_TIMEOUT_MS", "").strip() or "30000"
-        if statement_timeout_ms:
-            server_settings["statement_timeout"] = statement_timeout_ms
-
-        lock_timeout_ms = os.getenv("POSTGRES_LOCK_TIMEOUT_MS", "").strip() or "5000"
-        if lock_timeout_ms:
-            server_settings["lock_timeout"] = lock_timeout_ms
-
-        app_name = os.getenv("POSTGRES_APPLICATION_NAME", "").strip()
-        if app_name:
-            server_settings["application_name"] = app_name
-
-        if server_settings:
-            connect_args["server_settings"] = server_settings
-
-        _log_connection_budget_hint(pool_size=pool_size, max_overflow=max_overflow)
-    
-    engine_kwargs["connect_args"] = connect_args
+    engine_kwargs = _build_async_engine_kwargs(db_url)
     
     # 创建异步引擎
     _engine = create_async_engine(db_url, **engine_kwargs)
@@ -424,6 +439,7 @@ async def init_database() -> None:
             await _migrate_sqlite_columns(conn)
         else:
             await _ensure_backend_account_runtime_columns(conn)
+            await _ensure_model_group_runtime_columns(conn)
         # token_usage_history 并发聚合桶唯一索引（支持 PostgreSQL 表达式 UPSERT）
         await _ensure_token_usage_history_bucket_index(conn)
         # 日志查询索引（高并发下后台查询/聚合性能关键）
@@ -442,6 +458,7 @@ async def _migrate_sqlite_columns(conn) -> None:
         ("api_keys", "token_quota", "INTEGER"),
         ("api_keys", "cost_limit", "VARCHAR(20)"),
         ("api_keys", "total_cost", "VARCHAR(20) DEFAULT '0'"),
+        ("model_groups", "capability_overrides", "TEXT"),
         ("backend_accounts", "inflight_requests", "INTEGER DEFAULT 0 NOT NULL"),
         ("backend_accounts", "inflight_updated_at", "DATETIME"),
     ]
@@ -525,6 +542,18 @@ async def _ensure_backend_account_runtime_columns(conn) -> None:
             await conn.execute(text(statement))
         except Exception as exc:
             logger.warning("Failed to ensure backend_accounts runtime column with [%s]: %s", statement, exc)
+
+
+async def _ensure_model_group_runtime_columns(conn) -> None:
+    """确保 PostgreSQL 等现有环境补齐 model_groups 运行时扩展列。"""
+    statements = [
+        "ALTER TABLE model_groups ADD COLUMN IF NOT EXISTS capability_overrides TEXT NULL",
+    ]
+    for statement in statements:
+        try:
+            await conn.execute(text(statement))
+        except Exception as exc:
+            logger.warning("Failed to ensure model_groups runtime column with [%s]: %s", statement, exc)
 
 
 async def _ensure_token_usage_history_bucket_index(conn) -> None:

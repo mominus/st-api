@@ -7,12 +7,15 @@ canonical request, and maps model output back into each protocol format.
 
 from __future__ import annotations
 
+import copy
 import json
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
+from app.services.tool_context_builder import ToolContextBuilder
 from app.services.tool_parser import ToolParser
+from app.services.tool_result_formatter import ToolResultFormatter
 
 
 TEXT_PART_TYPES = {
@@ -61,6 +64,10 @@ class CanonicalRequest:
     max_tokens: Optional[int] = None
     capabilities: List[str] = field(default_factory=list)
     response_language: str = "auto"
+    anthropic_beta: List[str] = field(default_factory=list)
+    thinking: Optional[Dict[str, Any]] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    raw_messages: List[Dict[str, Any]] = field(default_factory=list)
     raw: Dict[str, Any] = field(default_factory=dict)
 
     def input_preview(self) -> str:
@@ -98,6 +105,8 @@ class ProtocolBridge:
 
     def __init__(self) -> None:
         self._tool_parser = ToolParser(registry=None)
+        self._tool_result_formatter = ToolResultFormatter()
+        self._tool_context_builder = ToolContextBuilder(formatter=self._tool_result_formatter)
 
     # ---------------------------------------------------------------------
     # Key helpers
@@ -260,17 +269,35 @@ class ProtocolBridge:
             raw=payload,
         )
 
-    def parse_anthropic_messages(self, payload: Dict[str, Any]) -> CanonicalRequest:
+    def parse_anthropic_messages(
+        self,
+        payload: Dict[str, Any],
+        *,
+        anthropic_beta_header: Optional[str] = None,
+    ) -> CanonicalRequest:
         model = str(payload.get("model") or "").strip()
         if not model:
             raise ValueError("model is required")
 
         stream = bool(payload.get("stream", False))
+        messages_raw = payload.get("messages") or []
+        if not isinstance(messages_raw, list):
+            raise ValueError("messages must be a list")
 
         system_prompt = self._flatten_anthropic_system(payload.get("system"))
+        anthropic_betas = self._normalize_anthropic_betas(
+            payload.get("anthropic_beta"),
+            anthropic_beta_header,
+        )
+        raw_messages = copy.deepcopy([item for item in messages_raw if isinstance(item, dict)])
+        self._normalize_anthropic_tool_result_tail(
+            raw_messages,
+            anthropic_betas=anthropic_betas,
+        )
+        self._validate_anthropic_tool_result_sequence(raw_messages)
 
         messages: List[CanonicalMessage] = []
-        for item in payload.get("messages") or []:
+        for item in raw_messages:
             if not isinstance(item, dict):
                 continue
             role = str(item.get("role") or "user")
@@ -293,6 +320,10 @@ class ProtocolBridge:
             top_p=self._to_optional_float(payload.get("top_p")),
             max_tokens=self._to_optional_int(payload.get("max_tokens")),
             response_language=self._detect_preferred_language(messages),
+            anthropic_beta=anthropic_betas,
+            thinking=self._parse_optional_dict(payload.get("thinking")),
+            metadata=self._parse_optional_dict(payload.get("metadata")) or {},
+            raw_messages=raw_messages,
             raw=payload,
         )
 
@@ -353,6 +384,7 @@ class ProtocolBridge:
 
     def render_prompt(self, request: CanonicalRequest) -> str:
         parts: List[str] = []
+        prompt_messages = self._messages_for_prompt_render(request)
 
         if request.system_prompt:
             parts.append(f"[System]\n{request.system_prompt}")
@@ -370,7 +402,7 @@ class ProtocolBridge:
                 )
             )
 
-        has_tool_results = self._has_tool_results(request.messages)
+        has_tool_results = self._has_tool_results(prompt_messages)
         parts.append(
             self._render_response_policy(
                 request.response_language,
@@ -379,7 +411,7 @@ class ProtocolBridge:
             )
         )
 
-        for msg in request.messages:
+        for msg in prompt_messages:
             label = self._role_label(msg.role)
             parts.append(f"[{label}]\n{msg.content}")
 
@@ -650,6 +682,26 @@ class ProtocolBridge:
 
         return str(content)
 
+    def _messages_for_prompt_render(self, request: CanonicalRequest) -> List[CanonicalMessage]:
+        if request.source != "anthropic_messages" or not request.raw_messages:
+            return request.messages
+
+        converted = self._tool_context_builder.build_context(request.raw_messages)
+        messages: List[CanonicalMessage] = []
+        for item in converted:
+            if not isinstance(item, dict):
+                continue
+            role = str(item.get("role") or "user")
+            if role not in {"user", "assistant"}:
+                role = "user"
+            content = item.get("content")
+            if content is None:
+                content = ""
+            if not isinstance(content, str):
+                content = str(content)
+            messages.append(CanonicalMessage(role=role, content=content))
+        return messages
+
     def _flatten_anthropic_system(self, value: Any) -> str:
         if value is None:
             return ""
@@ -712,9 +764,7 @@ class ProtocolBridge:
                         )
                     )
                 elif block_type == "tool_result":
-                    tool_id = str(block.get("tool_use_id") or "")
-                    result_text = self._flatten_anthropic_content(block.get("content"))
-                    pieces.append(f"[tool_result id={tool_id}]\n{result_text}")
+                    pieces.append(self._tool_result_formatter.format_tool_result(block))
                 else:
                     pieces.append(self._flatten_openai_content(block))
             return "\n".join(x for x in pieces if x)
@@ -723,6 +773,232 @@ class ProtocolBridge:
             return self._flatten_openai_content(content)
 
         return str(content)
+
+    @staticmethod
+    def _anthropic_content_blocks(content: Any) -> List[Any]:
+        if isinstance(content, list):
+            return content
+        if content is None:
+            return []
+        return [content]
+
+    @staticmethod
+    def _is_anthropic_tool_result_block(block: Any) -> bool:
+        return isinstance(block, dict) and str(block.get("type") or "") == "tool_result"
+
+    def _normalize_anthropic_tool_result_tail(
+        self,
+        messages: List[Dict[str, Any]],
+        *,
+        anthropic_betas: List[str],
+    ) -> None:
+        # Older Claude Code request shapes can end with:
+        #   user: [tool_result..., text/image/...]
+        # Anthropic rejects that shape if it is the final message. Do not split
+        # it into a new user turn; fold only the trailing sibling blocks into
+        # the last tool_result content so hidden worker directives do not leak.
+        if not any(beta.startswith("claude-code-") for beta in anthropic_betas):
+            return
+        if not messages:
+            return
+
+        last_message = messages[-1]
+        if str(last_message.get("role") or "user") != "user":
+            return
+
+        content = self._anthropic_content_blocks(last_message.get("content"))
+        if not content:
+            return
+
+        tail_start = len(content)
+        while tail_start > 0 and not self._is_anthropic_tool_result_block(content[tail_start - 1]):
+            tail_start -= 1
+
+        if tail_start <= 0 or tail_start == len(content):
+            return
+        if any(not self._is_anthropic_tool_result_block(block) for block in content[:tail_start]):
+            return
+
+        smooshed = self._smoosh_anthropic_tool_result_tail(
+            content[tail_start - 1],
+            content[tail_start:],
+        )
+        if smooshed is None:
+            return
+
+        last_message["content"] = [*content[: tail_start - 1], smooshed]
+
+    def _smoosh_anthropic_tool_result_tail(
+        self,
+        tool_result: Dict[str, Any],
+        trailing_blocks: List[Any],
+    ) -> Optional[Dict[str, Any]]:
+        if not trailing_blocks:
+            return copy.deepcopy(tool_result)
+
+        extra_items = self._normalize_anthropic_tool_result_items(trailing_blocks)
+        if not extra_items:
+            return copy.deepcopy(tool_result)
+
+        is_error = bool(tool_result.get("is_error", False))
+        if is_error and any(str(item.get("type") or "") != "text" for item in extra_items):
+            return None
+
+        existing = tool_result.get("content")
+        if (
+            isinstance(existing, list)
+            and any(
+                isinstance(item, dict) and str(item.get("type") or "") == "tool_reference"
+                for item in existing
+            )
+        ):
+            return None
+
+        if (
+            (existing is None or isinstance(existing, str))
+            and all(str(item.get("type") or "") == "text" for item in extra_items)
+        ):
+            pieces: List[str] = []
+            if isinstance(existing, str) and existing.strip():
+                pieces.append(existing.strip())
+            for item in extra_items:
+                text = str(item.get("text") or "").strip()
+                if text:
+                    pieces.append(text)
+
+            updated = copy.deepcopy(tool_result)
+            updated["content"] = "\n\n".join(pieces) if pieces else ""
+            return updated
+
+        merged_items = self._merge_anthropic_tool_result_items(
+            self._normalize_anthropic_tool_result_items(existing),
+            extra_items,
+        )
+        updated = copy.deepcopy(tool_result)
+        updated["content"] = merged_items
+        return updated
+
+    def _normalize_anthropic_tool_result_items(self, value: Any) -> List[Dict[str, Any]]:
+        if value is None:
+            return []
+        if isinstance(value, list):
+            source_items = value
+        else:
+            source_items = [value]
+
+        normalized: List[Dict[str, Any]] = []
+        for item in source_items:
+            normalized_item = self._normalize_anthropic_tool_result_item(item)
+            if normalized_item is not None:
+                normalized.append(normalized_item)
+        return normalized
+
+    def _normalize_anthropic_tool_result_item(self, item: Any) -> Optional[Dict[str, Any]]:
+        if isinstance(item, str):
+            text = item.strip()
+            return {"type": "text", "text": text} if text else None
+
+        if isinstance(item, dict):
+            block_type = str(item.get("type") or "")
+            if block_type in TEXT_PART_TYPES:
+                text = str(item.get("text") or "").strip()
+                return {"type": "text", "text": text} if text else None
+            if block_type in {"image", "document", "search_result", "tool_reference"}:
+                return copy.deepcopy(item)
+            dumped = json.dumps(item, ensure_ascii=False, separators=(",", ":"))
+            return {"type": "text", "text": dumped} if dumped else None
+
+        if isinstance(item, list):
+            dumped = json.dumps(item, ensure_ascii=False, separators=(",", ":"))
+            return {"type": "text", "text": dumped} if dumped else None
+
+        if item is None:
+            return None
+
+        text = str(item).strip()
+        return {"type": "text", "text": text} if text else None
+
+    @staticmethod
+    def _merge_anthropic_tool_result_items(
+        existing_items: List[Dict[str, Any]],
+        extra_items: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        merged: List[Dict[str, Any]] = []
+        for item in [*copy.deepcopy(existing_items), *copy.deepcopy(extra_items)]:
+            block_type = str(item.get("type") or "")
+            if block_type == "text":
+                text = str(item.get("text") or "").strip()
+                if not text:
+                    continue
+                if merged and str(merged[-1].get("type") or "") == "text":
+                    merged[-1]["text"] = f"{merged[-1].get('text', '')}\n\n{text}".strip()
+                else:
+                    merged.append({"type": "text", "text": text})
+                continue
+            merged.append(item)
+        return merged
+
+    def _validate_anthropic_tool_result_sequence(
+        self,
+        messages: List[Dict[str, Any]],
+    ) -> None:
+        if not messages:
+            return
+
+        last_message = messages[-1]
+        if str(last_message.get("role") or "user") != "user":
+            return
+
+        last_content = self._anthropic_content_blocks(last_message.get("content"))
+        has_tool_results = any(
+            isinstance(block, dict) and str(block.get("type") or "") == "tool_result"
+            for block in last_content
+        )
+        if not has_tool_results:
+            return
+
+        if any(
+            not isinstance(block, dict) or str(block.get("type") or "") != "tool_result"
+            for block in last_content
+        ):
+            raise ValueError(
+                "The last message must contain only tool_result content if any is present"
+            )
+
+        if len(messages) < 2:
+            raise ValueError(
+                "tool_result blocks are not matching any tool_use from the previous message"
+            )
+
+        previous_message = messages[-2]
+        previous_content = self._anthropic_content_blocks(previous_message.get("content"))
+        tool_use_ids = [
+            str(block.get("id") or "").strip()
+            for block in previous_content
+            if isinstance(block, dict) and str(block.get("type") or "") == "tool_use"
+        ]
+        tool_use_ids = [tool_id for tool_id in tool_use_ids if tool_id]
+
+        if not tool_use_ids:
+            raise ValueError(
+                "tool_result blocks are not matching any tool_use from the previous message"
+            )
+
+        tool_result_ids = [
+            str(block.get("tool_use_id") or "").strip()
+            for block in last_content
+            if isinstance(block, dict) and str(block.get("type") or "") == "tool_result"
+        ]
+
+        if (
+            any(not tool_id for tool_id in tool_result_ids)
+            or len(tool_use_ids) != len(set(tool_use_ids))
+            or len(tool_result_ids) != len(set(tool_result_ids))
+            or set(tool_use_ids) != set(tool_result_ids)
+        ):
+            raise ValueError(
+                "ids of tool_result blocks and tool_use blocks from previous message do not match"
+            )
 
     def _flatten_gemini_system(self, system_instruction: Any) -> str:
         if not isinstance(system_instruction, dict):
@@ -920,6 +1196,13 @@ class ProtocolBridge:
             lines.append(f"  schema={schema_text}")
             tool_names.append(tool.name)
 
+        if is_zh:
+            lines.append("只能调用上面列出的工具；不要发明未声明的工具名。")
+            lines.append("arguments 必须是符合对应 schema 的 JSON 对象。")
+        else:
+            lines.append("Call only the tools listed above; never invent undeclared tool names.")
+            lines.append("Arguments must be a JSON object that matches the selected tool schema.")
+
         normalized_tool_names = {name.lower() for name in tool_names}
         if "explore" in normalized_tool_names and "read" in normalized_tool_names:
             if is_zh:
@@ -931,12 +1214,97 @@ class ProtocolBridge:
 
         if tool_choice is not None:
             lines.append(f"tool_choice={json.dumps(tool_choice, ensure_ascii=False)}")
+            lines.extend(self._render_tool_choice_guidance(tool_choice, tool_names, response_language))
 
         if is_zh:
             lines.append("如需使用工具，返回工具调用，不要先输出完整结论。")
         else:
             lines.append("If a tool is required, return tool calls instead of plain prose.")
         return "\n".join(lines)
+
+    @staticmethod
+    def _extract_requested_tool_name(tool_choice: Any) -> Optional[str]:
+        if not isinstance(tool_choice, dict):
+            return None
+
+        direct_name = str(tool_choice.get("name") or "").strip()
+        if direct_name:
+            return direct_name
+
+        function_obj = tool_choice.get("function")
+        if isinstance(function_obj, dict):
+            function_name = str(function_obj.get("name") or "").strip()
+            if function_name:
+                return function_name
+
+        return None
+
+    @classmethod
+    def _render_tool_choice_guidance(
+        cls,
+        tool_choice: Any,
+        tool_names: List[str],
+        response_language: str,
+    ) -> List[str]:
+        is_zh = response_language == "zh"
+        available = set(tool_names)
+
+        choice_type = ""
+        if isinstance(tool_choice, str):
+            choice_type = tool_choice.strip().lower()
+        elif isinstance(tool_choice, dict):
+            choice_type = str(tool_choice.get("type") or "").strip().lower()
+
+        forced_tool_name = cls._extract_requested_tool_name(tool_choice)
+        if forced_tool_name:
+            if forced_tool_name in available:
+                if is_zh:
+                    return [
+                        f"本轮首个工具调用必须使用 `{forced_tool_name}`。",
+                        f"在调用 `{forced_tool_name}` 之前，不要先调用其他工具，也不要直接给最终答案。",
+                    ]
+                return [
+                    f"The first tool call in this turn must use `{forced_tool_name}`.",
+                    f"Do not call another tool before `{forced_tool_name}`, and do not skip straight to a final answer.",
+                ]
+            if is_zh:
+                return [
+                    f"请求指定工具 `{forced_tool_name}`，但它不在当前可用工具列表中。",
+                    "不要伪造替代工具；若无法满足，应明确说明当前声明工具不足。",
+                ]
+            return [
+                f"The request forces tool `{forced_tool_name}`, but it is not in the declared tool list.",
+                "Do not invent a substitute tool; if this cannot be satisfied, say the declared tools are insufficient.",
+            ]
+
+        if choice_type in {"any", "required"}:
+            if is_zh:
+                return [
+                    "本轮必须至少发起一次工具调用，不能只输出纯文本答案。",
+                ]
+            return [
+                "This turn must emit at least one tool call; do not answer with plain prose only.",
+            ]
+
+        if choice_type == "none":
+            if is_zh:
+                return [
+                    "本轮禁止调用工具；直接给出纯文本回答。",
+                ]
+            return [
+                "Do not call tools in this turn; reply with plain text only.",
+            ]
+
+        if choice_type == "auto":
+            if is_zh:
+                return [
+                    "仅在确有必要时调用工具；否则直接回答。",
+                ]
+            return [
+                "Call tools only when they are actually needed; otherwise answer directly.",
+            ]
+
+        return []
 
     def _render_response_policy(
         self,
@@ -1108,6 +1476,34 @@ class ProtocolBridge:
             return int(value)
         except Exception:
             return None
+
+    @staticmethod
+    def _parse_optional_dict(value: Any) -> Optional[Dict[str, Any]]:
+        if isinstance(value, dict):
+            return copy.deepcopy(value)
+        return None
+
+    @staticmethod
+    def _normalize_anthropic_betas(*values: Any) -> List[str]:
+        result: List[str] = []
+        seen = set()
+        for value in values:
+            if value is None:
+                continue
+            tokens: List[str] = []
+            if isinstance(value, str):
+                tokens = value.split(",")
+            elif isinstance(value, list):
+                for item in value:
+                    if isinstance(item, str):
+                        tokens.extend(item.split(","))
+            for token in tokens:
+                normalized = token.strip()
+                if not normalized or normalized in seen:
+                    continue
+                seen.add(normalized)
+                result.append(normalized)
+        return result
 
     @staticmethod
     def _unix_ts() -> int:

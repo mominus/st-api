@@ -16,6 +16,7 @@ from app.models.database import get_session
 from app.services.api_key import get_api_key_service
 from app.services.error_handler import APIError, get_error_handler
 from app.services.gateway_runtime import GatewayAuthError, get_gateway_runtime
+from app.services.history_budget import get_history_budget_service
 from app.services.protocol_bridge import CanonicalRequest, UsageNumbers, get_protocol_bridge
 
 logger = logging.getLogger(__name__)
@@ -90,6 +91,7 @@ async def generate_content(
     bridge = get_protocol_bridge()
     runtime = get_gateway_runtime()
     error_handler = get_error_handler()
+    history_budget = get_history_budget_service()
     request_id = runtime.resolve_request_id(headers=http_request.headers)
     start_time = time.time()
 
@@ -97,6 +99,17 @@ async def generate_content(
         body_json = await http_request.json()
         GenerateContentRequest(**body_json)
         canonical = bridge.parse_gemini_content(model, body_json, stream=False)
+        budget_result = history_budget.compact_request(bridge, canonical, runtime.token_counter)
+        if budget_result.applied:
+            logger.debug(
+                "Applied history budget request_id=%s source=%s original_tokens=%s compacted_tokens=%s dropped_messages=%s",
+                request_id,
+                canonical.source,
+                budget_result.original_tokens,
+                budget_result.compacted_tokens,
+                budget_result.dropped_messages,
+            )
+        canonical = budget_result.request
     except Exception as exc:
         error = error_handler.create_invalid_request_error(str(exc))
         return _gemini_error_response(error_handler, error, request_id=request_id)
@@ -141,6 +154,7 @@ async def generate_content(
             resolved=resolved,
             prompt_text=prompt_text,
             user_id=backend_user_id,
+            canonical=canonical,
         )
 
         backend_response = await runtime.run_sync(
@@ -224,6 +238,7 @@ async def stream_generate_content(
     bridge = get_protocol_bridge()
     runtime = get_gateway_runtime()
     error_handler = get_error_handler()
+    history_budget = get_history_budget_service()
     request_id = runtime.resolve_request_id(headers=http_request.headers)
     start_time = time.time()
 
@@ -231,6 +246,17 @@ async def stream_generate_content(
         body_json = await http_request.json()
         GenerateContentRequest(**body_json)
         canonical = bridge.parse_gemini_content(model, body_json, stream=True)
+        budget_result = history_budget.compact_request(bridge, canonical, runtime.token_counter)
+        if budget_result.applied:
+            logger.debug(
+                "Applied history budget request_id=%s source=%s original_tokens=%s compacted_tokens=%s dropped_messages=%s",
+                request_id,
+                canonical.source,
+                budget_result.original_tokens,
+                budget_result.compacted_tokens,
+                budget_result.dropped_messages,
+            )
+        canonical = budget_result.request
     except Exception as exc:
         error = error_handler.create_invalid_request_error(str(exc))
         return _gemini_error_response(error_handler, error, request_id=request_id)
@@ -275,6 +301,7 @@ async def stream_generate_content(
             resolved=resolved,
             prompt_text=prompt_text,
             user_id=backend_user_id,
+            canonical=canonical,
         )
 
         stream_gen = await runtime.run_stream(

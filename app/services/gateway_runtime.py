@@ -45,6 +45,7 @@ from app.services.response_transformer import ResponseTransformer, get_response_
 from app.services.st_usage import STUsage, choose_better_usage, extract_run_id, extract_usage, split_total_with_fallback
 from app.services.stats import StatsService, get_stats_service
 from app.services.token_counter import TokenCounter, get_token_counter
+from app.services.tool_context_builder import ToolContextBuilder
 from app.services.usage_aggregator import AsyncUsageAggregator, get_usage_aggregator
 
 logger = logging.getLogger(__name__)
@@ -785,12 +786,88 @@ class GatewayRuntime:
         fingerprint = hashlib.sha256(identity_material.encode("utf-8")).hexdigest()[:12]
         return f"api:{resolved.api_key.id}:req:{request_id}:{fingerprint}"
 
+    @staticmethod
+    def _mapped_field_name(input_mapping: Dict[str, str], logical_name: str) -> Optional[str]:
+        raw_value = input_mapping.get(logical_name)
+        if not isinstance(raw_value, str):
+            return None
+        field_name = raw_value.strip()
+        return field_name or None
+
+    @classmethod
+    def _format_chat_history_for_backend(cls, messages: list[Any]) -> str:
+        formatted_messages: list[str] = []
+        for message in messages:
+            role, content = cls._message_role_and_content(message)
+            if not isinstance(content, str) or not content.strip():
+                continue
+            label = "[Assistant]" if role == "assistant" else "[Human]"
+            formatted_messages.append(f"{label}\n{content}")
+        return "\n\n".join(formatted_messages)
+
+    @staticmethod
+    def _message_role_and_content(message: Any) -> Tuple[str, Any]:
+        if isinstance(message, dict):
+            role = str(message.get("role") or "user")
+            content = message.get("content", "")
+            return role, content
+        role = str(getattr(message, "role", "user") or "user")
+        content = getattr(message, "content", "")
+        return role, content
+
+    @classmethod
+    def _messages_for_backend_context(cls, canonical: Optional[Any]) -> list[Any]:
+        if canonical is None:
+            return []
+
+        source = str(getattr(canonical, "source", "") or "")
+        raw_messages = getattr(canonical, "raw_messages", None)
+        if source == "anthropic_messages" and isinstance(raw_messages, list) and raw_messages:
+            return ToolContextBuilder().build_context(raw_messages)
+
+        messages = getattr(canonical, "messages", None)
+        if isinstance(messages, list):
+            return messages
+        return []
+
+    @classmethod
+    def _split_prompt_context(
+        cls,
+        canonical: Optional[Any],
+        prompt_text: str,
+    ) -> Tuple[str, str]:
+        if canonical is None:
+            return prompt_text, ""
+
+        messages = cls._messages_for_backend_context(canonical)
+        if not messages:
+            return prompt_text, ""
+
+        latest_user_index: Optional[int] = None
+        for index in range(len(messages) - 1, -1, -1):
+            message = messages[index]
+            role, content = cls._message_role_and_content(message)
+            if role == "user" and isinstance(content, str) and content.strip():
+                latest_user_index = index
+                break
+
+        if latest_user_index is None:
+            return prompt_text, cls._format_chat_history_for_backend(messages)
+
+        _, latest_user_content = cls._message_role_and_content(messages[latest_user_index])
+        if not isinstance(latest_user_content, str) or not latest_user_content.strip():
+            return prompt_text, cls._format_chat_history_for_backend(messages)
+
+        history_messages = messages[:latest_user_index]
+        return latest_user_content, cls._format_chat_history_for_backend(history_messages)
+
     def build_backend_payload(
         self,
         *,
         resolved: ResolvedRequest,
         prompt_text: str,
         user_id: str = "anonymous",
+        canonical: Optional[Any] = None,
     ) -> Dict[str, Any]:
         payload: Dict[str, Any] = {
             "user_id": user_id,
@@ -799,11 +876,63 @@ class GatewayRuntime:
 
         input_mapping = resolved.input_mapping or {}
 
-        user_field = str(input_mapping.get("user_input") or "in-0")
-        payload[user_field] = prompt_text
+        user_field = self._mapped_field_name(input_mapping, "user_input") or "in-0"
+        has_structured_context_mapping = any(
+            self._mapped_field_name(input_mapping, logical_name)
+            for logical_name in ("system_prompt", "chat_history")
+        )
 
-        model_field = input_mapping.get("model_id") or input_mapping.get("model")
-        if isinstance(model_field, str) and model_field.strip():
+        user_input_value = prompt_text
+        chat_history_value = ""
+        if has_structured_context_mapping:
+            user_input_value, chat_history_value = self._split_prompt_context(canonical, prompt_text)
+        payload[user_field] = user_input_value
+
+        if canonical is not None:
+            system_field = self._mapped_field_name(input_mapping, "system_prompt")
+            system_prompt = getattr(canonical, "system_prompt", "")
+            if system_field and isinstance(system_prompt, str) and system_prompt:
+                payload[system_field] = system_prompt
+
+            chat_history_field = self._mapped_field_name(input_mapping, "chat_history")
+            if chat_history_field and chat_history_value:
+                payload[chat_history_field] = chat_history_value
+
+            max_tokens_field = self._mapped_field_name(input_mapping, "max_tokens")
+            max_tokens = getattr(canonical, "max_tokens", None)
+            if max_tokens_field and max_tokens is not None:
+                payload[max_tokens_field] = max_tokens
+
+            temperature_field = self._mapped_field_name(input_mapping, "temperature")
+            temperature = getattr(canonical, "temperature", None)
+            if temperature_field and temperature is not None:
+                payload[temperature_field] = temperature
+
+            tool_choice_field = self._mapped_field_name(input_mapping, "tool_choice")
+            tool_choice = getattr(canonical, "tool_choice", None)
+            if tool_choice_field and tool_choice is not None:
+                payload[tool_choice_field] = tool_choice
+
+            thinking_field = self._mapped_field_name(input_mapping, "thinking")
+            thinking = getattr(canonical, "thinking", None)
+            if thinking_field and isinstance(thinking, dict) and thinking:
+                payload[thinking_field] = thinking
+
+            metadata_field = self._mapped_field_name(input_mapping, "metadata")
+            metadata = getattr(canonical, "metadata", None)
+            if metadata_field and isinstance(metadata, dict) and metadata:
+                payload[metadata_field] = metadata
+
+            anthropic_beta_field = self._mapped_field_name(input_mapping, "anthropic_beta")
+            anthropic_beta = getattr(canonical, "anthropic_beta", None)
+            if anthropic_beta_field and isinstance(anthropic_beta, list) and anthropic_beta:
+                payload[anthropic_beta_field] = anthropic_beta
+
+        model_field = self._mapped_field_name(input_mapping, "model_id") or self._mapped_field_name(
+            input_mapping,
+            "model",
+        )
+        if model_field:
             payload[model_field] = resolved.model
 
         return payload

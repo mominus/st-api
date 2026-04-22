@@ -47,6 +47,16 @@ data/*.db
 # Logs
 *.log
 logs/
+/tmp/claude_code_regression_*.log
+/tmp/st_api_real_cli_smoke_*.log
+/tmp/st_api_real_cli_smoke_result.json
+
+# Generated Claude Code regression artifacts
+data/stress_reports/cc_dialogue_report_*.json
+data/stress_reports/cc_dialogue_requests_*.jsonl
+data/stress_reports/cc_dialogue_sessions_*.jsonl
+data/stress_reports/real_claude_cli_smoke_report_*.json
+data/stress_reports/claude_code_regression_gate_*.json
 
 # Testing
 .coverage
@@ -62,14 +72,4 @@ data/*.db-wal
 data/*.db-journal
 
 # Test files
-test_*.py
-!tests/test_protocol_bridge.py
-!tests/test_openai_stream_progress.py
-!tests/test_upstream_sanitizer.py
-!tests/test_account_pool_selection.py
-!tests/test_gateway_runtime_routing.py
-!tests/test_call_logger_cleanup.py
-!tests/test_call_logger_aggregates.py
-!tests/test_gateway_runtime_user_identity.py
-!tests/test_session_isolation_stress.py
-!tests/test_connection_pool_config.py
+/test_*.py

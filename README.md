@@ -1,5 +1,5 @@
 ---
-title: API Gateway
+title: st-api API 网关
 emoji: 🚀
 colorFrom: blue
 colorTo: purple
@@ -7,39 +7,174 @@ sdk: docker
 pinned: false
 ---
 
-# API Gateway
+# st-api API 网关
 
-A unified API gateway service with OpenAI, Anthropic, and Gemini compatible endpoints.
+一个统一的 API 网关服务，提供与 OpenAI、Anthropic、Gemini 兼容的接口。
 
-## Features
+## 功能特性
 
-- Multi-format API support (OpenAI, Anthropic, Gemini)
-- Streaming responses (SSE)
-- API key management
-- Usage tracking and quotas
-- Admin dashboard
+- 支持多种 API 协议格式（OpenAI、Anthropic、Gemini）
+- 支持流式响应（SSE）
+- API Key 管理
+- 用量跟踪与额度控制
+- 管理后台
 
-## Endpoints
+## 接口列表
 
-- `POST /v1/chat/completions` - OpenAI compatible
-- `POST /v1/messages` - Anthropic compatible
-- `POST /v1beta/models/{model}:generateContent` - Gemini compatible
-- `GET /v1/key/info` - Query models, status, usage, and available tokens for the current API key
-- `GET /health` - Health check
+- `POST /v1/chat/completions`：OpenAI 兼容接口
+- `POST /v1/messages`：Anthropic 兼容接口
+- `POST /v1beta/models/{model}:generateContent`：Gemini 兼容接口
+- `GET /v1/key/info`：查询当前 API Key 可用模型、状态、用量和剩余额度
+- `GET /health`：健康检查
 
-## Session Isolation (Important)
+## Claude Code 兼容性
 
-When multiple end users share one API key, clients should pass a stable session identity.  
-Otherwise the gateway falls back to request-level isolation (safe but no cross-request memory).
+为了尽可能贴近 Claude Code / Anthropic 的行为，推荐使用 model-group 的 `input_mapping`，让结构化请求上下文保持分离，而不是把所有内容压平成一个 prompt 字段。
 
-Supported ways:
+推荐映射结构：
 
-- Header: `X-ST-Session-ID: <tenant_or_user_session_id>` (recommended)
-- Header: `X-Session-ID: <tenant_or_user_session_id>`
-- OpenAI body: `user`
-- Any protocol body: `metadata.user_id` (or `metadata.user`)
+```json
+{
+  "user_input": "in-0",
+  "system_prompt": "in-1",
+  "chat_history": "in-2",
+  "model_id": "in-3",
+  "max_tokens": "in-4",
+  "temperature": "in-5",
+  "tool_choice": "in-6",
+  "thinking": "in-7",
+  "metadata": "in-8",
+  "anthropic_beta": "in-9"
+}
+```
 
-Examples:
+运行说明：
+
+- `user_input` 是唯一的硬性必填项。
+- 对 Claude Code 场景，强烈建议同时提供 `system_prompt` 和 `chat_history`，这样在退化成纯文本渲染之前，Anthropic 的工具轮次和更早的 assistant 上下文能保留得更久。
+- `max_tokens`、`temperature`、`tool_choice`、`thinking`、`metadata`、`anthropic_beta` 都是可选透传字段，只有当上游工作流暴露了对应输入时才需要映射。
+- 当 `anthropic-beta` 包含 `claude-code-20250219` 时，网关会优先走 Claude Code 工具流式路径。
+- 在 Anthropic 工具路径上，网关只会把当前请求里显式声明过工具名的 JSON / XML / 方括号工具调用升级为 `tool_use`；未声明的“像工具调用的文本”会保留为普通文本，不会被错误发成 `tool_use`。
+- `tool_choice` 目前以“尽力而为”的提示词引导方式生效（`required`、具名工具、`none`、`auto`），而不是上游原生的硬约束。
+- `thinking` 通过 `<thinking>...</thinking>` 这类文本标签做尽力重建，并不是 Anthropic 原生的 reasoning 支持。
+- 当 `tools` 和 `thinking` 同时存在时，当前实现会优先保证工具状态机行为正确。
+- 网关现在会在渲染上游 prompt 之前先应用服务端历史预算；较早的对话轮次可能会在请求发出前被压缩掉。
+- 历史预算相关环境变量：
+  - `GATEWAY_HISTORY_BUDGET_ENABLED=true|false`
+  - `GATEWAY_HISTORY_BUDGET_TOKENS=120000`
+  - `GATEWAY_HISTORY_COMPACT_MAX_CHARS=1200`
+  - `GATEWAY_HISTORY_COMPACT_RECENT_MESSAGES=4`
+- 管理后台的 model-group 响应以及 `GET /v1/key/info` 现在都会返回一个面向 Claude Code 场景推导出的 `capability_matrix`。
+- `capability_matrix` 使用以下稳定状态值：
+  - `native`：通过 `input_mapping` 直接透传到上游工作流输入
+  - `simulated`：由网关重建行为，或通过提示词进行能力引导
+  - `unsupported`：当前 StackAI 路径未暴露为受支持的 Anthropic 兼容能力
+- 管理后台的 model-group 创建 / 更新接口现在也接受可选的 `capability_overrides` JSON，用于极少数特殊工作流。
+  只有当上游工作流确实具备比默认网关假设更强的原生支持时才应使用。
+  不要把仅依赖提示词模拟或文本重建的行为标记为 `native`。
+
+真实 Claude CLI 冒烟测试：
+
+- 使用 [run_local_real_claude_cli_smoke.sh](./scripts/run_local_real_claude_cli_smoke.sh) 验证完整的 `claude` CLI -> `st-api` -> Anthropic `/v1/messages` 链路，提示词设计为应在单轮内收敛。
+- 当 `ST_API_KEY` 未设置时，脚本会先启动本地网关，再通过管理 API 创建一个临时 API Key，执行一次真实 `claude` 请求，校验 JSON 结果载荷，最后删除这个临时 key。
+- 成功时会打印 `gate_status=PASS`；失败时会打印 `gate_status=FAIL`，并附带失败阶段与原因。
+- 脚本还会把结构化 gate 报告写入 `data/stress_reports/real_claude_cli_smoke_report_*.json`。
+- 默认要求回答中同时包含 `Vue` 和 `Vite`。如果你故意修改了 smoke prompt，可通过 `EXPECTED_SUBSTRINGS=...` 覆盖。
+- 默认前置条件：
+  - 本地已安装 `claude` CLI，且在 `PATH` 中可用
+  - 本地可用管理后台凭据，通过 `ADMIN_USERNAME` / `ADMIN_PASSWORD` 提供，或使用默认值 `admin` / `admin123`
+  - 本地已存在模型组 `claude-opus-4-6`，否则请通过 `MODEL=...` 覆盖
+
+示例：
+
+```bash
+cd /home/ww/Project/st-api
+bash scripts/run_local_real_claude_cli_smoke.sh
+```
+
+常用覆盖参数：
+
+```bash
+MODEL=claude-opus-4-6 \
+PROMPT='@BookmarkVault 仅用最少工具，告诉我这个项目主要使用什么前端框架和构建工具。回答控制在3行内，不要继续扩展。' \
+EXPECTED_SUBSTRINGS='Vue,Vite' \
+CLAUDE_TIMEOUT_SECONDS=180 \
+bash scripts/run_local_real_claude_cli_smoke.sh
+```
+
+统一 Claude Code 回归闸门：
+
+- 使用 [run_claude_code_regression_gate.sh](./scripts/run_claude_code_regression_gate.sh) 执行一条命令的本地验收。
+- 该脚本会先运行聚焦的 Claude Code 兼容性 pytest 测试集，然后再运行真实 Claude CLI smoke gate。
+- 顶层 gate 报告会写入 `data/stress_reports/claude_code_regression_gate_*.json`。
+- 如果只想执行协议 / 单元回归部分，可设置 `SKIP_REAL_CLI_SMOKE=1`。
+- 如需在 gate 成功后清理旧的 Claude Code 生成产物，可设置 `AUTO_CLEANUP=1`。
+- 使用 `AUTO_CLEANUP_KEEP_LATEST=N` 控制保留数量，使用 `AUTO_CLEANUP_DRY_RUN=1` 先预览而不删除。
+
+示例：
+
+```bash
+cd /home/ww/Project/st-api
+bash scripts/run_claude_code_regression_gate.sh
+```
+
+```bash
+cd /home/ww/Project/st-api
+AUTO_CLEANUP=1 AUTO_CLEANUP_KEEP_LATEST=2 bash scripts/run_claude_code_regression_gate.sh
+```
+
+```bash
+cd /home/ww/Project/st-api
+SKIP_REAL_CLI_SMOKE=1 AUTO_CLEANUP=1 AUTO_CLEANUP_DRY_RUN=1 \
+bash scripts/run_claude_code_regression_gate.sh
+```
+
+生成产物清理：
+
+- 使用 [cleanup_claude_code_artifacts.sh](./scripts/cleanup_claude_code_artifacts.sh) 只清理自动生成的 Claude Code 校验产物。
+- 它不会触碰已经纳入仓库管理的历史压测基线文件，例如 `stress_report_*`、`stress_details_*`、`session_stats_*`。
+- 默认行为是每一类生成产物保留最新的 `3` 个文件。
+
+示例：
+
+```bash
+cd /home/ww/Project/st-api
+bash scripts/cleanup_claude_code_artifacts.sh --dry-run
+```
+
+```bash
+cd /home/ww/Project/st-api
+bash scripts/cleanup_claude_code_artifacts.sh --keep-latest 2
+```
+
+`capability_overrides` 示例：
+
+```json
+{
+  "image_input": {
+    "status": "native",
+    "detail": "该工作流通过自定义上游适配器接受 Anthropic 风格的图片块。"
+  },
+  "tool_use": {
+    "status": "unsupported",
+    "detail": "该工作流是纯文本流程，不应声明工具重建能力。"
+  }
+}
+```
+
+## 会话隔离（重要）
+
+当多个终端用户共享同一个 API Key 时，客户端应该传入一个稳定的会话身份。  
+否则网关会退回到请求级隔离模式（安全，但不会保留跨请求记忆）。
+
+支持的传递方式：
+
+- 请求头：`X-ST-Session-ID: <tenant_or_user_session_id>`（推荐）
+- 请求头：`X-Session-ID: <tenant_or_user_session_id>`
+- OpenAI 请求体：`user`
+- 任意协议请求体：`metadata.user_id`（或 `metadata.user`）
+
+示例：
 
 ```bash
 curl -X POST "https://api.example.com/v1/chat/completions" \
@@ -63,23 +198,23 @@ curl -X POST "https://api.example.com/v1/messages" \
   }'
 ```
 
-## API Key Model Info
+## API Key 模型信息
 
-Use `GET /v1/key/info` to query the current key's available models and each model's current status, unavailable reasons, used tokens, and available tokens.
+通过 `GET /v1/key/info` 可以查询当前 key 可用的模型列表，以及每个模型的当前状态、不可用原因、已用 token 和可用 token。
 
-Supported auth methods:
+支持的鉴权方式：
 
 - `Authorization: Bearer sk-xxx`
 - `x-api-key: sk-xxx`
-- Browser query: `/v1/key/info?key=sk-xxx`
+- 浏览器查询参数：`/v1/key/info?key=sk-xxx`
 
-Example request:
+示例请求：
 
 ```bash
 curl "http://127.0.0.1:8000/v1/key/info?key=sk-xxx"
 ```
 
-Example response:
+示例响应：
 
 ```json
 {
@@ -89,7 +224,16 @@ Example response:
       "status": "active",
       "unavailable_reasons": [],
       "current_usage": "1.2K tokens",
-      "available_tokens": "1.5M tokens"
+      "available_tokens": "1.5M tokens",
+      "capability_matrix": {
+        "profile": "claude_code",
+        "source": "derived_from_model_group_input_mapping_and_gateway_defaults",
+        "summary": {
+          "native": 5,
+          "simulated": 4,
+          "unsupported": 8
+        }
+      }
     },
     {
       "model": "claude-opus-4-1",
@@ -102,20 +246,20 @@ Example response:
 }
 ```
 
-## Environment Quick Start
+## 环境变量快速开始
 
-Start from [`.env.example`](./.env.example). It is organized in the same order you usually configure the service:
+从 [`.env.example`](./.env.example) 开始。这个文件已经按照通常配置服务的顺序排好：
 
-1. Minimal required values
-2. Common production settings
-3. PostgreSQL / 47-connection starter profile
-4. Gateway concurrency and queueing
-5. Upstream HTTP pool, retry, and account failover
-6. Async persistence and log shedding
+1. 最小必填项
+2. 常用生产配置
+3. PostgreSQL / 47 连接起步配置
+4. 网关并发与排队
+5. 上游 HTTP 连接池、重试与账号切换
+6. 异步持久化与日志降载
 7. Tool Use
-8. Legacy compatibility vars
+8. 兼容旧变量
 
-Change these first:
+优先修改这些变量：
 
 - `BACKEND_API_URL`
 - `DATABASE_URL`
@@ -124,7 +268,7 @@ Change these first:
 - `ADMIN_USERNAME`
 - `ADMIN_PASSWORD`
 
-Common optional production vars:
+常见的生产环境可选变量：
 
 - `ADMIN_PATH`
 - `PROXY_SHARED_SECRET`
@@ -133,17 +277,17 @@ Common optional production vars:
 - `LOG_LEVEL`
 - `LOG_FILE`
 
-Notes:
+说明：
 
-- Values in `.env.example` are production-oriented starter values, not necessarily the code defaults.
-- For new deployments, prefer the newer vars and avoid the legacy compatibility vars at the bottom of the file.
-- For tool-heavy Claude Code workloads, focus tuning on request concurrency, HTTP pool sizing, DB pool sizing, and per-account inflight protection.
+- `.env.example` 里的值主要是面向生产环境的起步配置，不一定等于代码内置默认值。
+- 对新部署，优先使用较新的变量，不要继续依赖文件底部的兼容旧变量。
+- 对工具调用较重的 Claude Code 场景，调优时应重点关注请求并发、HTTP 连接池、数据库连接池以及单账号飞行中请求保护。
 
-## PostgreSQL Profile (2c/4g + 47 Connections)
+## PostgreSQL 配置建议（2c/4g + 47 连接）
 
-SQLite is still supported. For PostgreSQL, start with the profile already grouped in [`.env.example`](./.env.example).
+项目仍然支持 SQLite。若使用 PostgreSQL，建议从 [`.env.example`](./.env.example) 里已经分组好的这一套配置起步。
 
-Recommended start values for `2c/4g` app + managed PostgreSQL (`connection_limit=47`):
+针对 `2c/4g` 应用实例 + 托管 PostgreSQL（`connection_limit=47`）的推荐起步值如下：
 
 ```env
 DATABASE_URL=postgresql+asyncpg://USER:PASSWORD@HOST:25060/defaultdb?ssl=require
@@ -167,7 +311,7 @@ BACKGROUND_LOG_WORKERS=2
 ASYNC_USAGE_WORKERS=2
 ```
 
-Optional PostgreSQL timeout settings:
+可选的 PostgreSQL 超时配置：
 
 ```env
 POSTGRES_CONNECT_TIMEOUT_SECONDS=8
@@ -177,21 +321,21 @@ POSTGRES_LOCK_TIMEOUT_MS=5000
 POSTGRES_APPLICATION_NAME=st-api
 ```
 
-Pool budget quick check:
+快速检查连接池预算：
 
 ```bash
 python scripts/check_pg_pool_budget.py
 ```
 
-## Release Management
+## 发布管理
 
-This project now includes built-in changelog + version release workflow:
+项目内置了 changelog + 版本发布工作流：
 
-- `VERSION`: single source of release version.
-- `CHANGELOG.md`: records each release change.
-- `scripts/release.py`: release helper.
+- `VERSION`：发布版本的单一事实来源
+- `CHANGELOG.md`：记录每次发布的变更
+- `scripts/release.py`：发布辅助脚本
 
-### Prepare a release entry
+### 准备一条发布记录
 
 ```bash
 python scripts/release.py --version 1.0.1 \
@@ -199,28 +343,55 @@ python scripts/release.py --version 1.0.1 \
   --note "变更说明2"
 ```
 
-### One-command publish to Hugging Face
+### 运行 Claude Code gate 后再准备发布记录
 
 ```bash
 python scripts/release.py --version 1.0.1 \
   --note "变更说明1" \
   --note "变更说明2" \
+  --run-claude-code-gate
+```
+
+如果本地环境暂时还没有可用的 `claude` CLI，也可以先只执行聚焦的 pytest gate：
+
+```bash
+python scripts/release.py --version 1.0.1 \
+  --note "变更说明1" \
+  --run-claude-code-gate \
+  --gate-skip-real-cli-smoke
+```
+
+### 一条命令发布到 Hugging Face
+
+```bash
+python scripts/release.py --version 1.0.1 \
+  --note "变更说明1" \
+  --note "变更说明2" \
+  --run-claude-code-gate \
   --commit --tag --push --remote origin --branch main
 ```
 
-### Download specific version
+常用的 gate 参数：
+
+- `--gate-python-bin /path/to/python`：覆盖 `run_claude_code_regression_gate.sh` 使用的 Python 解释器
+- `--gate-skip-real-cli-smoke`：在修改发布内容前只运行聚焦的 pytest 测试集
+- `--gate-auto-cleanup`：gate 成功后清理较旧的 Claude Code 生成产物
+- `--gate-auto-cleanup-keep-latest N`：设置生成产物保留数量
+- `--gate-auto-cleanup-dry-run`：只预览清理结果，不实际删除
+
+### 下载指定版本
 
 ```bash
 git clone --branch v1.0.1 https://huggingface.co/spaces/<username>/st-api
 ```
 
-List released versions:
+列出已发布版本：
 
 ```bash
 git ls-remote --tags https://huggingface.co/spaces/<username>/st-api
 ```
 
-Or with `huggingface_hub`:
+或使用 `huggingface_hub`：
 
 ```python
 from huggingface_hub import snapshot_download
@@ -231,6 +402,6 @@ snapshot_download(
 )
 ```
 
-## License
+## 许可证
 
 MIT

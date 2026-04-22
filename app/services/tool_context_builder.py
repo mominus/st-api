@@ -114,6 +114,10 @@ class ToolContextBuilder:
             转换后的文本内容
         """
         parts = []
+        has_tool_use = role == "assistant" and any(
+            isinstance(block, dict) and block.get("type") == "tool_use"
+            for block in content_blocks
+        )
         
         for block in content_blocks:
             if not isinstance(block, dict):
@@ -127,7 +131,8 @@ class ToolContextBuilder:
             if block_type == "text":
                 # 文本块
                 text = block.get("text", "")
-                if text:
+                # assistant mixed text + tool_use 常带有临时草稿；保留 tool_use，抑制这类前置文本。
+                if text and not has_tool_use:
                     parts.append(text)
             
             elif block_type == "tool_use":

@@ -13,10 +13,12 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import os
 import pathlib
 import re
 import subprocess
 import sys
+from dataclasses import dataclass
 from typing import List, Optional
 
 
@@ -24,8 +26,27 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 VERSION_FILE = ROOT / "VERSION"
 CHANGELOG_FILE = ROOT / "CHANGELOG.md"
 APP_INIT_FILE = ROOT / "app" / "__init__.py"
+CLAUDE_CODE_GATE_SCRIPT = ROOT / "scripts" / "run_claude_code_regression_gate.sh"
+CLAUDE_CODE_GATE_REPORT_DIR = ROOT / "data" / "stress_reports"
 
 SEMVER_PATTERN = re.compile(r"^\d+\.\d+\.\d+$")
+
+
+@dataclass(frozen=True)
+class ClaudeCodeGateOptions:
+    enabled: bool = False
+    python_bin: Optional[str] = None
+    skip_real_cli_smoke: bool = False
+    auto_cleanup: bool = False
+    auto_cleanup_keep_latest: int = 3
+    auto_cleanup_dry_run: bool = False
+
+
+@dataclass(frozen=True)
+class ClaudeCodeGateResult:
+    run_tag: str
+    report_path: pathlib.Path
+    exit_code: int
 
 
 def run_git(args: List[str], check: bool = True) -> str:
@@ -42,6 +63,80 @@ def run_git(args: List[str], check: bool = True) -> str:
 def validate_version(version: str) -> None:
     if not SEMVER_PATTERN.match(version):
         raise ValueError("Version must be SemVer format: x.y.z")
+
+
+def utc_now() -> dt.datetime:
+    return dt.datetime.now(dt.timezone.utc)
+
+
+def build_claude_code_gate_run_tag(now: Optional[dt.datetime] = None) -> str:
+    timestamp = (now or utc_now()).strftime("%Y%m%dT%H%M%SZ")
+    return f"release_{timestamp}"
+
+
+def build_claude_code_gate_report_path(run_tag: str) -> pathlib.Path:
+    return CLAUDE_CODE_GATE_REPORT_DIR / f"claude_code_regression_gate_{run_tag}.json"
+
+
+def build_claude_code_gate_env(
+    options: ClaudeCodeGateOptions,
+    *,
+    run_tag: str,
+    report_path: pathlib.Path,
+) -> dict[str, str]:
+    env = os.environ.copy()
+    env["RUN_TAG"] = run_tag
+    env["REPORT_JSON"] = str(report_path)
+    if options.python_bin:
+        env["PYTHON_BIN"] = options.python_bin
+    if options.skip_real_cli_smoke:
+        env["SKIP_REAL_CLI_SMOKE"] = "1"
+    if options.auto_cleanup:
+        env["AUTO_CLEANUP"] = "1"
+        env["AUTO_CLEANUP_KEEP_LATEST"] = str(options.auto_cleanup_keep_latest)
+        if options.auto_cleanup_dry_run:
+            env["AUTO_CLEANUP_DRY_RUN"] = "1"
+    return env
+
+
+def validate_claude_code_gate_options(options: ClaudeCodeGateOptions) -> None:
+    if not options.enabled:
+        return
+    if options.auto_cleanup_keep_latest < 1:
+        raise ValueError("Claude Code gate auto-cleanup keep-latest must be >= 1")
+
+
+def run_claude_code_gate(
+    options: ClaudeCodeGateOptions,
+    *,
+    runner=subprocess.run,
+    now_factory=utc_now,
+) -> ClaudeCodeGateResult:
+    validate_claude_code_gate_options(options)
+    if not options.enabled:
+        raise ValueError("Claude Code gate is not enabled")
+
+    run_tag = build_claude_code_gate_run_tag(now_factory())
+    report_path = build_claude_code_gate_report_path(run_tag)
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    env = build_claude_code_gate_env(options, run_tag=run_tag, report_path=report_path)
+
+    result = runner(
+        ["bash", str(CLAUDE_CODE_GATE_SCRIPT)],
+        cwd=ROOT,
+        env=env,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            "Claude Code regression gate failed before release publish "
+            f"(report: {report_path})"
+        )
+    return ClaudeCodeGateResult(
+        run_tag=run_tag,
+        report_path=report_path,
+        exit_code=result.returncode,
+    )
 
 
 def read_current_version() -> str:
@@ -157,7 +252,7 @@ def commit_release(version: str, message: Optional[str] = None) -> None:
     run_git(["commit", "-m", commit_message])
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Prepare and publish a release.")
     parser.add_argument("--version", required=True, help="Release version, SemVer format (x.y.z)")
     parser.add_argument(
@@ -177,20 +272,74 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--push", action="store_true", help="Push current branch and tags")
     parser.add_argument("--remote", default="origin", help="Git remote name for push")
     parser.add_argument("--branch", default="main", help="Git branch name for push")
-    return parser.parse_args()
+    parser.add_argument(
+        "--run-claude-code-gate",
+        action="store_true",
+        help="Run the Claude Code regression gate before mutating release files",
+    )
+    parser.add_argument(
+        "--gate-python-bin",
+        default=None,
+        help="Override PYTHON_BIN for the Claude Code regression gate",
+    )
+    parser.add_argument(
+        "--gate-skip-real-cli-smoke",
+        action="store_true",
+        help="Run only the pytest portion of the Claude Code gate",
+    )
+    parser.add_argument(
+        "--gate-auto-cleanup",
+        action="store_true",
+        help="Prune older generated Claude Code artifacts after a successful gate run",
+    )
+    parser.add_argument(
+        "--gate-auto-cleanup-keep-latest",
+        type=int,
+        default=3,
+        help="Retention count passed to the Claude Code gate cleanup step",
+    )
+    parser.add_argument(
+        "--gate-auto-cleanup-dry-run",
+        action="store_true",
+        help="Preview Claude Code artifact cleanup without deleting files",
+    )
+    return parser.parse_args(argv)
 
 
-def main() -> int:
-    args = parse_args()
+def main(argv: Optional[List[str]] = None) -> int:
+    args = parse_args(argv)
 
     try:
         validate_version(args.version)
         if (args.tag or args.push) and not args.commit:
             raise RuntimeError("--tag/--push requires --commit to ensure tag points to release commit")
+        if (
+            args.gate_python_bin
+            or args.gate_skip_real_cli_smoke
+            or args.gate_auto_cleanup
+            or args.gate_auto_cleanup_keep_latest != 3
+            or args.gate_auto_cleanup_dry_run
+        ) and not args.run_claude_code_gate:
+            raise RuntimeError(
+                "--gate-* options require --run-claude-code-gate"
+            )
 
         current_version = read_current_version()
         if current_version == args.version:
             raise RuntimeError(f"Version is already {args.version}")
+
+        gate_options = ClaudeCodeGateOptions(
+            enabled=args.run_claude_code_gate,
+            python_bin=args.gate_python_bin,
+            skip_real_cli_smoke=args.gate_skip_real_cli_smoke,
+            auto_cleanup=args.gate_auto_cleanup,
+            auto_cleanup_keep_latest=args.gate_auto_cleanup_keep_latest,
+            auto_cleanup_dry_run=args.gate_auto_cleanup_dry_run,
+        )
+        validate_claude_code_gate_options(gate_options)
+        gate_result = None
+        if gate_options.enabled:
+            gate_result = run_claude_code_gate(gate_options)
 
         latest_tag = get_latest_tag()
         commit_subjects = get_commit_subjects_since(latest_tag)
@@ -218,6 +367,8 @@ def main() -> int:
         print(f"- {VERSION_FILE.relative_to(ROOT)}")
         print(f"- {APP_INIT_FILE.relative_to(ROOT)}")
         print(f"- {CHANGELOG_FILE.relative_to(ROOT)}")
+        if gate_result:
+            print(f"Claude Code gate report: {gate_result.report_path.relative_to(ROOT)}")
         if args.commit:
             print(f"Release commit created: {args.commit_message or f'release: v{args.version}'}")
         if args.tag:

@@ -761,6 +761,10 @@
                     <label for="group-input-mapping">输入字段映射 (JSON)</label>
                     <textarea id="group-input-mapping" placeholder='{"user_input": "in-0", "model_id": "in-1"}'></textarea>
                 </div>
+                <div class="form-group">
+                    <label for="group-capability-overrides">能力覆盖 (JSON，可选)</label>
+                    <textarea id="group-capability-overrides" placeholder='{"image_input":{"status":"native","detail":"Workflow accepts image blocks directly"}}'></textarea>
+                </div>
                 <div class="modal-footer">
                     <button type="button" class="btn btn-secondary" onclick="closeModal('group-modal')">取消</button>
                     <button type="submit" class="btn btn-primary">保存</button>

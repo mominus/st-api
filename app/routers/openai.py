@@ -11,13 +11,16 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, Header, Query, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.database import get_session
+from app.models.database import ModelGroup, get_session
 from app.services.api_key import get_api_key_service
+from app.services.capability_matrix import parse_capability_overrides, parse_input_mapping
 from app.services.call_logger import get_call_logger_service
 from app.services.error_handler import APIError, get_error_handler
 from app.services.gateway_runtime import GatewayAuthError, get_gateway_runtime
+from app.services.history_budget import get_history_budget_service
 from app.services.key_info import build_public_key_info_payload
 from app.services.protocol_bridge import (
     CanonicalRequest,
@@ -360,6 +363,7 @@ async def chat_completions(
     bridge = get_protocol_bridge()
     runtime = get_gateway_runtime()
     error_handler = get_error_handler()
+    history_budget = get_history_budget_service()
     request_id = runtime.resolve_request_id(headers=http_request.headers)
     start_time = time.time()
 
@@ -368,6 +372,17 @@ async def chat_completions(
         # Validation-only parse (keeps extra fields).
         ChatCompletionRequest(**body_json)
         canonical = bridge.parse_openai_chat(body_json)
+        budget_result = history_budget.compact_request(bridge, canonical, runtime.token_counter)
+        if budget_result.applied:
+            logger.debug(
+                "Applied history budget request_id=%s source=%s original_tokens=%s compacted_tokens=%s dropped_messages=%s",
+                request_id,
+                canonical.source,
+                budget_result.original_tokens,
+                budget_result.compacted_tokens,
+                budget_result.dropped_messages,
+            )
+        canonical = budget_result.request
     except Exception as exc:
         error = error_handler.create_invalid_request_error(str(exc))
         return _openai_error_response(error_handler, error, request_id=request_id)
@@ -411,6 +426,7 @@ async def chat_completions(
             resolved=resolved,
             prompt_text=prompt_text,
             user_id=backend_user_id,
+            canonical=canonical,
         )
 
         if canonical.stream:
@@ -704,6 +720,7 @@ async def create_response(
     bridge = get_protocol_bridge()
     runtime = get_gateway_runtime()
     error_handler = get_error_handler()
+    history_budget = get_history_budget_service()
     request_id = runtime.resolve_request_id(headers=http_request.headers)
     start_time = time.time()
 
@@ -711,6 +728,17 @@ async def create_response(
         body_json = await http_request.json()
         ResponsesRequest(**body_json)
         canonical = bridge.parse_openai_responses(body_json)
+        budget_result = history_budget.compact_request(bridge, canonical, runtime.token_counter)
+        if budget_result.applied:
+            logger.debug(
+                "Applied history budget request_id=%s source=%s original_tokens=%s compacted_tokens=%s dropped_messages=%s",
+                request_id,
+                canonical.source,
+                budget_result.original_tokens,
+                budget_result.compacted_tokens,
+                budget_result.dropped_messages,
+            )
+        canonical = budget_result.request
     except Exception as exc:
         error = error_handler.create_invalid_request_error(str(exc))
         return _openai_error_response(error_handler, error, request_id=request_id)
@@ -754,6 +782,7 @@ async def create_response(
             resolved=resolved,
             prompt_text=prompt_text,
             user_id=backend_user_id,
+            canonical=canonical,
         )
 
         if canonical.stream:
@@ -1194,6 +1223,16 @@ async def get_current_key_info(
             session,
             allowed_models,
         )
+        model_group_result = await session.execute(
+            select(ModelGroup).where(ModelGroup.name.in_(allowed_models))
+        )
+        model_group_settings = {
+            item.name: {
+                "input_mapping": parse_input_mapping(item.input_mapping),
+                "capability_overrides": parse_capability_overrides(item.capability_overrides),
+            }
+            for item in model_group_result.scalars().all()
+        }
 
         models: List[Dict[str, Any]] = []
         for model_name in allowed_models:
@@ -1202,6 +1241,10 @@ async def get_current_key_info(
                     "id": model_name,
                     "accounts": accounts_by_model.get(model_name, []),
                     "usage": usage_by_model.get(model_name),
+                    "input_mapping": model_group_settings.get(model_name, {}).get("input_mapping", {}),
+                    "capability_overrides": model_group_settings.get(model_name, {}).get(
+                        "capability_overrides", {}
+                    ),
                 }
             )
         return api_key_obj, models

@@ -2056,6 +2056,7 @@ function showAddGroupModal() {
     document.getElementById('group-id').value = '';
     document.getElementById('group-name').disabled = false; // 新建时启用名称输入
     document.getElementById('group-input-mapping').value = '{"user_input": "in-0", "model_id": "in-1"}';
+    document.getElementById('group-capability-overrides').value = '{}';
     openModal('group-modal');
 }
 
@@ -2069,6 +2070,7 @@ function editGroup(id) {
     document.getElementById('group-name').disabled = true; // 编辑时禁用名称修改
     document.getElementById('group-description').value = group.description || '';
     document.getElementById('group-input-mapping').value = JSON.stringify(group.input_mapping || {}, null, 2);
+    document.getElementById('group-capability-overrides').value = JSON.stringify(group.capability_overrides || {}, null, 2);
     
     openModal('group-modal');
 }
@@ -2078,6 +2080,7 @@ async function handleGroupSubmit(e) {
     
     const id = document.getElementById('group-id').value;
     let inputMapping = {};
+    let capabilityOverrides = {};
     
     try {
         const mappingStr = document.getElementById('group-input-mapping').value;
@@ -2088,13 +2091,24 @@ async function handleGroupSubmit(e) {
         showToast('输入字段映射格式错误，请输入有效的 JSON', 'error');
         return;
     }
+
+    try {
+        const overridesStr = document.getElementById('group-capability-overrides').value;
+        if (overridesStr) {
+            capabilityOverrides = JSON.parse(overridesStr);
+        }
+    } catch (error) {
+        showToast('能力覆盖格式错误，请输入有效的 JSON', 'error');
+        return;
+    }
     
     try {
         if (id) {
             // 编辑时只更新 description 和 input_mapping（name 不可修改）
             const updateData = {
                 description: document.getElementById('group-description').value,
-                input_mapping: inputMapping
+                input_mapping: inputMapping,
+                capability_overrides: capabilityOverrides
             };
             await apiCall(`/groups/${id}`, { method: 'PUT', body: JSON.stringify(updateData) });
             showToast('模型组已更新', 'success');
@@ -2103,7 +2117,8 @@ async function handleGroupSubmit(e) {
             const createData = {
                 name: document.getElementById('group-name').value,
                 description: document.getElementById('group-description').value,
-                input_mapping: inputMapping
+                input_mapping: inputMapping,
+                capability_overrides: capabilityOverrides
             };
             await apiCall('/groups', { method: 'POST', body: JSON.stringify(createData) });
             showToast('模型组已添加', 'success');

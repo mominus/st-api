@@ -15,6 +15,8 @@ sys.path.insert(0, str(project_root))
 from dotenv import load_dotenv
 load_dotenv()
 
+from app import __version__ as APP_VERSION
+
 
 def main():
     """启动 API 服务器"""
@@ -31,7 +33,7 @@ def main():
 
     print(f"""
 ╔═══════════════════════════════════════════════════════════════╗
-║                      API Service v1.0.0                       ║
+║                      API Service v{APP_VERSION:<5}                       ║
 ╠═══════════════════════════════════════════════════════════════╣
 ║  Server: http://{host}:{port:<5}                                ║
 ║  Debug: {'ON ' if debug else 'OFF'}                                               ║

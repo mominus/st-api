@@ -5,6 +5,7 @@ Error Handler Service
 Requirements: 8.1
 """
 
+import re
 from typing import Optional, Dict, Any, Literal
 from dataclasses import dataclass
 from enum import Enum
@@ -65,6 +66,9 @@ class ErrorHandler:
         "quota_exceeded": ErrorType.QUOTA_EXCEEDED,
         "invalid_request": ErrorType.INVALID_REQUEST,
         "bad_request": ErrorType.INVALID_REQUEST,
+        "prompt_too_long": ErrorType.INVALID_REQUEST,
+        "context_length_exceeded": ErrorType.INVALID_REQUEST,
+        "model_context_window_exceeded": ErrorType.INVALID_REQUEST,
         "server_error": ErrorType.SERVER_ERROR,
         "internal_error": ErrorType.SERVER_ERROR,
         "timeout": ErrorType.BACKEND_ERROR,
@@ -107,6 +111,15 @@ class ErrorHandler:
         ErrorType.BACKEND_ERROR: "Upstream service error",
         ErrorType.SERVICE_UNAVAILABLE: "Upstream service unavailable",
     }
+
+    _PROMPT_TOO_LONG_PATTERN = re.compile(
+        r"(prompt is too long(?:[^\n\r]*))",
+        re.IGNORECASE,
+    )
+    _MAX_TOKENS_CONTEXT_LIMIT_PATTERN = re.compile(
+        r"(input length and `max_tokens` exceed context limit:\s*\d+\s*\+\s*\d+\s*>\s*\d+)",
+        re.IGNORECASE,
+    )
     
     # ========================================================================
     # st Error Parsing
@@ -199,6 +212,10 @@ class ErrorHandler:
         # 然后通过 HTTP 状态码映射
         if status_code == 400:
             return ErrorType.INVALID_REQUEST
+        elif status_code == 413:
+            return ErrorType.INVALID_REQUEST
+        elif status_code == 422:
+            return ErrorType.INVALID_REQUEST
         elif status_code == 402:
             # Upstream payment/quota failures should not be surfaced as 500.
             return ErrorType.QUOTA_EXCEEDED
@@ -210,6 +227,8 @@ class ErrorHandler:
             return ErrorType.NOT_FOUND
         elif status_code == 429:
             return ErrorType.RATE_LIMIT
+        elif status_code == 529:
+            return ErrorType.SERVICE_UNAVAILABLE
         elif status_code == 502:
             return ErrorType.BACKEND_ERROR
         elif status_code == 503:
@@ -271,6 +290,9 @@ class ErrorHandler:
         if any(marker in message for marker in not_found_markers):
             return ErrorType.NOT_FOUND
 
+        if self._extract_context_limit_message(error_message) is not None:
+            return ErrorType.INVALID_REQUEST
+
         unavailable_markers = (
             "service unavailable",
             "temporarily unavailable",
@@ -289,12 +311,51 @@ class ErrorHandler:
 
         return None
 
+    def _extract_context_limit_message(
+        self,
+        raw_message: Optional[str],
+    ) -> Optional[str]:
+        """Preserve deterministic context-limit signals Claude Code depends on."""
+        if not raw_message:
+            return None
+
+        message = " ".join(str(raw_message).split())
+
+        max_tokens_match = self._MAX_TOKENS_CONTEXT_LIMIT_PATTERN.search(message)
+        if max_tokens_match:
+            return max_tokens_match.group(1)
+
+        prompt_too_long_match = self._PROMPT_TOO_LONG_PATTERN.search(message)
+        if prompt_too_long_match:
+            extracted = prompt_too_long_match.group(1).strip()
+            prefix = "prompt is too long"
+            suffix = extracted[len(prefix):] if extracted.lower().startswith(prefix) else ""
+            return f"Prompt is too long{suffix}"
+
+        lowered = message.lower()
+        generic_context_markers = (
+            "maximum context length",
+            "context window exceeded",
+            "context length exceeded",
+            "too many input tokens",
+            "too many tokens in the input",
+        )
+        if any(marker in lowered for marker in generic_context_markers):
+            return "Prompt is too long"
+
+        return None
+
     def _build_safe_message(
         self,
         error_type: ErrorType,
         raw_message: Optional[str] = None
     ) -> str:
         """构建不会暴露上游品牌信息的错误消息。"""
+        if error_type == ErrorType.INVALID_REQUEST:
+            context_limit_message = self._extract_context_limit_message(raw_message)
+            if context_limit_message:
+                return context_limit_message
+
         if error_type == ErrorType.QUOTA_EXCEEDED and raw_message:
             message = raw_message.lower()
             if "daily" in message and "token" in message:

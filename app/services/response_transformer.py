@@ -768,6 +768,42 @@ class ResponseTransformer:
             "name": tool_call.tool_name,
             "input": tool_call.arguments
         }
+
+    @staticmethod
+    def _serialize_tool_arguments(arguments: Dict[str, Any]) -> str:
+        return json.dumps(arguments or {}, ensure_ascii=False, separators=(",", ":"))
+
+    @staticmethod
+    def _chunk_json_for_input_delta(input_json: str, *, chunk_size: int = 24) -> List[str]:
+        """
+        将工具参数 JSON 拆成稳定、可测试的 input_json_delta 序列。
+
+        按 Unicode 代码点切片，避免切坏 UTF-8 字节序列。
+        """
+        if not input_json:
+            return []
+
+        size = max(8, int(chunk_size))
+        chunks: List[str] = []
+        index = 0
+        text_length = len(input_json)
+
+        while index < text_length:
+            end = min(index + size, text_length)
+            if end < text_length:
+                trailing_backslashes = 0
+                cursor = end - 1
+                while cursor >= index and input_json[cursor] == "\\":
+                    trailing_backslashes += 1
+                    cursor -= 1
+                if trailing_backslashes % 2 == 1:
+                    end -= 1
+                if end <= index:
+                    end = min(index + size, text_length)
+            chunks.append(input_json[index:end])
+            index = end
+
+        return chunks
     
     def to_anthropic_response_with_tools(
         self,
@@ -925,12 +961,20 @@ class ResponseTransformer:
             r'<tool_use\s+id="([^"]+)"\s+name="([^"]+)">(.*?)</tool_use>',
             re.DOTALL
         )
+        JSON_BLOCK_PATTERN = re.compile(
+            r'```json\s*\n(.*?)\n\s*```',
+            re.DOTALL,
+        )
         BRACKET_TOOL_CALL_HEADER_PATTERN = re.compile(
             r"\[tool_call\s+id=([^\s\]]+)\s+name=([^\]]+)\]\s*",
             re.IGNORECASE,
         )
         PLAIN_TOOL_JSON_START_PATTERN = re.compile(
             r'(^|\n)\s*(\{\s*"tool")',
+            re.IGNORECASE,
+        )
+        PLAIN_TOOL_JSON_ARRAY_START_PATTERN = re.compile(
+            r'(^|\n)\s*(\[\s*\{\s*"tool")',
             re.IGNORECASE,
         )
         
@@ -1020,36 +1064,44 @@ class ResponseTransformer:
                 content_index += 1
                 return event
             return None
+
+        async def emit_tool_use_sequence(tool_use_id: str, tool_name: str, arguments: Dict[str, Any]):
+            nonlocal content_index, current_block_started
+
+            event = await end_current_block()
+            if event:
+                yield event
+
+            event = await ensure_message_started()
+            if event:
+                yield event
+
+            yield emit_tool_use_block_start(content_index, tool_use_id, tool_name)
+
+            input_json = self._serialize_tool_arguments(arguments)
+            input_chunks = self._chunk_json_for_input_delta(input_json)
+            if not input_chunks:
+                input_chunks = [input_json]
+
+            for partial_json in input_chunks:
+                yield emit_tool_use_delta(content_index, partial_json)
+
+            yield emit_block_stop(content_index)
+            content_index += 1
+            current_block_started = False
         
         def parse_tool_call_from_json(json_str: str):
-            """从 JSON 字符串解析工具调用"""
+            """从 JSON 字符串解析一个或多个工具调用"""
             if tool_parser is None:
                 return None
             
             try:
                 data = tool_parser.load_jsonish(json_str)
-                if not isinstance(data, dict):
-                    return None
-                
-                tool_name = data.get("tool")
-                if not tool_name or not isinstance(tool_name, str):
-                    return None
-                
-                arguments = data.get("arguments", {})
-                if not isinstance(arguments, dict):
-                    arguments = {}
-                
-                # 验证工具调用
-                from .tool_parser import ParsedToolCall
-                parsed_call = ParsedToolCall(
-                    tool_name=tool_name,
-                    arguments=arguments,
-                    raw_json=json_str
+                parsed_calls = tool_parser.extract_tool_calls_from_jsonish(
+                    data,
+                    raw_json=json_str,
                 )
-                
-                if tool_parser.validate_tool_call(parsed_call):
-                    return parsed_call
-                return None
+                return parsed_calls or None
                 
             except json.JSONDecodeError:
                 return None
@@ -1128,7 +1180,7 @@ class ResponseTransformer:
             return None, tool_id, consumed_len, True
 
         def parse_plain_json_tool_call(buffer_content: str):
-            """从裸 JSON 对象解析工具调用。"""
+            """从裸 JSON 对象或数组解析工具调用。"""
             if tool_parser is None:
                 return None, 0, False
 
@@ -1137,18 +1189,8 @@ class ResponseTransformer:
                 return None, 0, False
             parsed_obj, end_idx = decoded
 
-            arguments = {}
-            tool_name = ""
-            if isinstance(parsed_obj, dict):
-                tool_name = str(parsed_obj.get("tool") or "").strip()
-                raw_arguments = parsed_obj.get("arguments", {})
-                if isinstance(raw_arguments, dict):
-                    arguments = raw_arguments
-
-            from .tool_parser import ParsedToolCall
-            parsed_call = ParsedToolCall(
-                tool_name=tool_name,
-                arguments=arguments,
+            parsed_calls = tool_parser.extract_tool_calls_from_jsonish(
+                parsed_obj,
                 raw_json=json.dumps(parsed_obj, ensure_ascii=False, separators=(",", ":")),
             )
 
@@ -1156,8 +1198,8 @@ class ResponseTransformer:
             while consumed_len < len(buffer_content) and buffer_content[consumed_len] in " \t\r\n":
                 consumed_len += 1
 
-            if tool_name and tool_parser.validate_tool_call(parsed_call):
-                return parsed_call, consumed_len, True
+            if parsed_calls:
+                return parsed_calls, consumed_len, True
             return None, consumed_len, True
         
         # 处理流
@@ -1175,6 +1217,7 @@ class ResponseTransformer:
                     json_start_pos = buffer.find(JSON_BLOCK_START)
                     xml_start_pos = buffer.find(XML_TOOL_START)
                     bracket_start_pos = buffer.find(BRACKET_TOOL_START)
+                    plain_json_array_match = PLAIN_TOOL_JSON_ARRAY_START_PATTERN.search(buffer)
                     plain_json_match = PLAIN_TOOL_JSON_START_PATTERN.search(buffer)
 
                     candidates = []
@@ -1184,6 +1227,8 @@ class ResponseTransformer:
                         candidates.append((xml_start_pos, "xml"))
                     if bracket_start_pos != -1:
                         candidates.append((bracket_start_pos, "bracket"))
+                    if plain_json_array_match is not None:
+                        candidates.append((plain_json_array_match.start(2), "plain_json"))
                     if plain_json_match is not None:
                         candidates.append((plain_json_match.start(2), "plain_json"))
 
@@ -1247,42 +1292,32 @@ class ResponseTransformer:
                 
                 elif state == STATE_BUFFERING_JSON:
                     # 在缓冲 JSON 代码块
-                    search_start = len(JSON_BLOCK_START)
-                    end_pos = buffer.find(JSON_BLOCK_END, search_start)
+                    block_match = JSON_BLOCK_PATTERN.match(buffer)
                     
-                    if end_pos != -1:
+                    if block_match is not None:
                         # 找到结束标记
-                        json_content = buffer[len(JSON_BLOCK_START):end_pos].strip()
+                        json_content = block_match.group(1).strip()
                         
                         # 尝试解析工具调用
-                        tool_call = parse_tool_call_from_json(json_content)
+                        tool_calls = parse_tool_call_from_json(json_content)
                         
-                        if tool_call is not None:
+                        if tool_calls is not None:
                             # 有效的工具调用
                             has_tool_calls = True
-                            
-                            event = await end_current_block()
-                            if event:
-                                yield event
-                            
-                            event = await ensure_message_started()
-                            if event:
-                                yield event
-                            
-                            tool_use_id = tool_parser.generate_tool_use_id()
-                            yield emit_tool_use_block_start(content_index, tool_use_id, tool_call.tool_name)
-                            
-                            input_json = json.dumps(tool_call.arguments)
-                            yield emit_tool_use_delta(content_index, input_json)
-                            
-                            yield emit_block_stop(content_index)
-                            content_index += 1
-                            current_block_started = False
+
+                            for tool_call in tool_calls:
+                                tool_use_id = tool_parser.generate_tool_use_id()
+                                async for event in emit_tool_use_sequence(
+                                    tool_use_id,
+                                    tool_call.tool_name,
+                                    tool_call.arguments,
+                                ):
+                                    yield event
                             if stop_after_first_tool_call:
                                 terminate_stream_early = True
                         else:
                             # 不是有效的工具调用，作为普通文本输出
-                            full_block = buffer[:end_pos + len(JSON_BLOCK_END)]
+                            full_block = buffer[:block_match.end()]
                             if not (has_tool_calls and suppress_intermediate_tool_text):
                                 event = await ensure_message_started()
                                 if event:
@@ -1292,7 +1327,7 @@ class ResponseTransformer:
                                     yield event
                                 yield emit_text_delta(content_index, full_block)
                         
-                        buffer = buffer[end_pos + len(JSON_BLOCK_END):]
+                        buffer = buffer[block_match.end():]
                         state = STATE_TEXT
                     else:
                         if len(buffer) > max_buffer_size:
@@ -1322,25 +1357,15 @@ class ResponseTransformer:
                         if tool_call is not None:
                             # 有效的工具调用
                             has_tool_calls = True
-                            
-                            event = await end_current_block()
-                            if event:
-                                yield event
-                            
-                            event = await ensure_message_started()
-                            if event:
-                                yield event
-                            
+
                             # 使用原始 ID 或生成新 ID
                             tool_use_id = original_id if original_id else tool_parser.generate_tool_use_id()
-                            yield emit_tool_use_block_start(content_index, tool_use_id, tool_call.tool_name)
-                            
-                            input_json = json.dumps(tool_call.arguments)
-                            yield emit_tool_use_delta(content_index, input_json)
-                            
-                            yield emit_block_stop(content_index)
-                            content_index += 1
-                            current_block_started = False
+                            async for event in emit_tool_use_sequence(
+                                tool_use_id,
+                                tool_call.tool_name,
+                                tool_call.arguments,
+                            ):
+                                yield event
                             if stop_after_first_tool_call:
                                 terminate_stream_early = True
                         else:
@@ -1378,23 +1403,13 @@ class ResponseTransformer:
                         if parsed_call is not None:
                             has_tool_calls = True
 
-                            event = await end_current_block()
-                            if event:
-                                yield event
-
-                            event = await ensure_message_started()
-                            if event:
-                                yield event
-
                             tool_use_id = original_id if original_id else tool_parser.generate_tool_use_id()
-                            yield emit_tool_use_block_start(content_index, tool_use_id, parsed_call.tool_name)
-
-                            input_json = json.dumps(parsed_call.arguments)
-                            yield emit_tool_use_delta(content_index, input_json)
-
-                            yield emit_block_stop(content_index)
-                            content_index += 1
-                            current_block_started = False
+                            async for event in emit_tool_use_sequence(
+                                tool_use_id,
+                                parsed_call.tool_name,
+                                parsed_call.arguments,
+                            ):
+                                yield event
                             if stop_after_first_tool_call:
                                 terminate_stream_early = True
                         else:
@@ -1424,30 +1439,21 @@ class ResponseTransformer:
                             state = STATE_TEXT
                         break
                 elif state == STATE_BUFFERING_PLAIN_JSON:
-                    parsed_call, consumed_len, is_complete = parse_plain_json_tool_call(buffer)
+                    parsed_calls, consumed_len, is_complete = parse_plain_json_tool_call(buffer)
 
                     if is_complete and consumed_len > 0:
                         json_content = buffer[:consumed_len]
-                        if parsed_call is not None:
+                        if parsed_calls is not None:
                             has_tool_calls = True
 
-                            event = await end_current_block()
-                            if event:
-                                yield event
-
-                            event = await ensure_message_started()
-                            if event:
-                                yield event
-
-                            tool_use_id = tool_parser.generate_tool_use_id()
-                            yield emit_tool_use_block_start(content_index, tool_use_id, parsed_call.tool_name)
-
-                            input_json = json.dumps(parsed_call.arguments)
-                            yield emit_tool_use_delta(content_index, input_json)
-
-                            yield emit_block_stop(content_index)
-                            content_index += 1
-                            current_block_started = False
+                            for parsed_call in parsed_calls:
+                                tool_use_id = tool_parser.generate_tool_use_id()
+                                async for event in emit_tool_use_sequence(
+                                    tool_use_id,
+                                    parsed_call.tool_name,
+                                    parsed_call.arguments,
+                                ):
+                                    yield event
                             if stop_after_first_tool_call:
                                 terminate_stream_early = True
                         else:
@@ -1508,7 +1514,7 @@ class ResponseTransformer:
                     if event:
                         yield event
                     yield emit_text_delta(content_index, buffer)
-        
+
         # 确保当前块已关闭
         event = await end_current_block()
         if event:

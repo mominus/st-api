@@ -6,6 +6,7 @@ Public API Key Info Service
 from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, List, Optional
 
+from app.services.capability_matrix import build_claude_code_capability_matrix
 from app.services.time_utils import ensure_utc, utc_now
 
 
@@ -224,6 +225,11 @@ def build_public_key_info_payload(
             "current_usage": _format_token_display(usage.get("tokens", 0)),
             "available_tokens": _format_token_display(
                 model_available_tokens if key_status_info["status"] == "active" else 0
+            ),
+            "capability_matrix": build_claude_code_capability_matrix(
+                model=model["id"],
+                input_mapping=model.get("input_mapping"),
+                capability_overrides=model.get("capability_overrides"),
             ),
         })
 

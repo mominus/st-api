@@ -35,6 +35,12 @@ from app.services.cost_recalculator import (
     recalculate_cost_totals_by_key,
 )
 from app.services.gateway_runtime import get_gateway_runtime
+from app.services.capability_matrix import (
+    build_claude_code_capability_matrix,
+    parse_capability_overrides,
+    parse_input_mapping,
+    validate_capability_overrides,
+)
 from app.services.key_info import build_public_key_info_payload
 from app.services.time_utils import utc_now_naive
 from app.services.upstream_sanitizer import sanitize_exposed_text
@@ -146,12 +152,14 @@ class CreateModelGroupRequest(BaseModel):
     name: str = Field(..., description="模型组名称")
     description: Optional[str] = Field(None, description="描述")
     input_mapping: dict = Field(..., description="输入字段映射配置")
+    capability_overrides: Optional[dict] = Field(None, description="能力矩阵覆盖配置")
 
 
 class UpdateModelGroupRequest(BaseModel):
     """更新模型组请求"""
     description: Optional[str] = None
     input_mapping: Optional[dict] = None
+    capability_overrides: Optional[dict] = None
 
 
 # API Key Models
@@ -211,6 +219,27 @@ def normalize_model_groups(
             result = [primary] + result
 
     return result
+
+
+def _parse_group_input_mapping(group: ModelGroup) -> Dict[str, str]:
+    return parse_input_mapping(getattr(group, "input_mapping", None))
+
+
+def _parse_group_capability_overrides(group: ModelGroup) -> Dict[str, Dict[str, Any]]:
+    return parse_capability_overrides(getattr(group, "capability_overrides", None))
+
+
+def _serialize_group_capability_matrix(
+    *,
+    group_name: str,
+    input_mapping: Dict[str, Any],
+    capability_overrides: Dict[str, Any],
+) -> Dict[str, Any]:
+    return build_claude_code_capability_matrix(
+        model=group_name,
+        input_mapping=input_mapping,
+        capability_overrides=capability_overrides,
+    )
 
 
 AUTO_IMPORT_GROUP_INPUT_MAPPING = {"user_input": "in-0", "model_id": "in-1"}
@@ -1394,6 +1423,8 @@ async def list_model_groups(
 
     group_list = []
     for group in groups:
+        input_mapping = _parse_group_input_mapping(group)
+        capability_overrides = _parse_group_capability_overrides(group)
         accounts = accounts_by_group.get(group.name, [])
         active_count = sum(1 for a in accounts if a.status == "active")
         
@@ -1413,7 +1444,13 @@ async def list_model_groups(
             "id": group.id,
             "name": group.name,
             "description": group.description,
-            "input_mapping": json.loads(group.input_mapping) if group.input_mapping else {},
+            "input_mapping": input_mapping,
+            "capability_overrides": capability_overrides,
+            "capability_matrix": _serialize_group_capability_matrix(
+                group_name=group.name,
+                input_mapping=input_mapping,
+                capability_overrides=capability_overrides,
+            ),
             "account_count": len(accounts),
             "active_account_count": active_count,
             "pricing": {
@@ -1451,6 +1488,8 @@ async def get_model_group(
     # 获取该组的账号统计
     account_pool = get_account_pool_service()
     stats = await account_pool.get_model_group_stats(session, group.name)
+    input_mapping = _parse_group_input_mapping(group)
+    capability_overrides = _parse_group_capability_overrides(group)
     
     return {
         "success": True,
@@ -1458,7 +1497,13 @@ async def get_model_group(
             "id": group.id,
             "name": group.name,
             "description": group.description,
-            "input_mapping": json.loads(group.input_mapping) if group.input_mapping else {},
+            "input_mapping": input_mapping,
+            "capability_overrides": capability_overrides,
+            "capability_matrix": _serialize_group_capability_matrix(
+                group_name=group.name,
+                input_mapping=input_mapping,
+                capability_overrides=capability_overrides,
+            ),
             "created_at": group.created_at.isoformat() if group.created_at else None,
             "stats": stats
         }
@@ -1484,12 +1529,18 @@ async def create_model_group(
     )
     if result.scalar_one_or_none():
         raise HTTPException(status_code=400, detail="Model group name already exists")
+
+    try:
+        capability_overrides = validate_capability_overrides(request.capability_overrides)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     
     group = ModelGroup(
         id=str(uuid.uuid4()),
         name=request.name,
         description=request.description,
         input_mapping=json.dumps(request.input_mapping),
+        capability_overrides=json.dumps(capability_overrides) if capability_overrides else None,
         created_at=utc_now_naive()
     )
     
@@ -1505,7 +1556,13 @@ async def create_model_group(
             "id": group.id,
             "name": group.name,
             "description": group.description,
-            "input_mapping": request.input_mapping
+            "input_mapping": request.input_mapping,
+            "capability_overrides": capability_overrides,
+            "capability_matrix": _serialize_group_capability_matrix(
+                group_name=group.name,
+                input_mapping=request.input_mapping,
+                capability_overrides=capability_overrides,
+            ),
         }
     }
 
@@ -1534,10 +1591,18 @@ async def update_model_group(
         group.description = request.description
     if request.input_mapping is not None:
         group.input_mapping = json.dumps(request.input_mapping)
+    if request.capability_overrides is not None:
+        try:
+            capability_overrides = validate_capability_overrides(request.capability_overrides)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        group.capability_overrides = json.dumps(capability_overrides) if capability_overrides else None
     
     await session.commit()
     
     logger.info(f"Model group updated: {group.name} by {admin.get('username')}")
+    input_mapping = _parse_group_input_mapping(group)
+    capability_overrides = _parse_group_capability_overrides(group)
     
     return {
         "success": True,
@@ -1546,7 +1611,13 @@ async def update_model_group(
             "id": group.id,
             "name": group.name,
             "description": group.description,
-            "input_mapping": json.loads(group.input_mapping) if group.input_mapping else {}
+            "input_mapping": input_mapping,
+            "capability_overrides": capability_overrides,
+            "capability_matrix": _serialize_group_capability_matrix(
+                group_name=group.name,
+                input_mapping=input_mapping,
+                capability_overrides=capability_overrides,
+            ),
         }
     }
 
@@ -1663,6 +1734,16 @@ async def get_api_key(
         since=key.created_at,
     )
     accounts_by_model = await account_pool.get_accounts_by_model_groups(session, model_groups)
+    model_group_result = await session.execute(
+        select(ModelGroup).where(ModelGroup.name.in_(model_groups))
+    )
+    model_group_settings = {
+        item.name: {
+            "input_mapping": _parse_group_input_mapping(item),
+            "capability_overrides": _parse_group_capability_overrides(item),
+        }
+        for item in model_group_result.scalars().all()
+    }
     model_details = build_public_key_info_payload(
         key,
         [
@@ -1670,6 +1751,8 @@ async def get_api_key(
                 "id": model_name,
                 "accounts": accounts_by_model.get(model_name, []),
                 "usage": usage_by_model.get(model_name),
+                "input_mapping": model_group_settings.get(model_name, {}).get("input_mapping", {}),
+                "capability_overrides": model_group_settings.get(model_name, {}).get("capability_overrides", {}),
             }
             for model_name in model_groups
         ],

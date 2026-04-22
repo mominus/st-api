@@ -56,7 +56,8 @@ class ToolResultFormatter:
         
         content 可能是：
         - 字符串
-        - 内容块列表（每个块有 type 和 text 字段）
+        - 结构化 dict
+        - 内容块列表（文本块与非文本结构化块混合）
         
         Args:
             content: tool_result 的 content 字段
@@ -67,21 +68,38 @@ class ToolResultFormatter:
         if isinstance(content, str):
             return content
         
+        if isinstance(content, dict):
+            return self._dump_json(content)
+
         if isinstance(content, list):
-            # 处理内容块列表
-            text_parts = []
-            for block in content:
-                if isinstance(block, dict):
-                    if block.get("type") == "text":
-                        text_parts.append(block.get("text", ""))
-                    elif "text" in block:
-                        text_parts.append(block.get("text", ""))
-                elif isinstance(block, str):
-                    text_parts.append(block)
-            return "\n".join(text_parts)
+            rendered_parts = [
+                self._extract_content_part(block)
+                for block in content
+            ]
+            return "\n".join(part for part in rendered_parts if part)
         
         # 其他情况，尝试转换为字符串
         return str(content) if content else ""
+
+    def _extract_content_part(self, block: Any) -> str:
+        if isinstance(block, str):
+            return block
+        if isinstance(block, dict):
+            block_type = str(block.get("type") or "")
+            if block_type in {"text", "input_text", "output_text"}:
+                text = block.get("text")
+                if isinstance(text, str):
+                    return text
+                if text is not None:
+                    return str(text)
+            return self._dump_json(block)
+        if isinstance(block, list):
+            return self._dump_json(block)
+        return str(block) if block else ""
+
+    @staticmethod
+    def _dump_json(value: Any) -> str:
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
     
     def _format_success_result(self, tool_use_id: str, content: str) -> str:
         """
@@ -96,7 +114,7 @@ class ToolResultFormatter:
         Returns:
             格式化的成功结果字符串
         """
-        return f"[Tool Result: {tool_use_id}]\n{content}"
+        return f"[tool_result id={tool_use_id}]\n{content}".strip()
     
     def _format_error_result(self, tool_use_id: str, error_message: str) -> str:
         """
@@ -109,7 +127,7 @@ class ToolResultFormatter:
         Returns:
             格式化的错误结果字符串
         """
-        return f"[Tool Result: {tool_use_id}] Error: {error_message}"
+        return f"[tool_result id={tool_use_id} error=true]\n{error_message}".strip()
     
     def format_tool_use_response(self, tool_use: Dict[str, Any]) -> str:
         """
@@ -131,9 +149,9 @@ class ToolResultFormatter:
         tool_input = tool_use.get("input", {})
         
         # 将输入参数格式化为 JSON
-        input_json = json.dumps(tool_input, ensure_ascii=False)
-        
-        return f"[Tool Call: {tool_name} ({tool_use_id})]\n{input_json}"
+        input_json = json.dumps(tool_input, ensure_ascii=False, separators=(",", ":"))
+
+        return f"[tool_call id={tool_use_id} name={tool_name}]\n{input_json}".strip()
     
     def format_multiple_tool_results(
         self, 

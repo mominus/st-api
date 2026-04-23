@@ -112,10 +112,7 @@ DB_OP_ACQUIRE_TIMEOUT_SECONDS = max(
     float(
         os.getenv(
             "DB_OP_ACQUIRE_TIMEOUT_SECONDS",
-            os.getenv(
-                "REQUEST_QUEUE_TIMEOUT_SECONDS",
-                os.getenv("QUEUE_TIMEOUT_SECONDS", "8"),
-            ),
+            os.getenv("REQUEST_QUEUE_TIMEOUT_SECONDS", "8"),
         )
     ),
 )
@@ -123,14 +120,8 @@ MODEL_INPUT_MAPPING_CACHE_TTL_SECONDS = max(
     0.0,
     float(os.getenv("MODEL_INPUT_MAPPING_CACHE_TTL_SECONDS", "60")),
 )
-ASYNC_NONCRITICAL_LOG_PERSIST = _env_bool(
-    "ASYNC_NONCRITICAL_LOG_PERSIST",
-    _env_bool("ASYNC_STREAM_NONCRITICAL_LOG_PERSIST", True),
-)
-BACKGROUND_LOG_WORKERS = max(
-    1,
-    int(os.getenv("BACKGROUND_LOG_WORKERS", os.getenv("BACKGROUND_LOG_MAX_CONCURRENCY", "2"))),
-)
+ASYNC_NONCRITICAL_LOG_PERSIST = _env_bool("ASYNC_NONCRITICAL_LOG_PERSIST", True)
+BACKGROUND_LOG_WORKERS = max(1, int(os.getenv("BACKGROUND_LOG_WORKERS", "2")))
 BACKGROUND_LOG_QUEUE_MAX_SIZE = max(
     100,
     int(os.getenv("BACKGROUND_LOG_QUEUE_MAX_SIZE", "5000")),

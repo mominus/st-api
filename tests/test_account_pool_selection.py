@@ -79,43 +79,6 @@ class _BatchSession:
         return self._results.pop(0)
 
 
-class _FakePGResult:
-    def __init__(self, row):
-        self._row = row
-
-    def scalar_one_or_none(self):
-        return self._row
-
-
-class _FakePGBind:
-    class _Dialect:
-        name = "postgresql"
-
-    dialect = _Dialect()
-
-
-class _FakePGSession:
-    def __init__(self, rows):
-        if isinstance(rows, list):
-            self._rows = list(rows)
-        else:
-            self._rows = [rows]
-        self.flush_calls = 0
-        self.execute_calls = 0
-
-    def get_bind(self):
-        return _FakePGBind()
-
-    async def execute(self, _query):
-        self.execute_calls += 1
-        if not self._rows:
-            raise AssertionError("unexpected execute() call")
-        return _FakePGResult(self._rows.pop(0))
-
-    async def flush(self):
-        self.flush_calls += 1
-
-
 def test_get_available_account_skips_exhausted_even_when_local_quota_appears_remaining():
     service = AccountPoolService()
     stale = _FakeAccount(
@@ -154,7 +117,11 @@ def test_get_available_account_prefers_fresh_active_accounts_over_partially_used
     selected = asyncio.run(service.get_available_account(session, "claude-opus-4-6"))
 
     assert selected is fresh_active
-    assert session.flush_calls == 0
+    assert fresh_active.inflight_requests == 1
+    assert fresh_active.inflight_updated_at is not None
+    assert fresh_active.last_used_at is not None
+    assert fresh_active.updated_at is not None
+    assert session.flush_calls == 1
     assert session.commit_calls == 0
 
 
@@ -199,6 +166,9 @@ def test_get_available_account_prefers_lower_inflight_when_usage_is_equal():
     selected = asyncio.run(service.get_available_account(session, "claude-opus-4-6"))
 
     assert selected is less_busy
+    assert less_busy.inflight_requests == 2
+    assert less_busy.last_used_at is not None
+    assert session.flush_calls == 1
 
 
 def test_get_available_account_returns_none_when_no_active_or_recoverable():
@@ -242,7 +212,7 @@ def test_get_available_account_marks_quota_blocked_active_as_exhausted():
     assert session.flush_calls == 0
 
 
-def test_get_available_account_postgres_reserves_last_used_at():
+def test_get_available_account_reserves_last_used_at():
     service = AccountPoolService()
     account = _FakeAccount(
         id="acc-1",
@@ -254,12 +224,11 @@ def test_get_available_account_postgres_reserves_last_used_at():
         last_used_at=None,
         updated_at=None,
     )
-    session = _FakePGSession(account)
+    session = _FakeSession(execute_rows=[[account], []])
 
     selected = asyncio.run(service.get_available_account(session, "claude-opus-4-6"))
 
     assert selected is account
-    assert session.execute_calls == 1
     assert account.inflight_requests == 1
     assert account.inflight_updated_at is not None
     assert account.last_used_at is not None
@@ -267,7 +236,7 @@ def test_get_available_account_postgres_reserves_last_used_at():
     assert session.flush_calls == 1
 
 
-def test_get_available_account_postgres_resets_stale_inflight_lease_before_reserving():
+def test_get_available_account_resets_stale_inflight_lease_before_reserving():
     service = AccountPoolService()
     stale = datetime(2024, 1, 1)
     account = _FakeAccount(
@@ -278,30 +247,13 @@ def test_get_available_account_postgres_resets_stale_inflight_lease_before_reser
         inflight_requests=7,
         inflight_updated_at=stale,
     )
-    session = _FakePGSession(account)
+    session = _FakeSession(execute_rows=[[account], []])
 
     selected = asyncio.run(service.get_available_account(session, "claude-opus-4-6"))
 
     assert selected is account
     assert account.inflight_requests == 1
     assert account.inflight_updated_at is not None
-
-
-def test_get_available_account_postgres_falls_back_to_legacy_candidates_when_route_query_is_empty():
-    service = AccountPoolService()
-    legacy_account = _FakeAccount(
-        id="acc-legacy",
-        status="active",
-        daily_used=0,
-        daily_quota=1000,
-    )
-    session = _FakePGSession([None, legacy_account])
-
-    selected = asyncio.run(service.get_available_account(session, "claude-opus-4-6"))
-
-    assert selected is legacy_account
-    assert session.execute_calls == 2
-    assert session.flush_calls == 1
 
 
 def test_get_accounts_by_model_groups_batches_and_deduplicates_route_and_legacy_rows():

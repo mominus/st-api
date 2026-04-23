@@ -19,7 +19,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
-from app.models.database import get_session, ModelGroup, BackendAccount
+from app.models.database import get_session, ModelGroup, BackendAccount, get_sqlite_runtime_settings
 from app.services.auth import (
     AuthService, get_auth_service,
     InvalidCredentialsError, AccountLockedError, TokenExpiredError, InvalidTokenError
@@ -2833,10 +2833,6 @@ async def get_performance_stats(
     background_log_stats = get_gateway_runtime().background_log_stats()
     backend_http_stats = get_backend_client().stats()
     
-    # 获取系统配置
-    db_url = os.getenv("DATABASE_URL", "sqlite")
-    db_type = "PostgreSQL" if "postgresql" in db_url else "SQLite"
-    
     # 计算服务运行时间
     start_time = getattr(get_performance_stats, '_start_time', None)
     if start_time is None:
@@ -2859,6 +2855,7 @@ async def get_performance_stats(
     # 最大可支持的 RPM（基于最大并发数和平均响应时间估算）
     # 假设平均响应时间 1 秒，最大 RPM = 最大并发数 * 60
     max_rpm = ConnectionPoolConfig.MAX_CONCURRENT_REQUESTS * 60
+    sqlite_runtime = get_sqlite_runtime_settings()
     
     return {
         "success": True,
@@ -2887,17 +2884,15 @@ async def get_performance_stats(
             "max_concurrent_requests": ConnectionPoolConfig.MAX_CONCURRENT_REQUESTS,
             "max_concurrent_streams": ConnectionPoolConfig.MAX_CONCURRENT_STREAMS,
             "max_concurrent_db_ops": ConnectionPoolConfig.MAX_CONCURRENT_DB_OPS,
-            "db_pool_capacity": ConnectionPoolConfig.DB_POOL_SIZE + ConnectionPoolConfig.DB_MAX_OVERFLOW,
             "http_max_connections": ConnectionPoolConfig.HTTP_MAX_CONNECTIONS,
             "http_max_keepalive": ConnectionPoolConfig.HTTP_MAX_KEEPALIVE,
             "http_timeout": ConnectionPoolConfig.HTTP_TIMEOUT,
             "http_connect_timeout": ConnectionPoolConfig.HTTP_CONNECT_TIMEOUT,
-            "db_pool_size": ConnectionPoolConfig.DB_POOL_SIZE,
-            "db_max_overflow": ConnectionPoolConfig.DB_MAX_OVERFLOW,
         },
         "system": {
-            "db_type": db_type,
-            "db_pool": f"{ConnectionPoolConfig.DB_POOL_SIZE} + {ConnectionPoolConfig.DB_MAX_OVERFLOW}",
+            "db_type": "SQLite",
+            "db_journal_mode": str(sqlite_runtime["journal_mode"]),
+            "db_busy_timeout": f"{sqlite_runtime['busy_timeout_seconds']:.0f}s",
             "http_timeout": f"{ConnectionPoolConfig.HTTP_TIMEOUT}s",
             "uptime": uptime_str,
         },

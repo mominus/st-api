@@ -13,7 +13,7 @@ from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from typing import Optional, List, Dict, Any
 
-from sqlalchemy import Numeric, case, cast, delete, desc, func, select
+from sqlalchemy import case, delete, desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.database import CallLog, get_session_factory
@@ -209,28 +209,6 @@ class CallLoggerService:
         self._writes_since_cleanup = 0
         self._last_cleanup_ts = 0.0
         self._cleanup_lock = asyncio.Lock()
-
-    @staticmethod
-    def _session_dialect(session: AsyncSession) -> str:
-        try:
-            bind = session.get_bind()
-            if bind is not None and bind.dialect is not None:
-                return str(bind.dialect.name or "").lower()
-        except Exception:
-            pass
-        return ""
-
-    @classmethod
-    def _supports_database_cost_aggregation(cls, session: AsyncSession) -> bool:
-        # PostgreSQL numeric 聚合可避免把大量费用行拉回 Python 求和。
-        return cls._session_dialect(session) == "postgresql"
-
-    @staticmethod
-    def _cost_sum_expr(column: Any):
-        return func.coalesce(
-            func.sum(cast(func.coalesce(func.nullif(column, ""), "0"), Numeric(20, 6))),
-            0,
-        )
 
     def _should_trigger_cleanup(self) -> bool:
         if not self.auto_cleanup or MAX_CALL_LOG_ENTRIES <= 0:
@@ -429,18 +407,13 @@ class CallLoggerService:
 
         since = utc_now_naive() - timedelta(hours=hours)
 
-        summary_columns = [
+        summary_query = select(
             func.count(CallLog.id),
             func.coalesce(func.sum(case((CallLog.status == "success", 1), else_=0)), 0),
             func.coalesce(func.sum(CallLog.input_tokens), 0),
             func.coalesce(func.sum(CallLog.output_tokens), 0),
             func.coalesce(func.sum(CallLog.total_tokens), 0),
-        ]
-        database_cost_aggregation = self._supports_database_cost_aggregation(session)
-        if database_cost_aggregation:
-            summary_columns.append(self._cost_sum_expr(CallLog.total_cost))
-
-        summary_query = select(*summary_columns).where(CallLog.timestamp >= since)
+        ).where(CallLog.timestamp >= since)
         summary_row = (await session.execute(summary_query)).one()
 
         total_calls = summary_row[0] or 0
@@ -449,15 +422,12 @@ class CallLoggerService:
         output_tokens = summary_row[3] or 0
         total_tokens = summary_row[4] or 0
 
-        if database_cost_aggregation:
-            total_cost = str(summary_row[5] or 0)
-        else:
-            cost_query = select(CallLog.total_cost).where(
-                CallLog.timestamp >= since,
-                CallLog.total_cost.isnot(None)
-            )
-            cost_result = await session.execute(cost_query)
-            total_cost = str(sum(Decimal(row[0]) for row in cost_result.all() if row[0]))
+        cost_query = select(CallLog.total_cost).where(
+            CallLog.timestamp >= since,
+            CallLog.total_cost.isnot(None)
+        )
+        cost_result = await session.execute(cost_query)
+        total_cost = str(sum(Decimal(row[0]) for row in cost_result.all() if row[0]))
 
         return {
             "total_calls": total_calls,
@@ -515,43 +485,30 @@ class CallLoggerService:
         """
         from datetime import timedelta
 
-        if self._supports_database_cost_aggregation(session):
-            query = select(
-                self._cost_sum_expr(CallLog.input_cost),
-                self._cost_sum_expr(CallLog.output_cost),
-                self._cost_sum_expr(CallLog.total_cost),
-            ).where(CallLog.total_cost.isnot(None))
-        else:
-            query = select(
-                CallLog.input_cost,
-                CallLog.output_cost,
-                CallLog.total_cost
-            ).where(CallLog.total_cost.isnot(None))
+        query = select(
+            CallLog.input_cost,
+            CallLog.output_cost,
+            CallLog.total_cost
+        ).where(CallLog.total_cost.isnot(None))
 
         if hours is not None:
             since = utc_now_naive() - timedelta(hours=hours)
             query = query.where(CallLog.timestamp >= since)
 
         result = await session.execute(query)
-        if self._supports_database_cost_aggregation(session):
-            row = result.one()
-            total_input = row[0] or 0
-            total_output = row[1] or 0
-            total = row[2] or 0
-        else:
-            rows = result.all()
+        rows = result.all()
 
-            total_input = Decimal("0")
-            total_output = Decimal("0")
-            total = Decimal("0")
+        total_input = Decimal("0")
+        total_output = Decimal("0")
+        total = Decimal("0")
 
-            for row in rows:
-                if row[0]:
-                    total_input += Decimal(row[0])
-                if row[1]:
-                    total_output += Decimal(row[1])
-                if row[2]:
-                    total += Decimal(row[2])
+        for row in rows:
+            if row[0]:
+                total_input += Decimal(row[0])
+            if row[1]:
+                total_output += Decimal(row[1])
+            if row[2]:
+                total += Decimal(row[2])
 
         return {
             "input": str(total_input),
@@ -570,38 +527,20 @@ class CallLoggerService:
         """
         获取某个 API Key 的按模型拆分使用统计。
         """
-        if self._supports_database_cost_aggregation(session):
-            model_name_expr = func.coalesce(CallLog.model_group, CallLog.model)
-            query = select(
-                model_name_expr.label("model_group"),
-                func.count(CallLog.id).label("requests"),
-                func.coalesce(func.sum(CallLog.input_tokens), 0).label("input_tokens"),
-                func.coalesce(func.sum(CallLog.output_tokens), 0).label("output_tokens"),
-                func.coalesce(func.sum(CallLog.total_tokens), 0).label("total_tokens"),
-                self._cost_sum_expr(CallLog.total_cost).label("total_cost"),
-            ).where(
-                CallLog.api_key_id == api_key_id,
-                CallLog.status == "success",
-                model_name_expr.isnot(None),
-            )
-        else:
-            query = select(
-                CallLog.model_group,
-                CallLog.model,
-                CallLog.input_tokens,
-                CallLog.output_tokens,
-                CallLog.total_tokens,
-                CallLog.total_cost,
-            ).where(
-                CallLog.api_key_id == api_key_id,
-                CallLog.status == "success",
-            )
+        query = select(
+            CallLog.model_group,
+            CallLog.model,
+            CallLog.input_tokens,
+            CallLog.output_tokens,
+            CallLog.total_tokens,
+            CallLog.total_cost,
+        ).where(
+            CallLog.api_key_id == api_key_id,
+            CallLog.status == "success",
+        )
 
         if since is not None:
             query = query.where(CallLog.timestamp >= since)
-
-        if self._supports_database_cost_aggregation(session):
-            query = query.group_by(model_name_expr)
 
         result = await session.execute(query)
         logs = list(result.all())

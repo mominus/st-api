@@ -9,7 +9,6 @@ httpx[socks]>=0.26.0
 # Database
 sqlalchemy>=2.0.25
 aiosqlite>=0.19.0
-asyncpg>=0.29.0  # PostgreSQL 异步驱动
 
 # Authentication
 pyjwt>=2.8.0

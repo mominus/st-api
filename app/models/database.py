@@ -5,13 +5,12 @@ SQLAlchemy Database Models
 
 import os
 import logging
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from datetime import datetime, date
 from typing import Optional, AsyncGenerator
 
 from sqlalchemy import (
-    Column, String, Integer, Text, DateTime, Date, 
-    Boolean, create_engine, event, text, UniqueConstraint
+    Column, String, Integer, Text, DateTime, Date,
+    Boolean, text, UniqueConstraint
 )
 from sqlalchemy.ext.asyncio import (
     create_async_engine, AsyncSession, async_sessionmaker
@@ -29,6 +28,9 @@ DATABASE_URL = os.getenv(
     "DATABASE_URL", 
     "sqlite+aiosqlite:///./data/api_service.db"
 )
+
+SQLITE_JOURNAL_MODE = "WAL"
+SQLITE_BUSY_TIMEOUT_MS = 30000
 
 
 class BackendAccount(Base):
@@ -221,193 +223,29 @@ def get_database_url() -> str:
     return os.getenv("DATABASE_URL", DATABASE_URL)
 
 
-def _get_int_env(name: str, default: int) -> int:
-    raw = os.getenv(name)
-    if raw is None or raw == "":
-        return default
-    try:
-        return int(raw)
-    except ValueError:
-        logger.warning("Invalid integer env %s=%r, fallback=%s", name, raw, default)
-        return default
-
-
-def _get_float_env(name: str) -> Optional[float]:
-    raw = os.getenv(name)
-    if raw is None or raw == "":
-        return None
-    try:
-        return float(raw)
-    except ValueError:
-        logger.warning("Invalid float env %s=%r, ignored", name, raw)
-        return None
-
-
-def _log_connection_budget_hint(pool_size: int, max_overflow: int) -> None:
-    """
-    可选连接预算提示（仅日志提示，不改写用户配置）。
-    适用于托管 PostgreSQL 的 connection limit 场景。
-    """
-    limit_raw = os.getenv("DB_CONNECTION_LIMIT", "").strip()
-    if not limit_raw:
-        return
-
-    try:
-        connection_limit = max(1, int(limit_raw))
-    except ValueError:
-        logger.warning("Invalid DB_CONNECTION_LIMIT=%r, skip pool budget hint", limit_raw)
-        return
-
-    reserve = max(0, _get_int_env("DB_CONNECTION_RESERVE", 6))
-    instance_count = max(1, _get_int_env("APP_INSTANCE_COUNT", 1))
-    worker_count = max(1, _get_int_env("UVICORN_WORKERS", 1))
-
-    per_worker_pool = pool_size + max_overflow
-    estimated_peak = instance_count * worker_count * per_worker_pool
-    usable_limit = max(1, connection_limit - reserve)
-
-    if estimated_peak > usable_limit:
-        logger.warning(
-            (
-                "DB pool config may exceed PostgreSQL connection budget: "
-                "estimated_peak=%s > usable_limit=%s "
-                "(connection_limit=%s, reserve=%s, instances=%s, workers=%s, pool=%s+%s)."
-            ),
-            estimated_peak,
-            usable_limit,
-            connection_limit,
-            reserve,
-            instance_count,
-            worker_count,
-            pool_size,
-            max_overflow,
+def _require_sqlite_database_url(db_url: str) -> str:
+    normalized = str(db_url or "").strip() or DATABASE_URL
+    if "sqlite" not in normalized.lower():
+        raise RuntimeError(
+            "st-api now only supports SQLite. "
+            "Set DATABASE_URL to a sqlite+aiosqlite URL such as "
+            "'sqlite+aiosqlite:///./data/api_service.db'."
         )
-    else:
-        logger.info(
-            (
-                "DB pool budget check passed: estimated_peak=%s, usable_limit=%s "
-                "(connection_limit=%s, reserve=%s, instances=%s, workers=%s)."
-            ),
-            estimated_peak,
-            usable_limit,
-            connection_limit,
-            reserve,
-            instance_count,
-            worker_count,
-        )
-
-
-def _normalize_database_url_for_asyncpg(db_url: str) -> str:
-    """
-    兼容托管 PostgreSQL 常见连接串：
-    - postgresql+asyncpg://...?...&sslmode=require
-    asyncpg 不支持 sslmode 参数，需改为 ssl=require。
-    """
-    if "postgresql+asyncpg" not in db_url or "sslmode=" not in db_url:
-        return db_url
-
-    try:
-        parts = urlsplit(db_url)
-        query = parse_qsl(parts.query, keep_blank_values=True)
-        normalized_query = []
-        changed = False
-        for key, value in query:
-            if key.lower() == "sslmode":
-                normalized_query.append(("ssl", value))
-                changed = True
-            else:
-                normalized_query.append((key, value))
-        if not changed:
-            return db_url
-        normalized = urlunsplit(
-            (
-                parts.scheme,
-                parts.netloc,
-                parts.path,
-                urlencode(normalized_query),
-                parts.fragment,
-            )
-        )
-        logger.info("DATABASE_URL normalized: replaced sslmode with ssl for asyncpg")
-        return normalized
-    except Exception:
-        # 解析失败时回退原值，避免启动流程被兼容逻辑阻断。
-        return db_url
+    return normalized
 
 
 def _build_async_engine_kwargs(db_url: str) -> dict[str, object]:
-    pool_size = _get_int_env("DB_POOL_SIZE", 8)
-    max_overflow = _get_int_env("DB_MAX_OVERFLOW", 2)
-    pool_timeout = _get_int_env("DB_POOL_TIMEOUT", 5)
-    pool_recycle = _get_int_env("DB_POOL_RECYCLE", 1800)
+    _require_sqlite_database_url(db_url)
 
     engine_kwargs: dict[str, object] = {
         "echo": os.getenv("DEBUG", "false").lower() == "true",
         "future": True,
         "pool_pre_ping": True,
-    }
-
-    if "sqlite" in db_url:
-        engine_kwargs["connect_args"] = {
+        "connect_args": {
             "timeout": 60,  # 增加锁等待超时时间
             "check_same_thread": False,
-        }
-
-        if any(
-            os.getenv(name, "").strip()
-            for name in (
-                "SQLITE_POOL_SIZE",
-                "SQLITE_MAX_OVERFLOW",
-                "SQLITE_POOL_TIMEOUT",
-                "SQLITE_POOL_RECYCLE",
-            )
-        ):
-            logger.warning(
-                (
-                    "SQLite+aiosqlite uses NullPool by default; "
-                    "SQLITE_POOL_SIZE/SQLITE_MAX_OVERFLOW/"
-                    "SQLITE_POOL_TIMEOUT/SQLITE_POOL_RECYCLE are ignored."
-                )
-            )
-
-        return engine_kwargs
-
-    engine_kwargs["pool_size"] = pool_size
-    engine_kwargs["max_overflow"] = max_overflow
-    engine_kwargs["pool_timeout"] = pool_timeout
-    engine_kwargs["pool_recycle"] = pool_recycle
-
-    connect_args = {}
-
-    # PostgreSQL/asyncpg 可选连接参数（按需配置）
-    # 仅在设置环境变量时生效，未设置则保持默认行为。
-    pg_connect_timeout = _get_float_env("POSTGRES_CONNECT_TIMEOUT_SECONDS")
-    if pg_connect_timeout is not None:
-        connect_args["timeout"] = pg_connect_timeout
-
-    pg_command_timeout = _get_float_env("POSTGRES_COMMAND_TIMEOUT_SECONDS")
-    if pg_command_timeout is not None:
-        connect_args["command_timeout"] = pg_command_timeout
-
-    server_settings = {}
-    # 默认开启语句/锁超时保护，避免高并发下慢锁拖垮请求。
-    statement_timeout_ms = os.getenv("POSTGRES_STATEMENT_TIMEOUT_MS", "").strip() or "30000"
-    if statement_timeout_ms:
-        server_settings["statement_timeout"] = statement_timeout_ms
-
-    lock_timeout_ms = os.getenv("POSTGRES_LOCK_TIMEOUT_MS", "").strip() or "5000"
-    if lock_timeout_ms:
-        server_settings["lock_timeout"] = lock_timeout_ms
-
-    app_name = os.getenv("POSTGRES_APPLICATION_NAME", "").strip()
-    if app_name:
-        server_settings["application_name"] = app_name
-
-    if server_settings:
-        connect_args["server_settings"] = server_settings
-
-    engine_kwargs["connect_args"] = connect_args
-    _log_connection_budget_hint(pool_size=pool_size, max_overflow=max_overflow)
+        },
+    }
     return engine_kwargs
 
 
@@ -415,7 +253,7 @@ async def init_database() -> None:
     """初始化数据库，创建所有表"""
     global _engine, _async_session_factory
     
-    db_url = _normalize_database_url_for_asyncpg(get_database_url())
+    db_url = _require_sqlite_database_url(get_database_url())
     engine_kwargs = _build_async_engine_kwargs(db_url)
     
     # 创建异步引擎
@@ -432,15 +270,11 @@ async def init_database() -> None:
     async with _engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
         # 启用 WAL 模式以支持更好的并发读写
-        if "sqlite" in db_url:
-            await conn.execute(text("PRAGMA journal_mode=WAL"))
-            await conn.execute(text("PRAGMA busy_timeout=30000"))
-            # 执行 SQLite 迁移（添加新列）
-            await _migrate_sqlite_columns(conn)
-        else:
-            await _ensure_backend_account_runtime_columns(conn)
-            await _ensure_model_group_runtime_columns(conn)
-        # token_usage_history 并发聚合桶唯一索引（支持 PostgreSQL 表达式 UPSERT）
+        await conn.execute(text(f"PRAGMA journal_mode={SQLITE_JOURNAL_MODE}"))
+        await conn.execute(text(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_MS}"))
+        # 执行 SQLite 迁移（添加新列）
+        await _migrate_sqlite_columns(conn)
+        # token_usage_history 并发聚合桶唯一索引
         await _ensure_token_usage_history_bucket_index(conn)
         # 日志查询索引（高并发下后台查询/聚合性能关键）
         await _ensure_log_query_indexes(conn)
@@ -530,32 +364,6 @@ async def _migrate_sqlite_columns(conn) -> None:
     except Exception as e:
         print(f"[Migration] Failed to migrate account_model_routes: {e}")
 
-
-async def _ensure_backend_account_runtime_columns(conn) -> None:
-    """确保 PostgreSQL 等现有环境补齐 backend_accounts 并发运行时列。"""
-    statements = [
-        "ALTER TABLE backend_accounts ADD COLUMN IF NOT EXISTS inflight_requests INTEGER DEFAULT 0 NOT NULL",
-        "ALTER TABLE backend_accounts ADD COLUMN IF NOT EXISTS inflight_updated_at TIMESTAMP NULL",
-    ]
-    for statement in statements:
-        try:
-            await conn.execute(text(statement))
-        except Exception as exc:
-            logger.warning("Failed to ensure backend_accounts runtime column with [%s]: %s", statement, exc)
-
-
-async def _ensure_model_group_runtime_columns(conn) -> None:
-    """确保 PostgreSQL 等现有环境补齐 model_groups 运行时扩展列。"""
-    statements = [
-        "ALTER TABLE model_groups ADD COLUMN IF NOT EXISTS capability_overrides TEXT NULL",
-    ]
-    for statement in statements:
-        try:
-            await conn.execute(text(statement))
-        except Exception as exc:
-            logger.warning("Failed to ensure model_groups runtime column with [%s]: %s", statement, exc)
-
-
 async def _ensure_token_usage_history_bucket_index(conn) -> None:
     """
     为 token_usage_history 建立并发聚合桶唯一索引：
@@ -599,9 +407,7 @@ async def _ensure_log_query_indexes(conn) -> None:
 
 async def _ensure_account_routing_indexes(conn) -> None:
     """为高并发账号选号路径创建索引。"""
-    dialect_name = str(getattr(getattr(conn, "dialect", None), "name", "") or "").lower()
-
-    common_statements = [
+    index_statements = [
         (
             "CREATE INDEX IF NOT EXISTS "
             "ix_account_model_routes_model_enabled_priority_account "
@@ -612,41 +418,6 @@ async def _ensure_account_routing_indexes(conn) -> None:
             "ix_backend_accounts_model_group_id "
             "ON backend_accounts(model_group, id)"
         ),
-    ]
-
-    postgres_statements = [
-        (
-            "CREATE INDEX IF NOT EXISTS "
-            "ix_account_model_routes_enabled_model_account "
-            "ON account_model_routes(model_name, account_id) "
-            "WHERE enabled = TRUE"
-        ),
-        (
-            "CREATE INDEX IF NOT EXISTS "
-            "ix_backend_accounts_active_used_lastused_order "
-            "ON backend_accounts("
-            "daily_used ASC, "
-            "last_used_at ASC NULLS FIRST, "
-            "updated_at ASC NULLS FIRST, "
-            "id ASC"
-            ") "
-            "WHERE status = 'active' AND daily_used < daily_quota"
-        ),
-        (
-            "CREATE INDEX IF NOT EXISTS "
-            "ix_backend_accounts_legacy_active_used_lastused_order "
-            "ON backend_accounts("
-            "model_group, "
-            "daily_used ASC, "
-            "last_used_at ASC NULLS FIRST, "
-            "updated_at ASC NULLS FIRST, "
-            "id ASC"
-            ") "
-            "WHERE status = 'active' AND daily_used < daily_quota"
-        ),
-    ]
-
-    fallback_statements = [
         (
             "CREATE INDEX IF NOT EXISTS "
             "ix_backend_accounts_status_last_used_updated_id "
@@ -659,11 +430,6 @@ async def _ensure_account_routing_indexes(conn) -> None:
             "WHERE status IN ('active', 'exhausted')"
         ),
     ]
-    index_statements = list(common_statements)
-    if dialect_name == "postgresql":
-        index_statements.extend(postgres_statements)
-    else:
-        index_statements.extend(fallback_statements)
 
     for statement in index_statements:
         try:
@@ -699,3 +465,12 @@ def get_session_factory() -> async_sessionmaker:
     if _async_session_factory is None:
         raise RuntimeError("Database not initialized. Call init_database() first.")
     return _async_session_factory
+
+
+def get_sqlite_runtime_settings() -> dict[str, object]:
+    """返回当前 SQLite 运行时参数，供管理后台和文档说明复用。"""
+    return {
+        "journal_mode": SQLITE_JOURNAL_MODE,
+        "busy_timeout_ms": SQLITE_BUSY_TIMEOUT_MS,
+        "busy_timeout_seconds": SQLITE_BUSY_TIMEOUT_MS / 1000,
+    }

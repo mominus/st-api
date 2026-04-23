@@ -234,7 +234,7 @@
                             </div>
                             <div class="perf-config-value">
                                 <span id="config-db-concurrent-value">50</span>
-                                <span class="perf-config-max" id="config-db-concurrent-hint">受 DB 池容量限制</span>
+                                <span class="perf-config-max" id="config-db-concurrent-hint">SQLite 建议按磁盘与 CPU 负载调节</span>
                             </div>
                         </div>
                         <div class="perf-config-item">
@@ -400,8 +400,12 @@
                     </div>
                     <div class="system-config-grid">
                         <div class="system-config-item">
-                            <span class="config-key">数据库连接池</span>
-                            <span class="config-value" id="sys-db-pool">-</span>
+                            <span class="config-key">数据库日志模式</span>
+                            <span class="config-value" id="sys-db-mode">-</span>
+                        </div>
+                        <div class="system-config-item">
+                            <span class="config-key">锁等待超时</span>
+                            <span class="config-value" id="sys-db-busy-timeout">-</span>
                         </div>
                         <div class="system-config-item">
                             <span class="config-key">数据库类型</span>
@@ -999,7 +1003,7 @@
                 <div class="form-group">
                     <label for="setting-db-concurrent">最大数据库并发</label>
                     <input type="number" id="setting-db-concurrent" min="1" max="200" value="50">
-                    <small class="text-muted" id="setting-db-concurrent-help">会被钳制到 DB_POOL_SIZE + DB_MAX_OVERFLOW 的实际池容量</small>
+                    <small class="text-muted" id="setting-db-concurrent-help">SQLite 写入竞争会更明显，建议按机器负载逐步调整</small>
                 </div>
                 <div class="form-group">
                     <label for="setting-http-connections">HTTP 连接池大小</label>

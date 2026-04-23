@@ -3290,20 +3290,13 @@ function updatePerformanceDisplay(data) {
     
     // 更新限流配置显示
     const rpmLimit = config.rpm_limit || 0;
-    const dbPoolSize = Number(config.db_pool_size || 0);
-    const dbMaxOverflow = Number(config.db_max_overflow || 0);
-    const dbPoolCapacity = Number(
-        config.db_pool_capacity !== null && config.db_pool_capacity !== undefined
-            ? config.db_pool_capacity
-            : dbPoolSize + dbMaxOverflow
-    );
     setPerfText('config-rpm-value', rpmLimit > 0 ? formatNumber(rpmLimit) : '无限制');
     setPerfText('config-rpm-max', formatNumber(config.max_rpm || 6000));
     setPerfText('config-concurrent-value', formatNumber(config.max_concurrent_requests || 100));
     setPerfText('config-db-concurrent-value', formatNumber(config.max_concurrent_db_ops || 50));
     setPerfText(
         'config-db-concurrent-hint',
-        `池容量 ${formatNumber(dbPoolSize)} + ${formatNumber(dbMaxOverflow)} = ${formatNumber(dbPoolCapacity)}`
+        'SQLite 模式下建议结合磁盘 IO 和写入竞争逐步调整'
     );
     setPerfText('config-http-pool-value', formatNumber(config.http_max_connections || 100));
     
@@ -3376,7 +3369,8 @@ function updatePerformanceDisplay(data) {
     setPerfText('perf-log-dropped-sub', `活跃 workers ${formatNumber(backgroundLogs.active_workers || 0)}`);
     
     // 更新系统配置
-    setPerfText('sys-db-pool', system.db_pool || '-');
+    setPerfText('sys-db-mode', system.db_journal_mode || '-');
+    setPerfText('sys-db-busy-timeout', system.db_busy_timeout || '-');
     setPerfText('sys-db-type', system.db_type || '-');
     setPerfText('sys-http-timeout', system.http_timeout || '-');
     setPerfText('sys-uptime', system.uptime || '-');
@@ -3422,7 +3416,7 @@ function showPerformanceSettingsModal() {
             document.getElementById('setting-http-timeout').value = config.http_timeout || 60;
             setPerfText(
                 'setting-db-concurrent-help',
-                `当前 DB 池容量为 ${formatNumber(config.db_pool_size || 0)} + ${formatNumber(config.db_max_overflow || 0)} = ${formatNumber(config.db_pool_capacity || ((config.db_pool_size || 0) + (config.db_max_overflow || 0)))}，超过后会自动钳制`
+                'SQLite 模式下没有独立连接池参数，建议按实际写入压力逐步调整'
             );
         }
         openModal('performance-settings-modal');

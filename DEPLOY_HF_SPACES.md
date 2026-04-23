@@ -1,6 +1,16 @@
-# Hugging Face Spaces 部署教程（SQLite + Persistent Storage）
+# Hugging Face Spaces 部署说明（请先看限制）
 
-本教程使用 **SQLite + Persistent Storage** 方案，无需外部数据库，无连接数限制。
+截至 2026-04-23，根据 Hugging Face 官方文档，当前有两个必须先确认的限制：
+
+1. 免费 `CPU Basic` 默认只有 `50GB` 非持久化磁盘；Space 重启、休眠恢复、重建后，本地 SQLite 数据可能丢失。
+2. `Private Space` 的运行中应用只对 owner / collaborators 可访问；外部用户访问其 URL 会得到 `404`，不适合作为公共 API 地址。
+
+所以这份文档的结论很直接：
+
+- 仅免费用户：可以临时试跑，但不适合承载“需要长期保存 SQLite 数据”的正式服务。
+- 需要外部程序直接调用 API：Space 不能设为 `Private`，至少要 `Public`。
+- 如果你想“代码不公开，但应用可访问”，需要 `Protected` visibility；这是 Hugging Face `PRO` 或 `Team & Enterprise` 能力。
+- 如果你既要稳定持久化，又要外部可调用，通常更推荐 VPS。
 
 ## 一、准备工作
 
@@ -20,20 +30,41 @@
    - **License**: 选择一个
    - **SDK**: 选择 **Docker**
    - **Hardware**: **CPU basic (Free)**
-   - **Visibility**: **Private**（推荐，保护你的 API）
+   - **Visibility**:
+     - 如果需要外部客户端直接访问：选 **Public**
+     - 如果你有付费计划且要“源码私有、应用可访问”：选 **Protected**
+     - 不要选 **Private**，除非这个 Space 只给你自己或协作者在网页里使用
 3. 点击 Create Space
 
-## 三、开启 Persistent Storage（重要！）
+## 三、先确认免费层和持久化限制（重要）
 
-⚠️ **必须开启，否则重启后数据丢失！**
+### 免费层默认情况
 
-1. 进入你的 Space 页面
-2. 点击 **Settings** 标签
-3. 找到 **Persistent Storage** 部分
-4. 选择 **Small (20GB Free)** 并点击 **Subscribe**
-5. 等待存储挂载完成
+- `CPU Basic` 免费层默认提供 `2 vCPU / 16GB RAM / 50GB` 磁盘。
+- 这 `50GB` 磁盘是 **非持久化** 的，不是可长期保存的 SQLite 数据盘。
+- 也就是说，如果你没有额外购买/附加持久化存储，不应把 HF 免费 Space 当作稳定的 SQLite 持久化部署环境。
 
-开启后，`/data` 目录的数据会持久化保存。
+### 什么时候可以把 SQLite 放到 `/data`
+
+只有在你已经为 Space 配置了 **付费持久化存储 / attached volume** 时，才建议把 SQLite 文件和日志放到 `/data`。
+
+可执行原则：
+
+- 有持久化存储：`DATABASE_URL` 用 `/data/api_service.db`
+- 没有持久化存储：可以临时运行，但 SQLite 数据不保证保留
+
+### 免费用户建议
+
+如果你当前就是免费用户，建议把 HF Spaces 仅作为：
+
+- 临时演示
+- 功能验证
+- 前端/接口联调环境
+
+不建议用于：
+
+- 正式生产
+- 需要保留账号池、API Key、日志、统计数据的长期服务
 
 ## 四、配置环境变量（Secrets）
 
@@ -41,13 +72,18 @@
 
 | 变量名 | 值 | 说明 |
 |--------|-----|------|
-| `DATABASE_URL` | `sqlite+aiosqlite:////data/api_service.db` | SQLite 数据库路径（注意：使用 /data 绝对路径） |
+| `DATABASE_URL` | `sqlite+aiosqlite:////data/api_service.db` | 仅在你已挂载持久化存储到 `/data` 时推荐这样设置 |
 | `JWT_SECRET_KEY` | 随机字符串 | 生成：`openssl rand -hex 32` |
 | `ENCRYPTION_KEY` | Fernet 密钥 | 生成：见下方命令 |
 | `ADMIN_USERNAME` | `admin` | 管理员用户名 |
 | `ADMIN_PASSWORD` | 你的密码 | 管理员密码（请修改！） |
 | `ADMIN_PATH` | 随机字符串 | 后台路径，如 `openssl rand -hex 16` |
-| `LOG_FILE` | `/data/api_service.log` | 日志文件路径 |
+| `LOG_FILE` | `/data/api_service.log` | 仅在你已挂载持久化存储到 `/data` 时推荐这样设置 |
+
+说明：
+
+- 如果你没有持久化存储，`/data` 里的数据库和日志仍然可能在 Space 重启/重建后丢失。
+- 如果 Space 设为 `Public`，请务必设置强密码、随机 `ADMIN_PATH`，并只暴露必要接口。
 
 ### 生成 Fernet 密钥
 ```bash
@@ -61,33 +97,41 @@ openssl rand -hex 32
 
 ## 五、准备部署文件
 
-### 1. 创建 Dockerfile
+### 1. Dockerfile
 
-在项目根目录创建 `Dockerfile`：
+如果你直接使用当前仓库，根目录已经包含可用的 `Dockerfile` 和 `.dockerignore`，通常不需要再手动创建。
+
+当前 `Dockerfile` 内容如下：
 
 ```dockerfile
 FROM python:3.11-slim
 
 WORKDIR /app
 
-# 安装依赖
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# 复制代码
-COPY . .
+COPY app/ ./app/
+COPY run.py .
 
-# 创建数据目录（会被 Persistent Storage 覆盖）
-RUN mkdir -p /data
+RUN mkdir -p /data && chmod 777 /data
 
-# 设置权限
 RUN chmod -R 755 /app
 
-# 暴露端口（HF Spaces 使用 7860）
+VOLUME ["/data"]
+
+ENV PORT=7860
+ENV HOST=0.0.0.0
+ENV DATABASE_URL=sqlite+aiosqlite:////data/api_service.db
+ENV LOG_FILE=/data/api_service.log
+
 EXPOSE 7860
 
-# 启动命令
-CMD ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "7860"]
+CMD ["python", "run.py"]
 ```
 
 ### 2. 创建 .dockerignore
@@ -131,6 +175,11 @@ git push hf main
 2. **健康检查**: `https://你的用户名-st-api.hf.space/health`
 3. **管理后台**: `https://你的用户名-st-api.hf.space/你的ADMIN_PATH`
 
+注意：
+
+- 以上 URL 只有在 Space 为 `Public` 或 `Protected` 时，才适合作为外部访问地址。
+- 如果 Space 为 `Private`，外部用户访问通常会得到 `404`。
+
 ### 测试健康检查
 ```bash
 curl https://你的用户名-st-api.hf.space/health
@@ -139,21 +188,17 @@ curl https://你的用户名-st-api.hf.space/health
 
 ## 八、SQLite 配置说明
 
-### 为什么选择 SQLite + Persistent Storage？
+### HF Spaces 上的 SQLite 适用场景
 
-| 对比项 | SQLite | PostgreSQL (Render/Supabase) |
-|--------|--------|------------------------------|
-| 连接数限制 | ❌ 无限制 | ⚠️ 有限制（5-10个） |
-| 配置复杂度 | ✅ 简单 | ⚠️ 需要外部服务 |
-| 成本 | ✅ 免费 | ⚠️ 可能收费 |
-| 性能 | ✅ 本地读写快 | ⚠️ 网络延迟 |
-| 并发写入 | ⚠️ 有锁竞争 | ✅ 更好 |
-
-对于中小规模 API 服务，SQLite 完全够用。
+- 项目当前仅保留 SQLite 存储，部署时无需额外数据库服务。
+- 如果你有持久化存储，SQLite + `/data` 路径是可行方案。
+- 如果你只有免费 `CPU Basic`，要重点关注“数据是否会丢失”，而不只是连接数问题。
+- 对外提供稳定 API 时，`Visibility` 也必须一起考虑，不能只看数据库。
+- 默认 SQLite 运行参数为 `journal_mode=WAL` 和 `busy_timeout=30s`。
 
 ### 数据库路径配置
 
-在 HF Spaces 中，Persistent Storage 挂载在 `/data` 目录。
+如果你已经给 Space 配置了持久化卷，建议把挂载路径设为 `/data`。
 
 **环境变量配置**：
 ```
@@ -220,11 +265,18 @@ git clone --branch v1.0.1 https://huggingface.co/spaces/你的用户名/st-api
 
 ## 十一、注意事项
 
-1. **Private Space**: 建议设为私有，避免 API 被滥用
-2. **休眠**: 免费 Space 48 小时无访问会休眠，首次访问需等待 10-30 秒启动
-3. **资源限制**: 免费版 2 vCPU + 16GB RAM，足够使用
-4. **域名格式**: `用户名-space名.hf.space`
-5. **端口**: HF Spaces 使用 7860 端口，不是 8000
+1. **Visibility**:
+   - 需要外部调用：`Public`
+   - 需要源码私有但应用可访问：`Protected`（付费计划）
+   - `Private` 不适合作为公共 API 地址
+2. **持久化**:
+   - 免费层默认 `50GB` 磁盘不是持久化存储
+   - 没有付费持久化卷时，SQLite 数据可能在重启/重建后丢失
+3. **休眠**: 免费 Space 长时间无访问会休眠，首次访问需等待冷启动
+4. **资源限制**: 免费版默认 `2 vCPU + 16GB RAM`
+5. **域名格式**: `用户名-space名.hf.space`
+6. **端口**: HF Spaces 使用 `7860`，不是 `8000`
+7. **部署建议**: 如果你要长期保存 SQLite 数据并对外提供稳定 API，更推荐 VPS
 
 ## 十二、故障排查
 
@@ -233,8 +285,9 @@ git clone --branch v1.0.1 https://huggingface.co/spaces/你的用户名/st-api
 - 查看 Logs 确认应用是否启动成功
 
 ### 数据丢失
-- 确认已开启 Persistent Storage
-- 确认 DATABASE_URL 使用 `/data/` 绝对路径
+- 确认你是否真的配置了付费持久化存储 / attached volume
+- 确认挂载路径和 `DATABASE_URL` 都指向 `/data/`
+- 如果你是免费层且没有持久化卷，数据丢失属于预期现象
 
 ### 登录失败
 - 检查 JWT_SECRET_KEY 和 ENCRYPTION_KEY 是否正确配置
@@ -243,3 +296,8 @@ git clone --branch v1.0.1 https://huggingface.co/spaces/你的用户名/st-api
 ### 无法访问管理后台
 - 确认 ADMIN_PATH 环境变量已设置
 - 访问路径格式：`https://域名/你的ADMIN_PATH`
+
+### Space URL 外部无法调用
+- 检查 Space 是否被设成了 `Private`
+- `Private Space` 只对 owner / collaborators 可访问，外部访问会返回 `404`
+- 如果你需要让第三方程序调用，请改为 `Public`；如果要源码私有但应用可访问，请使用 `Protected`

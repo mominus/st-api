@@ -252,12 +252,10 @@ curl "http://127.0.0.1:8000/v1/key/info?key=sk-xxx"
 
 1. 最小必填项
 2. 常用生产配置
-3. PostgreSQL / 47 连接起步配置
-4. 网关并发与排队
-5. 上游 HTTP 连接池、重试与账号切换
-6. 异步持久化与日志降载
-7. Tool Use
-8. 兼容旧变量
+3. 网关并发与排队
+4. 上游 HTTP 连接池、重试与账号切换
+5. 异步持久化与日志降载
+6. Tool Use
 
 优先修改这些变量：
 
@@ -280,51 +278,37 @@ curl "http://127.0.0.1:8000/v1/key/info?key=sk-xxx"
 说明：
 
 - `.env.example` 里的值主要是面向生产环境的起步配置，不一定等于代码内置默认值。
-- 对新部署，优先使用较新的变量，不要继续依赖文件底部的兼容旧变量。
-- 对工具调用较重的 Claude Code 场景，调优时应重点关注请求并发、HTTP 连接池、数据库连接池以及单账号飞行中请求保护。
+- 对工具调用较重的 Claude Code 场景，调优时应重点关注请求并发、HTTP 连接池、SQLite 写入竞争以及单账号飞行中请求保护。
 
-## PostgreSQL 配置建议（2c/4g + 47 连接）
+## SQLite 配置建议
 
-项目仍然支持 SQLite。若使用 PostgreSQL，建议从 [`.env.example`](./.env.example) 里已经分组好的这一套配置起步。
-
-针对 `2c/4g` 应用实例 + 托管 PostgreSQL（`connection_limit=47`）的推荐起步值如下：
+项目当前仅支持 SQLite。默认数据库地址是：
 
 ```env
-DATABASE_URL=postgresql+asyncpg://USER:PASSWORD@HOST:25060/defaultdb?ssl=require
-UVICORN_WORKERS=2
-MAX_CONCURRENT_REQUESTS=60
-MAX_CONCURRENT_STREAMS=40
-MAX_CONCURRENT_DB_OPS=10
-REQUEST_QUEUE_TIMEOUT_SECONDS=8
-HTTP_MAX_CONNECTIONS=160
-HTTP_MAX_CONNECTIONS_PER_HOST=40
-HTTP_MAX_KEEPALIVE=40
-DB_POOL_SIZE=8
-DB_MAX_OVERFLOW=2
-DB_POOL_TIMEOUT=5
-DB_POOL_RECYCLE=1800
-DB_CONNECTION_LIMIT=47
-DB_CONNECTION_RESERVE=6
-APP_INSTANCE_COUNT=1
-ACCOUNT_MAX_INFLIGHT_REQUESTS_PER_ACCOUNT=8
-BACKGROUND_LOG_WORKERS=2
-ASYNC_USAGE_WORKERS=2
+DATABASE_URL=sqlite+aiosqlite:///./data/api_service.db
 ```
 
-可选的 PostgreSQL 超时配置：
+部署建议：
 
-```env
-POSTGRES_CONNECT_TIMEOUT_SECONDS=8
-POSTGRES_COMMAND_TIMEOUT_SECONDS=30
-POSTGRES_STATEMENT_TIMEOUT_MS=30000
-POSTGRES_LOCK_TIMEOUT_MS=5000
-POSTGRES_APPLICATION_NAME=st-api
-```
+- 本地或单台 VPS 直接使用默认路径即可。
+- Docker、HF Spaces 等容器环境请把数据库文件放到持久化目录。
+- HF Spaces 推荐使用 `/data/api_service.db`，并开启 Persistent Storage。
+- 默认会启用 `journal_mode=WAL` 和 `busy_timeout=30s`；管理后台性能面板会直接展示这两个运行参数。
+- `MAX_CONCURRENT_DB_OPS` 建议从 `10` 起步，再按机器磁盘性能和写入竞争情况调整。
 
-快速检查连接池预算：
+容器部署示例：
 
 ```bash
-python scripts/check_pg_pool_budget.py
+docker run -d \
+  --name st-api \
+  -p 8000:7860 \
+  -v st-api-data:/data \
+  -e DATABASE_URL=sqlite+aiosqlite:////data/api_service.db \
+  -e LOG_FILE=/data/api_service.log \
+  -e JWT_SECRET_KEY=replace-with-a-random-jwt-secret \
+  -e ENCRYPTION_KEY=replace-with-a-random-fernet-key \
+  -e ADMIN_PASSWORD=replace-with-a-strong-admin-password \
+  your-image:latest
 ```
 
 ## 发布管理

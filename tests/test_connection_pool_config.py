@@ -1,26 +1,6 @@
 import asyncio
 
-from app.services.connection_pool import ConcurrencyLimiter, _resolve_max_concurrent_db_ops
-
-
-def test_resolve_max_concurrent_db_ops_clamps_to_pool_capacity():
-    effective = _resolve_max_concurrent_db_ops(
-        30,
-        db_pool_size=8,
-        db_max_overflow=2,
-    )
-
-    assert effective == 10
-
-
-def test_resolve_max_concurrent_db_ops_preserves_safe_value():
-    effective = _resolve_max_concurrent_db_ops(
-        6,
-        db_pool_size=8,
-        db_max_overflow=2,
-    )
-
-    assert effective == 6
+from app.services.connection_pool import ConcurrencyLimiter
 
 
 def test_concurrency_limiter_tracks_active_streams():

@@ -201,12 +201,7 @@ async def log_requests(request: Request, call_next):
 
     if should_track:
         limiter = get_concurrency_limiter()
-        request_queue_timeout = float(
-            os.getenv(
-                "REQUEST_QUEUE_TIMEOUT_SECONDS",
-                os.getenv("QUEUE_TIMEOUT_SECONDS", "8"),
-            )
-        )
+        request_queue_timeout = float(os.getenv("REQUEST_QUEUE_TIMEOUT_SECONDS", "8"))
         start_time = time.time()
         try:
             permit = limiter.acquire_request(timeout=request_queue_timeout)

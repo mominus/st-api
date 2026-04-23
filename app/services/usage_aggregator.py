@@ -46,13 +46,7 @@ ASYNC_USAGE_DB_ACQUIRE_TIMEOUT_SECONDS = max(
     float(
         os.getenv(
             "ASYNC_USAGE_DB_ACQUIRE_TIMEOUT_SECONDS",
-            os.getenv(
-                "DB_OP_ACQUIRE_TIMEOUT_SECONDS",
-                os.getenv(
-                    "REQUEST_QUEUE_TIMEOUT_SECONDS",
-                    os.getenv("QUEUE_TIMEOUT_SECONDS", "8"),
-                ),
-            ),
+            os.getenv("DB_OP_ACQUIRE_TIMEOUT_SECONDS", os.getenv("REQUEST_QUEUE_TIMEOUT_SECONDS", "8")),
         )
     ),
 )

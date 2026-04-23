@@ -60,6 +60,7 @@ class _FakeBridge:
 class _FakeRuntime:
     def __init__(self, stream_tokens):
         self._stream_tokens = stream_tokens
+        self.token_counter = SimpleNamespace(count=lambda text: len(text or ""))
 
     @staticmethod
     def resolve_request_id(*, headers):

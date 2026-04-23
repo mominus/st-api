@@ -68,6 +68,7 @@ class _FakeRuntime:
         self._stream_chunks = list(stream_chunks or [])
         self._backend_response = backend_response or {"outputs": {"out-0": "done"}}
         self._final_usage = final_usage or UsageNumbers(input_tokens=7, output_tokens=11, total_tokens=18)
+        self.token_counter = SimpleNamespace(count=lambda text: len(text or ""))
 
     @staticmethod
     def resolve_request_id(*, headers):

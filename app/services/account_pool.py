@@ -10,7 +10,7 @@ from typing import Optional, List, Dict, Any, Tuple
 from collections import defaultdict
 import logging
 
-from sqlalchemy import select, update, delete, and_, case, text
+from sqlalchemy import select, update, delete, and_, case
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.database import (
@@ -44,22 +44,6 @@ class AccountPoolService:
         """初始化账号池服务"""
         # 轮询索引，按模型组分别维护
         self._round_robin_index: Dict[str, int] = defaultdict(int)
-        # PostgreSQL 表达式 UPSERT 兼容标记（失败后自动回退到锁定路径）
-        self._usage_upsert_available: bool = True
-
-    @staticmethod
-    def _session_dialect(session: AsyncSession) -> str:
-        try:
-            bind = session.get_bind()
-            if bind is not None and bind.dialect is not None:
-                return str(bind.dialect.name or "").lower()
-        except Exception:
-            pass
-        return ""
-
-    @classmethod
-    def _is_postgres_session(cls, session: AsyncSession) -> bool:
-        return cls._session_dialect(session) == "postgresql"
 
     @staticmethod
     def _chunked(values: List[str], chunk_size: int = 500) -> List[List[str]]:
@@ -837,13 +821,6 @@ class AccountPoolService:
         Returns:
             可用的账号对象，如果没有可用账号则返回 None
         """
-        if self._is_postgres_session(session):
-            return await self._get_available_account_postgres(
-                session,
-                model_group,
-                exclude_account_id=exclude_account_id,
-            )
-
         accounts = await self._list_model_group_accounts(session, model_group)
 
         if not accounts:
@@ -883,6 +860,13 @@ class AccountPoolService:
                 model_group,
                 active_eligible_accounts,
             )
+            now = utc_now_naive()
+            if self._reservation_enabled():
+                account.inflight_requests = self._effective_inflight_requests(account, now=now) + 1
+                account.inflight_updated_at = now
+            account.last_used_at = now
+            account.updated_at = now
+            await session.flush()
             logger.debug(
                 "Selected active account %s for group %s (used=%s quota=%s remaining=%s)",
                 getattr(account, "id", None),
@@ -948,105 +932,6 @@ class AccountPoolService:
         ]
 
         return self._select_round_robin_account(model_group, candidates)
-
-    async def _get_available_account_postgres(
-        self,
-        session: AsyncSession,
-        model_group: str,
-        *,
-        exclude_account_id: Optional[str] = None,
-    ) -> Optional[STAccount]:
-        """
-        PostgreSQL 并发安全选号：
-        使用 FOR UPDATE SKIP LOCKED，避免并发请求同时挑中同一账号。
-        仅从 active 账号中选择，并优先挑选今日使用量更低、当前 inflight 更低的账号。
-        """
-        now = utc_now_naive()
-        enabled_route_exists = self._enabled_route_exists_clause(model_group)
-
-        account = await self._select_available_account_postgres(
-            session,
-            now=now,
-            extra_conditions=[enabled_route_exists],
-            exclude_account_id=exclude_account_id,
-        )
-        if account is not None:
-            return account
-
-        return await self._select_available_account_postgres(
-            session,
-            now=now,
-            extra_conditions=[
-                STAccount.model_group == model_group,
-                ~enabled_route_exists,
-            ],
-            exclude_account_id=exclude_account_id,
-        )
-
-    @staticmethod
-    def _enabled_route_exists_clause(model_group: str):
-        return (
-            select(AccountModelRoute.id)
-            .where(
-                and_(
-                    AccountModelRoute.account_id == STAccount.id,
-                    AccountModelRoute.model_name == model_group,
-                    AccountModelRoute.enabled == True,
-                )
-            )
-            .correlate(STAccount)
-            .exists()
-        )
-
-    async def _select_available_account_postgres(
-        self,
-        session: AsyncSession,
-        *,
-        now: datetime,
-        extra_conditions: List[Any],
-        exclude_account_id: Optional[str],
-    ) -> Optional[STAccount]:
-        """选择一个 PostgreSQL 可用 active 账号。"""
-        query_conditions = [
-            STAccount.status == "active",
-            STAccount.daily_used < STAccount.daily_quota,
-            *extra_conditions,
-        ]
-        if exclude_account_id:
-            query_conditions.append(STAccount.id != exclude_account_id)
-
-        effective_inflight = self._effective_inflight_expr(self._reservation_stale_before(now))
-        if self._reservation_enabled():
-            query_conditions.append(
-                effective_inflight < ACCOUNT_MAX_INFLIGHT_REQUESTS_PER_ACCOUNT
-            )
-
-        result = await session.execute(
-            select(STAccount)
-            .where(and_(*query_conditions))
-            .order_by(
-                STAccount.daily_used.asc(),
-                effective_inflight.asc(),
-                STAccount.last_used_at.asc().nullsfirst(),
-                STAccount.updated_at.asc().nullsfirst(),
-                STAccount.id.asc(),
-            )
-            .with_for_update(of=STAccount, skip_locked=True)
-            .limit(1)
-        )
-        account = result.scalar_one_or_none()
-        if account is None:
-            return None
-
-        # 预占位：在锁定事务内刷新 last_used_at，降低同一账号被连续挑中的概率。
-        if self._reservation_enabled():
-            account.inflight_requests = self._effective_inflight_requests(account, now=now) + 1
-            account.inflight_updated_at = now
-        account.last_used_at = now
-        account.updated_at = now
-        await session.flush()
-        return account
-
     async def release_account_request(
         self,
         session: AsyncSession,
@@ -1298,51 +1183,6 @@ class AccountPoolService:
         today = utc_today()
         safe_request_count = max(1, int(request_count))
         
-        if self._usage_upsert_available and self._is_postgres_session(session):
-            try:
-                # PostgreSQL: 基于表达式唯一索引的原子 UPSERT
-                await session.execute(
-                    text(
-                        """
-                        INSERT INTO token_usage_history (
-                            date, account_id, api_key_id, input_tokens, output_tokens, request_count
-                        )
-                        VALUES (
-                            :date, :account_id, :api_key_id, :input_tokens, :output_tokens, :request_count
-                        )
-                        ON CONFLICT (date, COALESCE(account_id, ''), COALESCE(api_key_id, ''))
-                        DO UPDATE SET
-                            input_tokens = token_usage_history.input_tokens + EXCLUDED.input_tokens,
-                            output_tokens = token_usage_history.output_tokens + EXCLUDED.output_tokens,
-                            request_count = token_usage_history.request_count + EXCLUDED.request_count
-                        """
-                    ),
-                    {
-                        "date": today,
-                        "account_id": account_id,
-                        "api_key_id": api_key_id,
-                        "input_tokens": input_tokens,
-                        "output_tokens": output_tokens,
-                        "request_count": safe_request_count,
-                    },
-                )
-                return
-            except Exception as exc:
-                # 仅降级一次，后续直接走锁定回退路径，避免重复异常开销。
-                self._usage_upsert_available = False
-                logger.warning(
-                    "Token usage history UPSERT unavailable, fallback to locked merge path: %s",
-                    exc,
-                )
-
-        # 回退路径（兼容 SQLite / 索引未就绪）：事务级锁 + 合并重复行
-        if self._is_postgres_session(session):
-            bucket_key = f"{today.isoformat()}|{account_id or ''}|{api_key_id or ''}"
-            await session.execute(
-                text("SELECT pg_advisory_xact_lock(hashtext(:bucket_key))"),
-                {"bucket_key": bucket_key},
-            )
-
         conditions = [TokenUsageHistory.date == today]
         if account_id is None:
             conditions.append(TokenUsageHistory.account_id.is_(None))

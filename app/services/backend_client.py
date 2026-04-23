@@ -114,10 +114,7 @@ class BackendClient:
         configured_pool_timeout = float(
             os.getenv(
                 "HTTP_POOL_TIMEOUT_SECONDS",
-                os.getenv(
-                    "REQUEST_QUEUE_TIMEOUT_SECONDS",
-                    os.getenv("QUEUE_TIMEOUT_SECONDS", "8"),
-                ),
+                os.getenv("REQUEST_QUEUE_TIMEOUT_SECONDS", "8"),
             )
         )
         self.http_pool_timeout = max(

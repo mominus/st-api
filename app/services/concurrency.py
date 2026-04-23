@@ -423,7 +423,7 @@ def get_concurrency_manager() -> ConcurrencyManager:
         import os
         max_concurrent = int(os.getenv("MAX_CONCURRENT_REQUESTS", "60"))
         max_per_group = int(os.getenv("MAX_CONCURRENT_PER_MODEL_GROUP", "20"))
-        queue_timeout = float(os.getenv("QUEUE_TIMEOUT_SECONDS", "8"))
+        queue_timeout = float(os.getenv("REQUEST_QUEUE_TIMEOUT_SECONDS", "8"))
         
         _concurrency_manager = ConcurrencyManager(
             max_concurrent=max_concurrent,

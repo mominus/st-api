@@ -55,13 +55,9 @@ if [[ -z "${MAX_CONCURRENT_REQUESTS:-}" ]]; then
 fi
 
 if [[ -z "${REQUEST_QUEUE_TIMEOUT_SECONDS:-}" ]]; then
-  if [[ -n "${QUEUE_TIMEOUT_SECONDS:-}" ]]; then
-    export REQUEST_QUEUE_TIMEOUT_SECONDS="$QUEUE_TIMEOUT_SECONDS"
-  else
-    export REQUEST_QUEUE_TIMEOUT_SECONDS="$(
-      awk -v rt="$REQUEST_TIMEOUT_ARG" 'BEGIN { v = rt + 0; if (v < 30) v = 30; printf "%.0f", v }'
-    )"
-  fi
+  export REQUEST_QUEUE_TIMEOUT_SECONDS="$(
+    awk -v rt="$REQUEST_TIMEOUT_ARG" 'BEGIN { v = rt + 0; if (v < 30) v = 30; printf "%.0f", v }'
+  )"
 fi
 
 echo "server_limits max_concurrent=${MAX_CONCURRENT_REQUESTS} queue_timeout=${REQUEST_QUEUE_TIMEOUT_SECONDS} client_concurrency=${CLIENT_CONCURRENCY}"

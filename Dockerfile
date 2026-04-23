@@ -26,6 +26,9 @@ RUN mkdir -p /data && chmod 777 /data
 # 设置权限
 RUN chmod -R 755 /app
 
+# 容器内 SQLite 数据目录；本地 Docker 请挂载 /data
+VOLUME ["/data"]
+
 # HF Spaces 使用 7860 端口
 ENV PORT=7860
 ENV HOST=0.0.0.0
@@ -36,4 +39,4 @@ ENV LOG_FILE=/data/api_service.log
 EXPOSE 7860
 
 # 启动命令
-CMD ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "7860"]
+CMD ["python", "run.py"]

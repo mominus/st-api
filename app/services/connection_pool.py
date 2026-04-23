@@ -3,7 +3,7 @@ Connection Pool Management
 高并发连接池管理，优化数据库和 HTTP 客户端连接
 
 支持:
-- 数据库连接池配置
+- 数据库并发闸门
 - HTTP 客户端连接池
 - 信号量限流
 - 并发请求管理
@@ -32,44 +32,8 @@ def _get_int_env(name: str, default: int) -> int:
         return default
 
 
-def _db_pool_capacity(db_pool_size: int, db_max_overflow: int) -> int:
-    return max(1, int(db_pool_size) + int(db_max_overflow))
-
-
-def _resolve_max_concurrent_db_ops(
-    configured_value: int,
-    *,
-    db_pool_size: int,
-    db_max_overflow: int,
-) -> int:
-    pool_capacity = _db_pool_capacity(db_pool_size, db_max_overflow)
-    sanitized = max(1, int(configured_value))
-
-    if sanitized > pool_capacity:
-        logger.warning(
-            (
-                "MAX_CONCURRENT_DB_OPS=%s exceeds DB pool capacity=%s "
-                "(pool_size=%s, max_overflow=%s); clamped to %s"
-            ),
-            sanitized,
-            pool_capacity,
-            db_pool_size,
-            db_max_overflow,
-            pool_capacity,
-        )
-        return pool_capacity
-
-    return sanitized
-
-
 class ConnectionPoolConfig:
     """连接池配置"""
-
-    # 数据库连接池配置
-    DB_POOL_SIZE: int = _get_int_env("DB_POOL_SIZE", 8)
-    DB_MAX_OVERFLOW: int = _get_int_env("DB_MAX_OVERFLOW", 2)
-    DB_POOL_TIMEOUT: int = _get_int_env("DB_POOL_TIMEOUT", 5)
-    DB_POOL_RECYCLE: int = _get_int_env("DB_POOL_RECYCLE", 1800)
 
     # HTTP 客户端连接池配置
     HTTP_MAX_CONNECTIONS: int = int(os.getenv("HTTP_MAX_CONNECTIONS", "100"))
@@ -83,15 +47,7 @@ class ConnectionPoolConfig:
         "MAX_CONCURRENT_STREAMS",
         MAX_CONCURRENT_REQUESTS,
     )
-    CONFIGURED_MAX_CONCURRENT_DB_OPS: int = _get_int_env(
-        "MAX_CONCURRENT_DB_OPS",
-        _db_pool_capacity(DB_POOL_SIZE, DB_MAX_OVERFLOW),
-    )
-    MAX_CONCURRENT_DB_OPS: int = _resolve_max_concurrent_db_ops(
-        CONFIGURED_MAX_CONCURRENT_DB_OPS,
-        db_pool_size=DB_POOL_SIZE,
-        db_max_overflow=DB_MAX_OVERFLOW,
-    )
+    MAX_CONCURRENT_DB_OPS: int = _get_int_env("MAX_CONCURRENT_DB_OPS", 10)
 
 
 class HTTPClientPool:

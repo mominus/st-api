@@ -3,618 +3,944 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>管理后台</title>
-    <link rel="stylesheet" href="/static/style.css?v=2">
+    <title>Service Control</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/tom-select@2.4.1/dist/css/tom-select.min.css">
+    <link rel="stylesheet" href="/static/style.css?v=16">
 </head>
 <body>
-    <!-- 登录页面 -->
-    <div id="login-page" class="login-container">
-        <div class="login-box">
-            <h1>🔐 管理后台</h1>
-            <form id="login-form">
-                <div class="form-group">
-                    <label for="username">用户名</label>
-                    <input type="text" id="username" name="username" required placeholder="请输入用户名">
-                </div>
-                <div class="form-group">
-                    <label for="password">密码</label>
-                    <input type="password" id="password" name="password" required placeholder="请输入密码">
-                </div>
-                <div id="login-error" class="text-danger mb-10 hidden"></div>
-                <button type="submit" class="btn btn-primary btn-block">登录</button>
-            </form>
+    <svg class="icon-sprite" aria-hidden="true">
+        <symbol id="icon-dashboard" viewBox="0 0 24 24">
+            <rect x="3" y="3" width="7" height="7" rx="2" fill="none" stroke="currentColor" stroke-width="1.8"></rect>
+            <rect x="14" y="3" width="7" height="7" rx="2" fill="none" stroke="currentColor" stroke-width="1.8"></rect>
+            <rect x="3" y="14" width="7" height="7" rx="2" fill="none" stroke="currentColor" stroke-width="1.8"></rect>
+            <rect x="14" y="14" width="7" height="7" rx="2" fill="none" stroke="currentColor" stroke-width="1.8"></rect>
+        </symbol>
+        <symbol id="icon-performance" viewBox="0 0 24 24">
+            <path d="M4 17l4-5 4 3 5-8 3 3" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8"></path>
+            <path d="M4 20h16" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="1.8"></path>
+        </symbol>
+        <symbol id="icon-accounts" viewBox="0 0 24 24">
+            <path d="M16 19a4 4 0 0 0-8 0" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="1.8"></path>
+            <circle cx="12" cy="9" r="3.5" fill="none" stroke="currentColor" stroke-width="1.8"></circle>
+            <path d="M20 18a3.2 3.2 0 0 0-2.7-3.1M4 18a3.2 3.2 0 0 1 2.7-3.1" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="1.8"></path>
+        </symbol>
+        <symbol id="icon-groups" viewBox="0 0 24 24">
+            <path d="M12 3l8 4.2-8 4.3-8-4.3L12 3zM4 12.2l8 4.3 8-4.3M4 17l8 4 8-4" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8"></path>
+        </symbol>
+        <symbol id="icon-key" viewBox="0 0 24 24">
+            <circle cx="8.5" cy="12" r="3.5" fill="none" stroke="currentColor" stroke-width="1.8"></circle>
+            <path d="M12 12h8M17 12v3M20 12v2" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="1.8"></path>
+        </symbol>
+        <symbol id="icon-logs" viewBox="0 0 24 24">
+            <path d="M7 6h11M7 12h11M7 18h11" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="1.8"></path>
+            <circle cx="4" cy="6" r="1" fill="currentColor"></circle>
+            <circle cx="4" cy="12" r="1" fill="currentColor"></circle>
+            <circle cx="4" cy="18" r="1" fill="currentColor"></circle>
+        </symbol>
+        <symbol id="icon-logout" viewBox="0 0 24 24">
+            <path d="M15 7l5 5-5 5" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8"></path>
+            <path d="M20 12H9M12 4H5a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h7" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8"></path>
+        </symbol>
+        <symbol id="icon-sync" viewBox="0 0 24 24">
+            <path d="M3 12a9 9 0 0 1 15.6-6.2M21 12a9 9 0 0 1-15.6 6.2" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="1.8"></path>
+            <path d="M18.5 3.8v4.7h-4.7M5.5 20.2v-4.7h4.7" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8"></path>
+        </symbol>
+        <symbol id="icon-settings" viewBox="0 0 24 24">
+            <circle cx="12" cy="12" r="3.2" fill="none" stroke="currentColor" stroke-width="1.8"></circle>
+            <path d="M19.4 15a1 1 0 0 0 .2 1.1l.1.1a1 1 0 0 1 0 1.4l-1.1 1.1a1 1 0 0 1-1.4 0l-.1-.1a1 1 0 0 0-1.1-.2 1 1 0 0 0-.6.9V20a1 1 0 0 1-1 1h-1.6a1 1 0 0 1-1-1v-.1a1 1 0 0 0-.7-.9 1 1 0 0 0-1 .2l-.2.1a1 1 0 0 1-1.4 0l-1.1-1.1a1 1 0 0 1 0-1.4l.1-.1a1 1 0 0 0 .2-1.1 1 1 0 0 0-.9-.6H4a1 1 0 0 1-1-1v-1.6a1 1 0 0 1 1-1h.1a1 1 0 0 0 .9-.7 1 1 0 0 0-.2-1l-.1-.2a1 1 0 0 1 0-1.4l1.1-1.1a1 1 0 0 1 1.4 0l.1.1a1 1 0 0 0 1.1.2 1 1 0 0 0 .6-.9V4a1 1 0 0 1 1-1h1.6a1 1 0 0 1 1 1v.1a1 1 0 0 0 .7.9 1 1 0 0 0 1-.2l.2-.1a1 1 0 0 1 1.4 0l1.1 1.1a1 1 0 0 1 0 1.4l-.1.1a1 1 0 0 0-.2 1.1 1 1 0 0 0 .9.6H20a1 1 0 0 1 1 1v1.6a1 1 0 0 1-1 1h-.1a1 1 0 0 0-.9.7" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.4"></path>
+        </symbol>
+        <symbol id="icon-import" viewBox="0 0 24 24">
+            <path d="M12 4v10M8 10l4 4 4-4M5 20h14" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8"></path>
+        </symbol>
+        <symbol id="icon-plus" viewBox="0 0 24 24">
+            <path d="M12 5v14M5 12h14" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="1.8"></path>
+        </symbol>
+        <symbol id="icon-trash" viewBox="0 0 24 24">
+            <path d="M4 7h16M10 11v6M14 11v6M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12M9 7V4h6v3" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8"></path>
+        </symbol>
+        <symbol id="icon-requests" viewBox="0 0 24 24">
+            <path d="M5 19V9M12 19V5M19 19v-7M4 19h16" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="1.8"></path>
+        </symbol>
+        <symbol id="icon-signal" viewBox="0 0 24 24">
+            <path d="M4 18h2M8 14h2M12 10h2M16 6h2M20 3h0" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="2"></path>
+        </symbol>
+        <symbol id="icon-token" viewBox="0 0 24 24">
+            <path d="M12 3l7 4v10l-7 4-7-4V7l7-4z" fill="none" stroke="currentColor" stroke-linejoin="round" stroke-width="1.8"></path>
+            <path d="M9 10.5h6M9 13.5h4" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="1.8"></path>
+        </symbol>
+        <symbol id="icon-money" viewBox="0 0 24 24">
+            <path d="M4 7h16v10H4z" fill="none" stroke="currentColor" stroke-linejoin="round" stroke-width="1.8"></path>
+            <circle cx="12" cy="12" r="2.7" fill="none" stroke="currentColor" stroke-width="1.8"></circle>
+            <path d="M7 10c1.1 0 2-.9 2-2M17 10c-1.1 0-2-.9-2-2M7 14c1.1 0 2 .9 2 2M17 14c-1.1 0-2 .9-2 2" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="1.4"></path>
+        </symbol>
+        <symbol id="icon-inbound" viewBox="0 0 24 24">
+            <path d="M17 7L7 17M7 17h7M7 17V10" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8"></path>
+        </symbol>
+        <symbol id="icon-outbound" viewBox="0 0 24 24">
+            <path d="M7 17L17 7M17 7h-7M17 7v7" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8"></path>
+        </symbol>
+        <symbol id="icon-stream" viewBox="0 0 24 24">
+            <path d="M4 8h5l2 3 2-6 2 10 2-4h3" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8"></path>
+        </symbol>
+        <symbol id="icon-database" viewBox="0 0 24 24">
+            <ellipse cx="12" cy="6" rx="7" ry="3" fill="none" stroke="currentColor" stroke-width="1.8"></ellipse>
+            <path d="M5 6v6c0 1.7 3.1 3 7 3s7-1.3 7-3V6M5 12v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6" fill="none" stroke="currentColor" stroke-width="1.8"></path>
+        </symbol>
+        <symbol id="icon-clock" viewBox="0 0 24 24">
+            <circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" stroke-width="1.8"></circle>
+            <path d="M12 8v4l3 2" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8"></path>
+        </symbol>
+        <symbol id="icon-shield" viewBox="0 0 24 24">
+            <path d="M12 3l7 3v5c0 4.6-2.7 8.7-7 10-4.3-1.3-7-5.4-7-10V6l7-3z" fill="none" stroke="currentColor" stroke-linejoin="round" stroke-width="1.8"></path>
+            <path d="M9.5 12l1.8 1.8L15 10.2" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8"></path>
+        </symbol>
+    </svg>
 
+    <div id="login-page" class="login-container">
+        <div class="login-shell login-shell-refined">
+            <section class="login-aside" aria-hidden="true">
+                <div class="login-aside-bg">
+                    <span class="login-aside-orb login-aside-orb--a"></span>
+                    <span class="login-aside-orb login-aside-orb--b"></span>
+                    <span class="login-aside-orb login-aside-orb--c"></span>
+                    <div class="login-aside-grid"></div>
+                </div>
+                <header class="login-aside-header">
+                    <div class="login-aside-brand">
+                        <span class="login-aside-brand-mark">ST</span>
+                        <strong class="login-aside-brand-name">st-api</strong>
+                    </div>
+                    <span class="login-aside-status">
+                        <i class="login-aside-status-dot"></i>
+                        <span>System Online</span>
+                    </span>
+                </header>
+                <div class="login-aside-hero">
+                    <span class="login-aside-eyebrow">Admin Console</span>
+                    <h1 class="login-aside-title">
+                        <span class="login-aside-title-line">统一编排</span>
+                        <span class="login-aside-title-line">多源 AI 网关</span>
+                    </h1>
+                    <p class="login-aside-lead">集中调度账号、模型组与 API Key,实时洞察请求趋势与成本表现,让每一次推理都可观测、可治理。</p>
+                </div>
+                <ul class="login-aside-features">
+                    <li>
+                        <span class="login-aside-feature-icon">
+                            <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#icon-performance"></use></svg>
+                        </span>
+                        <div class="login-aside-feature-copy">
+                            <strong>实时监控</strong>
+                            <span>请求量、延迟、成功率一目了然</span>
+                        </div>
+                    </li>
+                    <li>
+                        <span class="login-aside-feature-icon">
+                            <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#icon-groups"></use></svg>
+                        </span>
+                        <div class="login-aside-feature-copy">
+                            <strong>模型组治理</strong>
+                            <span>账号配额与限流策略统一编排</span>
+                        </div>
+                    </li>
+                    <li>
+                        <span class="login-aside-feature-icon">
+                            <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#icon-shield"></use></svg>
+                        </span>
+                        <div class="login-aside-feature-copy">
+                            <strong>安全审计</strong>
+                            <span>调用日志全程留存、可回溯</span>
+                        </div>
+                    </li>
+                </ul>
+                <footer class="login-aside-footer">
+                    <span class="login-aside-meta">多模型 · 多账号 · 多团队</span>
+                    <span class="login-aside-pill">v2</span>
+                </footer>
+            </section>
+            <section class="login-box">
+                <div class="login-box-inner">
+                    <div class="login-brand-row">
+                        <div class="login-brand-block">
+                            <span class="login-brand-mark">ST</span>
+                            <div class="login-brand-copy">
+                                <strong>st-api</strong>
+                                <span>控制台</span>
+                            </div>
+                        </div>
+                        <span class="login-brand-chip">Admin</span>
+                    </div>
+                    <div class="login-heading">
+                        <h2>欢迎回来</h2>
+                        <p class="login-heading-lead">请使用管理员凭证进入 st-api 控制台</p>
+                    </div>
+                    <form id="login-form">
+                        <div class="form-group">
+                            <label for="username">用户名</label>
+                            <input type="text" id="username" name="username" required placeholder="请输入用户名">
+                        </div>
+                        <div class="form-group">
+                            <label for="password">密码</label>
+                            <input type="password" id="password" name="password" required placeholder="请输入密码">
+                        </div>
+                        <div id="login-error" class="text-danger mb-10 hidden"></div>
+                        <button type="submit" class="btn btn-primary btn-block">登录</button>
+                    </form>
+                </div>
+            </section>
         </div>
     </div>
 
-    <!-- 管理后台主界面 -->
     <div id="admin-page" class="admin-layout hidden">
-        <!-- 移动端菜单按钮 -->
         <button class="mobile-menu-btn" id="mobile-menu-btn" aria-label="打开菜单">
             <span class="hamburger"></span>
         </button>
-        
-        <!-- 侧边栏遮罩 -->
+
         <div class="sidebar-overlay" id="sidebar-overlay"></div>
-        
-        <!-- 侧边栏 -->
+
         <aside class="sidebar" id="sidebar">
             <div class="sidebar-header">
-                <h2>🚀 API Service</h2>
+                <div class="sidebar-brand">
+                    <div class="brand-mark">ST</div>
+                    <div class="brand-copy">
+                        <strong>st-api</strong>
+                        <span>后台管理</span>
+                    </div>
+                </div>
             </div>
+            <div class="sidebar-section-label">工作台</div>
             <ul class="sidebar-nav">
-                <li><a href="#" data-page="dashboard" class="active"><span class="icon">📊</span> 仪表板</a></li>
-                <li><a href="#" data-page="performance"><span class="icon">⚡</span> 性能监控</a></li>
-                <li><a href="#" data-page="accounts"><span class="icon">👤</span> 账号管理</a></li>
-                <li><a href="#" data-page="groups"><span class="icon">📁</span> 模型组</a></li>
-                <li><a href="#" data-page="apikeys"><span class="icon">🔑</span> API Key</a></li>
-                <li><a href="#" data-page="logs"><span class="icon">📋</span> 调用日志</a></li>
-                <li><a href="#" id="logout-btn"><span class="icon">🚪</span> 退出登录</a></li>
+                <li>
+                    <a href="#" data-page="dashboard" data-kicker="Overview" data-title="监控中心" data-subtitle="查看账号配额、调用量和服务健康状态。" class="active">
+                        <span class="icon nav-icon"><svg class="icon-svg"><use href="#icon-dashboard"></use></svg></span>
+                        <span>仪表板</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="#" data-page="performance" data-kicker="Performance" data-title="性能监控" data-subtitle="观察排队、吞吐、连接池与落库链路。">
+                        <span class="icon nav-icon"><svg class="icon-svg"><use href="#icon-performance"></use></svg></span>
+                        <span>性能监控</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="#" data-page="accounts" data-kicker="Accounts" data-title="账号管理" data-subtitle="维护账号状态、模型绑定与批量测试。">
+                        <span class="icon nav-icon"><svg class="icon-svg"><use href="#icon-accounts"></use></svg></span>
+                        <span>账号管理</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="#" data-page="groups" data-kicker="Routing" data-title="模型组管理" data-subtitle="维护路由入口、计价与能力覆盖配置。">
+                        <span class="icon nav-icon"><svg class="icon-svg"><use href="#icon-groups"></use></svg></span>
+                        <span>模型组</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="#" data-page="apikeys" data-kicker="Access" data-title="API Key 管理" data-subtitle="管理授权模型组、限制策略与有效期。">
+                        <span class="icon nav-icon"><svg class="icon-svg"><use href="#icon-key"></use></svg></span>
+                        <span>API Key</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="#" data-page="logs" data-kicker="Audit" data-title="调用日志" data-subtitle="追踪调用明细、错误上下文和成本分布。">
+                        <span class="icon nav-icon"><svg class="icon-svg"><use href="#icon-logs"></use></svg></span>
+                        <span>调用日志</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="#" id="logout-btn">
+                        <span class="icon nav-icon"><svg class="icon-svg"><use href="#icon-logout"></use></svg></span>
+                        <span>退出登录</span>
+                    </a>
+                </li>
             </ul>
-            <div class="sidebar-footer">
-                <span class="sidebar-version" id="sidebar-version">版本 -</span>
-            </div>
         </aside>
 
-        <!-- 主内容区 -->
         <main class="main-content">
-            <!-- 仪表板页面 -->
-            <div id="page-dashboard" class="page-content">
-                <div class="page-header">
-                    <h1>📊 监控中心</h1>
-                    <div class="header-actions">
-                        <button class="btn btn-info" onclick="syncAllAccounts()" id="sync-all-btn">
-                            <svg class="sync-icon" viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
-                                <path d="M12 4V1L8 5l4 4V6c3.31 0 6 2.69 6 6 0 1.01-.25 1.97-.7 2.8l1.46 1.46C19.54 15.03 20 13.57 20 12c0-4.42-3.58-8-8-8zm0 14c-3.31 0-6-2.69-6-6 0-1.01.25-1.97.7-2.8L5.24 7.74C4.46 8.97 4 10.43 4 12c0 4.42 3.58 8 8 8v3l4-4-4-4v3z"/>
-                            </svg>
-                            同步全部
-                        </button>
+            <div class="workspace-shell">
+                <div class="workspace-header">
+                    <div class="workspace-heading">
+                        <p class="workspace-kicker" id="workspace-kicker">Overview</p>
+                        <h1 id="workspace-title">监控中心</h1>
+                        <p class="workspace-subtitle" id="workspace-subtitle">查看账号配额、调用量和服务健康状态。</p>
                     </div>
-                </div>
-                
-                <!-- 系统概览统计 -->
-                <div class="stats-grid stats-grid-4">
-                    <div class="stat-card">
-                        <div class="stat-icon">👤</div>
-                        <div class="stat-label">活跃账号</div>
-                        <div class="stat-value" id="stat-active-accounts">-</div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-icon" style="background: #d1fae5;">🔑</div>
-                        <div class="stat-label">API Key</div>
-                        <div class="stat-value" id="stat-api-keys">-</div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-icon" style="background: #fef3c7;">📡</div>
-                        <div class="stat-label">今日请求</div>
-                        <div class="stat-value" id="stat-today-requests">-</div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-icon" style="background: #e0f2fe;">💎</div>
-                        <div class="stat-label">今日 Token</div>
-                        <div class="stat-value" id="stat-today-tokens">-</div>
-                        <div class="stat-cost" id="stat-today-tokens-cost"></div>
-                    </div>
-                </div>
-                
-                <!-- 历史累计统计 -->
-                <div class="stats-grid stats-grid-4" style="margin-top: 16px;">
-                    <div class="stat-card" style="background: linear-gradient(135deg, #f0f9ff 0%, #e0f2fe 100%);">
-                        <div class="stat-icon" style="background: #bae6fd;">📊</div>
-                        <div class="stat-label">总请求数</div>
-                        <div class="stat-value" id="stat-all-time-requests">-</div>
-                    </div>
-                    <div class="stat-card" style="background: linear-gradient(135deg, #f0fdf4 0%, #dcfce7 100%);">
-                        <div class="stat-icon" style="background: #bbf7d0;">💰</div>
-                        <div class="stat-label">总 Token</div>
-                        <div class="stat-value" id="stat-all-time-tokens">-</div>
-                        <div class="stat-cost" id="stat-all-time-tokens-cost"></div>
-                    </div>
-                    <div class="stat-card" style="background: linear-gradient(135deg, #fefce8 0%, #fef9c3 100%);">
-                        <div class="stat-icon" style="background: #fef08a;">📥</div>
-                        <div class="stat-label">总输入 Token</div>
-                        <div class="stat-value" id="stat-all-time-input">-</div>
-                        <div class="stat-cost" id="stat-all-time-input-cost"></div>
-                    </div>
-                    <div class="stat-card" style="background: linear-gradient(135deg, #fdf4ff 0%, #fae8ff 100%);">
-                        <div class="stat-icon" style="background: #f5d0fe;">📤</div>
-                        <div class="stat-label">总输出 Token</div>
-                        <div class="stat-value" id="stat-all-time-output">-</div>
-                        <div class="stat-cost" id="stat-all-time-output-cost"></div>
+                    <div class="workspace-meta">
+                        <div class="meta-pill">
+                            <span>Workspace</span>
+                            <strong>st-api</strong>
+                        </div>
+                        <div class="meta-pill">
+                            <span>当前版本</span>
+                            <strong id="workspace-version">-</strong>
+                        </div>
                     </div>
                 </div>
 
-                <!-- 账号监控表格 -->
-                <div class="card">
-                    <div class="card-header-bar">
-                        <h3>📈 账号实时监控</h3>
-                        <span class="text-muted" id="last-sync-time"></span>
+                <div class="workspace-body">
+                <div id="page-dashboard" class="page-content">
+                    <div class="page-header page-header-feature dashboard-feature">
+                        <div class="page-header-copy">
+                            <p class="page-kicker">Overview</p>
+                            <h2>运行概览</h2>
+                            <p class="page-lead">查看账号状态、请求统计与用量概览。</p>
+                        </div>
+                        <div class="header-actions">
+                            <button class="btn btn-info" onclick="syncAllAccounts()" id="sync-all-btn">
+                                <svg class="icon-svg sync-icon" viewBox="0 0 24 24" width="16" height="16">
+                                    <use href="#icon-sync"></use>
+                                </svg>
+                                <span>同步全部</span>
+                            </button>
+                        </div>
                     </div>
-                    <div class="table-responsive">
-                        <table class="data-table monitor-table" id="monitor-table">
+
+                    <div class="stats-grid stats-grid-4">
+                        <div class="stat-card tone-ink">
+                            <div class="stat-icon"><svg class="icon-svg"><use href="#icon-accounts"></use></svg></div>
+                            <div class="stat-label">活跃账号</div>
+                            <div class="stat-value" id="stat-active-accounts">-</div>
+                        </div>
+                        <div class="stat-card tone-teal">
+                            <div class="stat-icon"><svg class="icon-svg"><use href="#icon-key"></use></svg></div>
+                            <div class="stat-label">API Key</div>
+                            <div class="stat-value" id="stat-api-keys">-</div>
+                        </div>
+                        <div class="stat-card tone-amber">
+                            <div class="stat-icon"><svg class="icon-svg"><use href="#icon-signal"></use></svg></div>
+                            <div class="stat-label">今日请求</div>
+                            <div class="stat-value" id="stat-today-requests">-</div>
+                        </div>
+                        <div class="stat-card tone-cobalt">
+                            <div class="stat-icon"><svg class="icon-svg"><use href="#icon-token"></use></svg></div>
+                            <div class="stat-label">今日 Token</div>
+                            <div class="stat-value" id="stat-today-tokens">-</div>
+                            <div class="stat-cost" id="stat-today-tokens-cost"></div>
+                        </div>
+                    </div>
+
+                    <div class="stats-grid stats-grid-4 section-gap">
+                        <div class="stat-card tone-cobalt">
+                            <div class="stat-icon"><svg class="icon-svg"><use href="#icon-requests"></use></svg></div>
+                            <div class="stat-label">总请求数</div>
+                            <div class="stat-value" id="stat-all-time-requests">-</div>
+                        </div>
+                        <div class="stat-card tone-teal">
+                            <div class="stat-icon"><svg class="icon-svg"><use href="#icon-money"></use></svg></div>
+                            <div class="stat-label">总 Token</div>
+                            <div class="stat-value" id="stat-all-time-tokens">-</div>
+                            <div class="stat-cost" id="stat-all-time-tokens-cost"></div>
+                        </div>
+                        <div class="stat-card tone-amber">
+                            <div class="stat-icon"><svg class="icon-svg"><use href="#icon-inbound"></use></svg></div>
+                            <div class="stat-label">总输入 Token</div>
+                            <div class="stat-value" id="stat-all-time-input">-</div>
+                            <div class="stat-cost" id="stat-all-time-input-cost"></div>
+                        </div>
+                        <div class="stat-card tone-rose">
+                            <div class="stat-icon"><svg class="icon-svg"><use href="#icon-outbound"></use></svg></div>
+                            <div class="stat-label">总输出 Token</div>
+                            <div class="stat-value" id="stat-all-time-output">-</div>
+                            <div class="stat-cost" id="stat-all-time-output-cost"></div>
+                        </div>
+                    </div>
+
+                    <div class="card section-gap section-panel">
+                        <div class="card-header-bar">
+                            <div class="panel-heading">
+                                <span class="panel-chip">Live View</span>
+                                <h3>账号实时监控</h3>
+                            </div>
+                            <span class="panel-meta text-muted" id="last-sync-time"></span>
+                        </div>
+                        <div class="table-responsive">
+                            <table class="data-table monitor-table" id="monitor-table">
+                                <colgroup>
+                                    <col style="width: 32%;">
+                                    <col style="width: 10%;">
+                                    <col style="width: 10%;">
+                                    <col style="width: 20%;">
+                                    <col style="width: 14%;">
+                                    <col style="width: 14%;">
+                                </colgroup>
+                                <thead>
+                                    <tr>
+                                        <th>账号名称</th>
+                                        <th>今日使用</th>
+                                        <th>剩余配额</th>
+                                        <th>使用率</th>
+                                        <th>总使用量</th>
+                                        <th>状态</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="monitor-table-body">
+                                    <tr><td colspan="6" class="text-center">加载中...</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+
+                <div id="page-performance" class="page-content hidden">
+                    <div class="page-header page-header-feature performance-feature">
+                        <div class="page-header-copy">
+                            <p class="page-kicker">Performance</p>
+                            <h2>性能与限流</h2>
+                            <p class="page-lead">查看并发、限流、排队与响应指标。</p>
+                        </div>
+                        <div class="header-actions">
+                            <button class="btn btn-info" onclick="refreshPerformanceStats()">刷新指标</button>
+                            <button class="btn btn-primary" onclick="showPerformanceSettingsModal()">调整配置</button>
+                        </div>
+                    </div>
+
+                    <div class="performance-summary-grid perf-overview-grid">
+                        <div class="perf-overview-card tone-cobalt">
+                            <div class="perf-overview-head">
+                                <div class="perf-overview-icon"><svg class="icon-svg"><use href="#icon-performance"></use></svg></div>
+                                <div class="perf-overview-copy">
+                                    <span class="perf-overview-label">当前并发</span>
+                                    <span class="perf-overview-caption">实时请求</span>
+                                </div>
+                            </div>
+                            <div class="perf-overview-foot">
+                                <div class="perf-overview-value" id="perf-active-requests">0</div>
+                                <div class="perf-overview-meta" id="perf-max-concurrent">/ 100</div>
+                            </div>
+                        </div>
+                        <div class="perf-overview-card tone-teal">
+                            <div class="perf-overview-head">
+                                <div class="perf-overview-icon"><svg class="icon-svg"><use href="#icon-stream"></use></svg></div>
+                                <div class="perf-overview-copy">
+                                    <span class="perf-overview-label">流式并发</span>
+                                    <span class="perf-overview-caption">流式会话</span>
+                                </div>
+                            </div>
+                            <div class="perf-overview-foot">
+                                <div class="perf-overview-value" id="perf-active-streams">0</div>
+                                <div class="perf-overview-meta" id="perf-max-streams">/ 40</div>
+                            </div>
+                        </div>
+                        <div class="perf-overview-card tone-ink">
+                            <div class="perf-overview-head">
+                                <div class="perf-overview-icon"><svg class="icon-svg"><use href="#icon-database"></use></svg></div>
+                                <div class="perf-overview-copy">
+                                    <span class="perf-overview-label">DB 并发</span>
+                                    <span class="perf-overview-caption">数据库操作</span>
+                                </div>
+                            </div>
+                            <div class="perf-overview-foot">
+                                <div class="perf-overview-value" id="perf-active-db-ops">0</div>
+                                <div class="perf-overview-meta" id="perf-max-db-ops">/ 10</div>
+                            </div>
+                        </div>
+                        <div class="perf-overview-card tone-amber">
+                            <div class="perf-overview-head">
+                                <div class="perf-overview-icon"><svg class="icon-svg"><use href="#icon-requests"></use></svg></div>
+                                <div class="perf-overview-copy">
+                                    <span class="perf-overview-label">实时 QPS</span>
+                                    <span class="perf-overview-caption">每秒请求</span>
+                                </div>
+                            </div>
+                            <div class="perf-overview-foot">
+                                <div class="perf-overview-value" id="perf-current-qps">0</div>
+                                <div class="perf-overview-meta">请求/秒</div>
+                            </div>
+                        </div>
+                        <div class="perf-overview-card tone-stone">
+                            <div class="perf-overview-head">
+                                <div class="perf-overview-icon"><svg class="icon-svg"><use href="#icon-clock"></use></svg></div>
+                                <div class="perf-overview-copy">
+                                    <span class="perf-overview-label">平均响应</span>
+                                    <span class="perf-overview-caption">端到端响应</span>
+                                </div>
+                            </div>
+                            <div class="perf-overview-foot">
+                                <div class="perf-overview-value" id="perf-avg-response">0</div>
+                                <div class="perf-overview-meta">毫秒</div>
+                            </div>
+                        </div>
+                        <div class="perf-overview-card tone-rose">
+                            <div class="perf-overview-head">
+                                <div class="perf-overview-icon"><svg class="icon-svg"><use href="#icon-shield"></use></svg></div>
+                                <div class="perf-overview-copy">
+                                    <span class="perf-overview-label">成功率</span>
+                                    <span class="perf-overview-caption">调用质量</span>
+                                </div>
+                            </div>
+                            <div class="perf-overview-foot">
+                                <div class="perf-overview-value" id="perf-success-rate">100%</div>
+                                <div class="perf-overview-meta" id="perf-rejected">拒绝 req/stream/db: 0/0/0</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="card section-gap section-panel">
+                        <div class="card-header-bar">
+                            <div class="panel-heading">
+                                <span class="panel-chip">Controls</span>
+                                <h3>限流配置</h3>
+                            </div>
+                            <span class="panel-meta text-muted">控制 API 请求速率</span>
+                        </div>
+                        <div class="perf-config-grid perf-row-4">
+                            <div class="perf-config-item">
+                                <div class="perf-config-label">
+                                    <span class="perf-config-title">每分钟请求数 (RPM)</span>
+                                    <span class="perf-config-desc">限制每分钟最大请求数量</span>
+                                </div>
+                                <div class="perf-config-value">
+                                    <span id="config-rpm-value">无限制</span>
+                                    <span class="perf-config-max">最大可设: <strong id="config-rpm-max">6000</strong></span>
+                                </div>
+                            </div>
+                            <div class="perf-config-item">
+                                <div class="perf-config-label">
+                                    <span class="perf-config-title">最大并发请求数</span>
+                                    <span class="perf-config-desc">同时处理的最大请求数</span>
+                                </div>
+                                <div class="perf-config-value">
+                                    <span id="config-concurrent-value">100</span>
+                                    <span class="perf-config-max">推荐: 50-200</span>
+                                </div>
+                            </div>
+                            <div class="perf-config-item">
+                                <div class="perf-config-label">
+                                    <span class="perf-config-title">最大数据库并发</span>
+                                    <span class="perf-config-desc">数据库操作并发限制</span>
+                                </div>
+                                <div class="perf-config-value">
+                                    <span id="config-db-concurrent-value">50</span>
+                                    <span class="perf-config-max" id="config-db-concurrent-hint">SQLite 建议按磁盘与 CPU 负载调节</span>
+                                </div>
+                            </div>
+                            <div class="perf-config-item">
+                                <div class="perf-config-label">
+                                    <span class="perf-config-title">HTTP 连接池大小</span>
+                                    <span class="perf-config-desc">后端 HTTP 连接数</span>
+                                </div>
+                                <div class="perf-config-value">
+                                    <span id="config-http-pool-value">100</span>
+                                    <span class="perf-config-max">推荐: 50-200</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="card section-gap section-panel">
+                        <div class="card-header-bar">
+                            <div class="panel-heading">
+                                <span class="panel-chip">Snapshot</span>
+                                <h3>性能统计</h3>
+                            </div>
+                            <span class="panel-meta text-muted" id="perf-last-update">最后更新: -</span>
+                        </div>
+                        <div class="stats-grid stats-grid-4 mini-grid perf-stats-row">
+                            <div class="stat-card-mini">
+                                <div class="stat-label">总请求数</div>
+                                <div class="stat-value" id="perf-total-requests">0</div>
+                            </div>
+                            <div class="stat-card-mini">
+                                <div class="stat-label">总拒绝数</div>
+                                <div class="stat-value" id="perf-total-rejected">0</div>
+                            </div>
+                            <div class="stat-card-mini">
+                                <div class="stat-label">P95 响应时间</div>
+                                <div class="stat-value" id="perf-p95-response">0 ms</div>
+                            </div>
+                            <div class="stat-card-mini">
+                                <div class="stat-label">P99 响应时间</div>
+                                <div class="stat-value" id="perf-p99-response">0 ms</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="card section-gap section-panel">
+                        <div class="card-header-bar">
+                            <div class="panel-heading">
+                                <span class="panel-chip">Queues</span>
+                                <h3>排队与限流</h3>
+                            </div>
+                            <span class="panel-meta text-muted">区分入口请求、流式会话和数据库瓶颈</span>
+                        </div>
+                        <div class="perf-metrics-grid perf-row-6">
+                            <div class="perf-metric-card">
+                                <div class="perf-metric-title">请求排队 P95</div>
+                                <div class="perf-metric-value" id="perf-request-queue-p95">0 ms</div>
+                                <div class="perf-metric-sub" id="perf-request-queue-avg">均值 0 ms</div>
+                            </div>
+                            <div class="perf-metric-card">
+                                <div class="perf-metric-title">流式排队 P95</div>
+                                <div class="perf-metric-value" id="perf-stream-queue-p95">0 ms</div>
+                                <div class="perf-metric-sub" id="perf-stream-queue-avg">均值 0 ms</div>
+                            </div>
+                            <div class="perf-metric-card">
+                                <div class="perf-metric-title">DB 排队 P95</div>
+                                <div class="perf-metric-value" id="perf-db-queue-p95">0 ms</div>
+                                <div class="perf-metric-sub" id="perf-db-queue-avg">均值 0 ms</div>
+                            </div>
+                            <div class="perf-metric-card">
+                                <div class="perf-metric-title">当前请求排队</div>
+                                <div class="perf-metric-value" id="perf-queued-requests">0</div>
+                                <div class="perf-metric-sub" id="perf-queued-requests-sub">累计拒绝 0</div>
+                            </div>
+                            <div class="perf-metric-card">
+                                <div class="perf-metric-title">当前流式排队</div>
+                                <div class="perf-metric-value" id="perf-queued-streams">0</div>
+                                <div class="perf-metric-sub" id="perf-queued-streams-sub">累计拒绝 0</div>
+                            </div>
+                            <div class="perf-metric-card">
+                                <div class="perf-metric-title">当前 DB 排队</div>
+                                <div class="perf-metric-value" id="perf-queued-db">0</div>
+                                <div class="perf-metric-sub" id="perf-queued-db-sub">累计拒绝 0</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="card section-gap section-panel">
+                        <div class="card-header-bar">
+                            <div class="panel-heading">
+                                <span class="panel-chip">Upstream</span>
+                                <h3>上游 HTTP 池</h3>
+                            </div>
+                            <span class="panel-meta text-muted">判断瓶颈是否落在上游连接池、超时或传输层</span>
+                        </div>
+                        <div class="perf-metrics-grid perf-row-6">
+                            <div class="perf-metric-card">
+                                <div class="perf-metric-title">活跃上游请求</div>
+                                <div class="perf-metric-value" id="perf-backend-active-total">0</div>
+                                <div class="perf-metric-sub" id="perf-backend-active-total-sub">有效连接上限 0</div>
+                            </div>
+                            <div class="perf-metric-card">
+                                <div class="perf-metric-title">活跃上游流</div>
+                                <div class="perf-metric-value" id="perf-backend-active-streams">0</div>
+                                <div class="perf-metric-sub" id="perf-backend-active-streams-sub">stream 上限 0</div>
+                            </div>
+                            <div class="perf-metric-card">
+                                <div class="perf-metric-title">取连接等待 P95</div>
+                                <div class="perf-metric-value" id="perf-backend-wait-p95">0 ms</div>
+                                <div class="perf-metric-sub" id="perf-backend-wait-avg">均值 0 ms</div>
+                            </div>
+                            <div class="perf-metric-card">
+                                <div class="perf-metric-title">Pool 超时累计</div>
+                                <div class="perf-metric-value" id="perf-backend-pool-timeouts">0</div>
+                                <div class="perf-metric-sub" id="perf-backend-pool-timeouts-sub">总获取 0</div>
+                            </div>
+                            <div class="perf-metric-card">
+                                <div class="perf-metric-title">上游超时累计</div>
+                                <div class="perf-metric-value" id="perf-backend-timeouts">0</div>
+                                <div class="perf-metric-sub" id="perf-backend-timeouts-sub">sync/stream 重试 0/0</div>
+                            </div>
+                            <div class="perf-metric-card">
+                                <div class="perf-metric-title">连接/传输错误</div>
+                                <div class="perf-metric-value" id="perf-backend-connect-errors">0 / 0</div>
+                                <div class="perf-metric-sub" id="perf-backend-connect-errors-sub">per-host 0 keepalive 0</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="card section-gap section-panel">
+                        <div class="card-header-bar">
+                            <div class="panel-heading">
+                                <span class="panel-chip">Pipeline</span>
+                                <h3>异步落库与日志</h3>
+                            </div>
+                            <span class="panel-meta text-muted">观察后台聚合队列是否积压或丢弃</span>
+                        </div>
+                        <div class="perf-metrics-grid perf-row-6">
+                            <div class="perf-metric-card">
+                                <div class="perf-metric-title">Usage 队列</div>
+                                <div class="perf-metric-value" id="perf-usage-queue">0</div>
+                                <div class="perf-metric-sub" id="perf-usage-queue-sub">workers 0 / flush 0</div>
+                            </div>
+                            <div class="perf-metric-card">
+                                <div class="perf-metric-title">Usage 已落库</div>
+                                <div class="perf-metric-value" id="perf-usage-flushed">0</div>
+                                <div class="perf-metric-sub" id="perf-usage-flushed-sub">批次 0</div>
+                            </div>
+                            <div class="perf-metric-card">
+                                <div class="perf-metric-title">Usage 丢弃</div>
+                                <div class="perf-metric-value" id="perf-usage-dropped">0</div>
+                                <div class="perf-metric-sub">队列满时会回退或丢弃</div>
+                            </div>
+                            <div class="perf-metric-card">
+                                <div class="perf-metric-title">日志队列</div>
+                                <div class="perf-metric-value" id="perf-log-queue">0</div>
+                                <div class="perf-metric-sub" id="perf-log-queue-sub">容量 0</div>
+                            </div>
+                            <div class="perf-metric-card">
+                                <div class="perf-metric-title">日志已处理</div>
+                                <div class="perf-metric-value" id="perf-log-processed">0</div>
+                                <div class="perf-metric-sub" id="perf-log-processed-sub">进行中 0</div>
+                            </div>
+                            <div class="perf-metric-card">
+                                <div class="perf-metric-title">日志丢弃</div>
+                                <div class="perf-metric-value" id="perf-log-dropped">0</div>
+                                <div class="perf-metric-sub" id="perf-log-dropped-sub">活跃 workers 0</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="card section-gap section-panel">
+                        <div class="card-header-bar">
+                            <div class="panel-heading">
+                                <span class="panel-chip">Runtime</span>
+                                <h3>系统配置</h3>
+                            </div>
+                        </div>
+                        <div class="system-config-grid perf-row-5">
+                            <div class="system-config-item">
+                                <span class="config-key">数据库日志模式</span>
+                                <span class="config-value" id="sys-db-mode">-</span>
+                            </div>
+                            <div class="system-config-item">
+                                <span class="config-key">锁等待超时</span>
+                                <span class="config-value" id="sys-db-busy-timeout">-</span>
+                            </div>
+                            <div class="system-config-item">
+                                <span class="config-key">数据库类型</span>
+                                <span class="config-value" id="sys-db-type">-</span>
+                            </div>
+                            <div class="system-config-item">
+                                <span class="config-key">HTTP 超时</span>
+                                <span class="config-value" id="sys-http-timeout">-</span>
+                            </div>
+                            <div class="system-config-item">
+                                <span class="config-key">服务运行时间</span>
+                                <span class="config-value" id="sys-uptime">-</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div id="page-accounts" class="page-content hidden">
+                    <div class="page-header">
+                        <div>
+                            <p class="page-kicker">Accounts</p>
+                            <h2>账号池治理</h2>
+                        </div>
+                        <div class="header-actions">
+                            <button class="btn btn-success" onclick="testAllAccounts()" id="test-all-btn">批量测试</button>
+                            <button class="btn btn-info" onclick="showImportAccountsModal()">批量导入</button>
+                            <button class="btn btn-primary" onclick="showAddAccountModal()">新增账号</button>
+                        </div>
+                    </div>
+
+                    <div class="filter-bar">
+                        <input type="text" id="account-search" placeholder="搜索账号名称..." onkeyup="filterAccounts()">
+                        <select id="account-group-filter" onchange="filterAccounts()">
+                            <option value="">所有模型组</option>
+                        </select>
+                        <select id="account-status-filter" onchange="filterAccounts()">
+                            <option value="">所有状态</option>
+                            <option value="active">正常</option>
+                            <option value="exhausted">耗尽</option>
+                            <option value="disabled">禁用</option>
+                        </select>
+                        <div class="filter-bar-actions">
+                            <span class="filter-summary" id="account-filter-summary">当前显示 0 / 0 个账号</span>
+                            <button type="button" class="btn btn-sm btn-success" id="bulk-enable-btn" onclick="bulkSetAccountStatus('active')">批量启用</button>
+                            <button type="button" class="btn btn-sm btn-warning" id="bulk-disable-btn" onclick="bulkSetAccountStatus('disabled')">批量禁用</button>
+                            <button type="button" class="btn btn-sm btn-danger" id="bulk-delete-btn" onclick="bulkDeleteAccounts()">批量删除</button>
+                        </div>
+                    </div>
+
+                    <div id="test-progress-container" class="hidden">
+                        <div class="test-progress-bar">
+                            <div class="test-progress-fill" id="test-progress-fill"></div>
+                        </div>
+                        <div class="test-progress-text" id="test-progress-text">测试中...</div>
+                    </div>
+
+                    <div class="table-wrapper">
+                        <table class="data-table accounts-table">
+                            <colgroup>
+                                <col style="width: 17%;">
+                                <col style="width: 22%;">
+                                <col style="width: 13%;">
+                                <col style="width: 10%;">
+                                <col style="width: 14%;">
+                                <col style="width: 24%;">
+                            </colgroup>
                             <thead>
                                 <tr>
-                                    <th>账号名称</th>
+                                    <th>名称</th>
+                                    <th>模型组</th>
                                     <th>今日使用</th>
-                                    <th>剩余配额</th>
-                                    <th>使用率</th>
-                                    <th>总使用量</th>
                                     <th>状态</th>
+                                    <th>最后使用</th>
+                                    <th class="col-actions">操作</th>
                                 </tr>
                             </thead>
-                            <tbody id="monitor-table-body">
+                            <tbody id="accounts-table-body">
                                 <tr><td colspan="6" class="text-center">加载中...</td></tr>
                             </tbody>
                         </table>
                     </div>
                 </div>
-            </div>
 
-            <!-- 性能监控页面 -->
-            <div id="page-performance" class="page-content hidden">
-                <div class="page-header">
-                    <h1>⚡ 性能监控</h1>
-                    <div class="header-actions">
-                        <button class="btn btn-info" onclick="refreshPerformanceStats()">🔄 刷新</button>
-                        <button class="btn btn-primary" onclick="showPerformanceSettingsModal()">⚙️ 配置</button>
-                    </div>
-                </div>
-                
-                <!-- 实时性能指标 -->
-                <div class="stats-grid stats-grid-4">
-                    <div class="stat-card">
-                        <div class="stat-icon" style="background: #dbeafe;">🚀</div>
-                        <div class="stat-label">当前并发</div>
-                        <div class="stat-value" id="perf-active-requests">0</div>
-                        <div class="stat-sub" id="perf-max-concurrent">/ 100</div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-icon" style="background: #e0f2fe;">🌊</div>
-                        <div class="stat-label">流式并发</div>
-                        <div class="stat-value" id="perf-active-streams">0</div>
-                        <div class="stat-sub" id="perf-max-streams">/ 40</div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-icon" style="background: #ecfccb;">🗄️</div>
-                        <div class="stat-label">DB 并发</div>
-                        <div class="stat-value" id="perf-active-db-ops">0</div>
-                        <div class="stat-sub" id="perf-max-db-ops">/ 10</div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-icon" style="background: #d1fae5;">📈</div>
-                        <div class="stat-label">实时 QPS</div>
-                        <div class="stat-value" id="perf-current-qps">0</div>
-                        <div class="stat-sub">请求/秒</div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-icon" style="background: #fef3c7;">⏱️</div>
-                        <div class="stat-label">平均响应</div>
-                        <div class="stat-value" id="perf-avg-response">0</div>
-                        <div class="stat-sub">毫秒</div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-icon" style="background: #fce7f3;">🎯</div>
-                        <div class="stat-label">成功率</div>
-                        <div class="stat-value" id="perf-success-rate">100%</div>
-                        <div class="stat-sub" id="perf-rejected">拒绝 req/stream/db: 0/0/0</div>
-                    </div>
-                </div>
-                
-                <!-- 限流配置卡片 -->
-                <div class="card" style="margin-top: 20px;">
-                    <div class="card-header-bar">
-                        <h3>🔧 限流配置</h3>
-                        <span class="text-muted">控制 API 请求速率</span>
-                    </div>
-                    <div class="perf-config-grid">
-                        <div class="perf-config-item">
-                            <div class="perf-config-label">
-                                <span class="perf-config-title">每分钟请求数 (RPM)</span>
-                                <span class="perf-config-desc">限制每分钟最大请求数量</span>
-                            </div>
-                            <div class="perf-config-value">
-                                <span id="config-rpm-value">无限制</span>
-                                <span class="perf-config-max">最大可设: <strong id="config-rpm-max">6000</strong></span>
-                            </div>
+                <div id="page-groups" class="page-content hidden">
+                    <div class="page-header">
+                        <div>
+                            <p class="page-kicker">Routing</p>
+                            <h2>模型组管理</h2>
                         </div>
-                        <div class="perf-config-item">
-                            <div class="perf-config-label">
-                                <span class="perf-config-title">最大并发请求数</span>
-                                <span class="perf-config-desc">同时处理的最大请求数</span>
-                            </div>
-                            <div class="perf-config-value">
-                                <span id="config-concurrent-value">100</span>
-                                <span class="perf-config-max">推荐: 50-200</span>
-                            </div>
-                        </div>
-                        <div class="perf-config-item">
-                            <div class="perf-config-label">
-                                <span class="perf-config-title">最大数据库并发</span>
-                                <span class="perf-config-desc">数据库操作并发限制</span>
-                            </div>
-                            <div class="perf-config-value">
-                                <span id="config-db-concurrent-value">50</span>
-                                <span class="perf-config-max" id="config-db-concurrent-hint">SQLite 建议按磁盘与 CPU 负载调节</span>
-                            </div>
-                        </div>
-                        <div class="perf-config-item">
-                            <div class="perf-config-label">
-                                <span class="perf-config-title">HTTP 连接池大小</span>
-                                <span class="perf-config-desc">后端 HTTP 连接数</span>
-                            </div>
-                            <div class="perf-config-value">
-                                <span id="config-http-pool-value">100</span>
-                                <span class="perf-config-max">推荐: 50-200</span>
-                            </div>
-                        </div>
+                        <button class="btn btn-primary" onclick="showAddGroupModal()">新增模型组</button>
                     </div>
-                </div>
-                
-                <!-- 性能统计卡片 -->
-                <div class="card" style="margin-top: 20px;">
-                    <div class="card-header-bar">
-                        <h3>📊 性能统计</h3>
-                        <span class="text-muted" id="perf-last-update">最后更新: -</span>
-                    </div>
-                    <div class="stats-grid stats-grid-4" style="padding: 0;">
-                        <div class="stat-card-mini">
-                            <div class="stat-label">总请求数</div>
-                            <div class="stat-value" id="perf-total-requests">0</div>
-                        </div>
-                        <div class="stat-card-mini">
-                            <div class="stat-label">总拒绝数</div>
-                            <div class="stat-value" id="perf-total-rejected">0</div>
-                        </div>
-                        <div class="stat-card-mini">
-                            <div class="stat-label">P95 响应时间</div>
-                            <div class="stat-value" id="perf-p95-response">0 ms</div>
-                        </div>
-                        <div class="stat-card-mini">
-                            <div class="stat-label">P99 响应时间</div>
-                            <div class="stat-value" id="perf-p99-response">0 ms</div>
-                        </div>
+
+                    <div class="table-wrapper">
+                        <table class="data-table groups-table">
+                            <colgroup>
+                                <col style="width: 15%;">
+                                <col style="width: 24%;">
+                                <col style="width: 18%;">
+                                <col style="width: 16%;">
+                                <col style="width: 12%;">
+                                <col style="width: 15%;">
+                            </colgroup>
+                            <thead>
+                                <tr>
+                                    <th>名称</th>
+                                    <th>描述</th>
+                                    <th>计价 ($/1M Token)</th>
+                                    <th>可用额度</th>
+                                    <th>账号</th>
+                                    <th class="col-actions">操作</th>
+                                </tr>
+                            </thead>
+                            <tbody id="groups-table-body">
+                                <tr><td colspan="6" class="text-center">加载中...</td></tr>
+                            </tbody>
+                        </table>
                     </div>
                 </div>
 
-                <div class="card" style="margin-top: 20px;">
-                    <div class="card-header-bar">
-                        <h3>🧭 排队与限流</h3>
-                        <span class="text-muted">区分入口请求、流式会话和数据库瓶颈</span>
+                <div id="page-apikeys" class="page-content hidden">
+                    <div class="page-header">
+                        <div>
+                            <p class="page-kicker">Access</p>
+                            <h2>API Key 管理</h2>
+                        </div>
+                        <button class="btn btn-primary" onclick="showAddApiKeyModal()">新增 API Key</button>
                     </div>
-                    <div class="perf-metrics-grid">
-                        <div class="perf-metric-card">
-                            <div class="perf-metric-title">请求排队 P95</div>
-                            <div class="perf-metric-value" id="perf-request-queue-p95">0 ms</div>
-                            <div class="perf-metric-sub" id="perf-request-queue-avg">均值 0 ms</div>
-                        </div>
-                        <div class="perf-metric-card">
-                            <div class="perf-metric-title">流式排队 P95</div>
-                            <div class="perf-metric-value" id="perf-stream-queue-p95">0 ms</div>
-                            <div class="perf-metric-sub" id="perf-stream-queue-avg">均值 0 ms</div>
-                        </div>
-                        <div class="perf-metric-card">
-                            <div class="perf-metric-title">DB 排队 P95</div>
-                            <div class="perf-metric-value" id="perf-db-queue-p95">0 ms</div>
-                            <div class="perf-metric-sub" id="perf-db-queue-avg">均值 0 ms</div>
-                        </div>
-                        <div class="perf-metric-card">
-                            <div class="perf-metric-title">当前请求排队</div>
-                            <div class="perf-metric-value" id="perf-queued-requests">0</div>
-                            <div class="perf-metric-sub" id="perf-queued-requests-sub">累计拒绝 0</div>
-                        </div>
-                        <div class="perf-metric-card">
-                            <div class="perf-metric-title">当前流式排队</div>
-                            <div class="perf-metric-value" id="perf-queued-streams">0</div>
-                            <div class="perf-metric-sub" id="perf-queued-streams-sub">累计拒绝 0</div>
-                        </div>
-                        <div class="perf-metric-card">
-                            <div class="perf-metric-title">当前 DB 排队</div>
-                            <div class="perf-metric-value" id="perf-queued-db">0</div>
-                            <div class="perf-metric-sub" id="perf-queued-db-sub">累计拒绝 0</div>
-                        </div>
+
+                    <div class="filter-bar">
+                        <input type="text" id="apikey-search" placeholder="搜索 Key 名称..." onkeyup="filterApiKeys()">
+                        <select id="apikey-status-filter" onchange="filterApiKeys()">
+                            <option value="">所有状态</option>
+                            <option value="active">有效</option>
+                            <option value="revoked">已撤销</option>
+                        </select>
+                    </div>
+
+                    <div class="table-wrapper">
+                        <table class="data-table apikeys-table">
+                            <colgroup>
+                                <col style="width: 13%;">
+                                <col style="width: 18%;">
+                                <col style="width: 21%;">
+                                <col style="width: 14%;">
+                                <col style="width: 10%;">
+                                <col style="width: 24%;">
+                            </colgroup>
+                            <thead>
+                                <tr>
+                                    <th>名称</th>
+                                    <th>Key</th>
+                                    <th>模型组</th>
+                                    <th>限制</th>
+                                    <th>状态</th>
+                                    <th class="col-actions">操作</th>
+                                </tr>
+                            </thead>
+                            <tbody id="apikeys-table-body">
+                                <tr><td colspan="6" class="text-center">加载中...</td></tr>
+                            </tbody>
+                        </table>
                     </div>
                 </div>
 
-                <div class="card" style="margin-top: 20px;">
-                    <div class="card-header-bar">
-                        <h3>🌐 上游 HTTP 池</h3>
-                        <span class="text-muted">判断瓶颈是否落在上游连接池、超时或传输层</span>
-                    </div>
-                    <div class="perf-metrics-grid">
-                        <div class="perf-metric-card">
-                            <div class="perf-metric-title">活跃上游请求</div>
-                            <div class="perf-metric-value" id="perf-backend-active-total">0</div>
-                            <div class="perf-metric-sub" id="perf-backend-active-total-sub">有效连接上限 0</div>
+                <div id="page-logs" class="page-content hidden">
+                    <div class="page-header">
+                        <div>
+                            <p class="page-kicker">Audit</p>
+                            <h2>调用日志</h2>
                         </div>
-                        <div class="perf-metric-card">
-                            <div class="perf-metric-title">活跃上游流</div>
-                            <div class="perf-metric-value" id="perf-backend-active-streams">0</div>
-                            <div class="perf-metric-sub" id="perf-backend-active-streams-sub">stream 上限 0</div>
-                        </div>
-                        <div class="perf-metric-card">
-                            <div class="perf-metric-title">取连接等待 P95</div>
-                            <div class="perf-metric-value" id="perf-backend-wait-p95">0 ms</div>
-                            <div class="perf-metric-sub" id="perf-backend-wait-avg">均值 0 ms</div>
-                        </div>
-                        <div class="perf-metric-card">
-                            <div class="perf-metric-title">Pool 超时累计</div>
-                            <div class="perf-metric-value" id="perf-backend-pool-timeouts">0</div>
-                            <div class="perf-metric-sub" id="perf-backend-pool-timeouts-sub">总获取 0</div>
-                        </div>
-                        <div class="perf-metric-card">
-                            <div class="perf-metric-title">上游超时累计</div>
-                            <div class="perf-metric-value" id="perf-backend-timeouts">0</div>
-                            <div class="perf-metric-sub" id="perf-backend-timeouts-sub">sync/stream 重试 0/0</div>
-                        </div>
-                        <div class="perf-metric-card">
-                            <div class="perf-metric-title">连接/传输错误</div>
-                            <div class="perf-metric-value" id="perf-backend-connect-errors">0 / 0</div>
-                            <div class="perf-metric-sub" id="perf-backend-connect-errors-sub">per-host 0 keepalive 0</div>
+                        <div class="header-actions">
+                            <button class="btn btn-outline-danger" onclick="showDeleteLogsModal()">清理日志</button>
+                            <button class="btn btn-info" onclick="loadCallLogs()">刷新记录</button>
                         </div>
                     </div>
-                </div>
 
-                <div class="card" style="margin-top: 20px;">
-                    <div class="card-header-bar">
-                        <h3>🪵 异步落库与日志</h3>
-                        <span class="text-muted">观察后台聚合队列是否积压或丢弃</span>
-                    </div>
-                    <div class="perf-metrics-grid">
-                        <div class="perf-metric-card">
-                            <div class="perf-metric-title">Usage 队列</div>
-                            <div class="perf-metric-value" id="perf-usage-queue">0</div>
-                            <div class="perf-metric-sub" id="perf-usage-queue-sub">workers 0 / flush 0</div>
+                    <div class="stats-grid stats-grid-4">
+                        <div class="stat-card tone-amber">
+                            <div class="stat-icon"><svg class="icon-svg"><use href="#icon-signal"></use></svg></div>
+                            <div class="stat-label">24h 调用数</div>
+                            <div class="stat-value" id="log-stat-calls">-</div>
                         </div>
-                        <div class="perf-metric-card">
-                            <div class="perf-metric-title">Usage 已落库</div>
-                            <div class="perf-metric-value" id="perf-usage-flushed">0</div>
-                            <div class="perf-metric-sub" id="perf-usage-flushed-sub">批次 0</div>
+                        <div class="stat-card tone-teal">
+                            <div class="stat-icon"><svg class="icon-svg"><use href="#icon-shield"></use></svg></div>
+                            <div class="stat-label">成功率</div>
+                            <div class="stat-value" id="log-stat-success-rate">-</div>
                         </div>
-                        <div class="perf-metric-card">
-                            <div class="perf-metric-title">Usage 丢弃</div>
-                            <div class="perf-metric-value" id="perf-usage-dropped">0</div>
-                            <div class="perf-metric-sub">队列满时会回退/丢弃</div>
+                        <div class="stat-card tone-cobalt">
+                            <div class="stat-icon"><svg class="icon-svg"><use href="#icon-token"></use></svg></div>
+                            <div class="stat-label">24h Token</div>
+                            <div class="stat-value" id="log-stat-tokens">-</div>
                         </div>
-                        <div class="perf-metric-card">
-                            <div class="perf-metric-title">日志队列</div>
-                            <div class="perf-metric-value" id="perf-log-queue">0</div>
-                            <div class="perf-metric-sub" id="perf-log-queue-sub">容量 0</div>
-                        </div>
-                        <div class="perf-metric-card">
-                            <div class="perf-metric-title">日志已处理</div>
-                            <div class="perf-metric-value" id="perf-log-processed">0</div>
-                            <div class="perf-metric-sub" id="perf-log-processed-sub">进行中 0</div>
-                        </div>
-                        <div class="perf-metric-card">
-                            <div class="perf-metric-title">日志丢弃</div>
-                            <div class="perf-metric-value" id="perf-log-dropped">0</div>
-                            <div class="perf-metric-sub" id="perf-log-dropped-sub">活跃 workers 0</div>
+                        <div class="stat-card tone-rose">
+                            <div class="stat-icon"><svg class="icon-svg"><use href="#icon-money"></use></svg></div>
+                            <div class="stat-label">24h 费用</div>
+                            <div class="stat-value" id="log-stat-cost">-</div>
                         </div>
                     </div>
-                </div>
-                
-                <!-- 系统配置信息 -->
-                <div class="card" style="margin-top: 20px;">
-                    <div class="card-header-bar">
-                        <h3>💻 系统配置</h3>
+
+                    <div class="filter-bar section-gap">
+                        <select id="log-apikey-filter" onchange="filterCallLogs()">
+                            <option value="">所有 API Key</option>
+                        </select>
+                        <select id="log-status-filter" onchange="filterCallLogs()">
+                            <option value="">所有状态</option>
+                            <option value="success">成功</option>
+                            <option value="error">失败</option>
+                        </select>
+                        <select id="log-model-filter" onchange="filterCallLogs()">
+                            <option value="">所有模型组</option>
+                        </select>
+                        <input type="number" id="log-limit" value="50" min="10" max="200" style="width: 88px;" onchange="loadCallLogs()">
+                        <span class="text-muted">条记录</span>
                     </div>
-                    <div class="system-config-grid">
-                        <div class="system-config-item">
-                            <span class="config-key">数据库日志模式</span>
-                            <span class="config-value" id="sys-db-mode">-</span>
-                        </div>
-                        <div class="system-config-item">
-                            <span class="config-key">锁等待超时</span>
-                            <span class="config-value" id="sys-db-busy-timeout">-</span>
-                        </div>
-                        <div class="system-config-item">
-                            <span class="config-key">数据库类型</span>
-                            <span class="config-value" id="sys-db-type">-</span>
-                        </div>
-                        <div class="system-config-item">
-                            <span class="config-key">HTTP 超时</span>
-                            <span class="config-value" id="sys-http-timeout">-</span>
-                        </div>
-                        <div class="system-config-item">
-                            <span class="config-key">服务运行时间</span>
-                            <span class="config-value" id="sys-uptime">-</span>
-                        </div>
+
+                    <div class="table-wrapper">
+                        <table class="data-table logs-table">
+                            <colgroup>
+                                <col style="width: 11%;">
+                                <col style="width: 11%;">
+                                <col style="width: 15%;">
+                                <col style="width: 13%;">
+                                <col style="width: 14%;">
+                                <col style="width: 8%;">
+                                <col style="width: 8%;">
+                                <col style="width: 10%;">
+                                <col style="width: 10%;">
+                            </colgroup>
+                            <thead>
+                                <tr>
+                                    <th style="width: 140px;">时间</th>
+                                    <th>API Key</th>
+                                    <th>账号</th>
+                                    <th>模型</th>
+                                    <th>Token</th>
+                                    <th>费用</th>
+                                    <th>耗时</th>
+                                    <th>状态</th>
+                                    <th class="col-actions" style="width: 88px;">详情</th>
+                                </tr>
+                            </thead>
+                            <tbody id="logs-table-body">
+                                <tr><td colspan="9" class="text-center">加载中...</td></tr>
+                            </tbody>
+                        </table>
                     </div>
                 </div>
             </div>
-
-            <!-- 账号管理页面 -->
-            <div id="page-accounts" class="page-content hidden">
-                <div class="page-header">
-                    <h1>👤 账号管理</h1>
-                    <div class="header-actions">
-                        <button class="btn btn-success" onclick="testAllAccounts()" id="test-all-btn">🧪 一键测试全部</button>
-                        <button class="btn btn-info" onclick="showImportAccountsModal()">📥 批量导入</button>
-                        <button class="btn btn-primary" onclick="showAddAccountModal()">+ 添加账号</button>
-                    </div>
-                </div>
-                
-                <div class="filter-bar">
-                    <input type="text" id="account-search" placeholder="搜索账号名称..." onkeyup="filterAccounts()">
-                    <select id="account-group-filter" onchange="filterAccounts()">
-                        <option value="">所有模型组</option>
-                    </select>
-                    <select id="account-status-filter" onchange="filterAccounts()">
-                        <option value="">所有状态</option>
-                        <option value="active">正常</option>
-                        <option value="exhausted">耗尽</option>
-                        <option value="disabled">禁用</option>
-                    </select>
-                    <div class="filter-bar-actions">
-                        <span class="filter-summary" id="account-filter-summary">当前显示 0 / 0 个账号</span>
-                        <button type="button" class="btn btn-sm btn-success" id="bulk-enable-btn" onclick="bulkSetAccountStatus('active')">一键启用</button>
-                        <button type="button" class="btn btn-sm btn-warning" id="bulk-disable-btn" onclick="bulkSetAccountStatus('disabled')">一键禁用</button>
-                        <button type="button" class="btn btn-sm btn-danger" id="bulk-delete-btn" onclick="bulkDeleteAccounts()">一键删除</button>
-                    </div>
-                </div>
-                
-                <!-- 测试进度条 -->
-                <div id="test-progress-container" class="hidden">
-                    <div class="test-progress-bar">
-                        <div class="test-progress-fill" id="test-progress-fill"></div>
-                    </div>
-                    <div class="test-progress-text" id="test-progress-text">测试中...</div>
-                </div>
-                
-                <div class="table-wrapper">
-                    <table class="data-table">
-                        <thead>
-                            <tr>
-                                <th>名称</th>
-                                <th>模型组</th>
-                                <th>今日使用</th>
-                                <th>状态</th>
-                                <th>最后使用</th>
-                                <th>操作</th>
-                            </tr>
-                        </thead>
-                        <tbody id="accounts-table-body">
-                            <tr><td colspan="6" class="text-center">加载中...</td></tr>
-                        </tbody>
-                    </table>
-                </div>
-            </div>
-
-            <!-- 模型组管理页面 -->
-            <div id="page-groups" class="page-content hidden">
-                <div class="page-header">
-                    <h1>📁 模型组管理</h1>
-                    <button class="btn btn-primary" onclick="showAddGroupModal()">+ 添加模型组</button>
-                </div>
-
-                <div class="table-wrapper">
-                    <table class="data-table">
-                        <thead>
-                            <tr>
-                                <th>名称</th>
-                                <th>描述</th>
-                                <th>计价 ($/1M Token)</th>
-                                <th>可用额度</th>
-                                <th>账号</th>
-                                <th>操作</th>
-                            </tr>
-                        </thead>
-                        <tbody id="groups-table-body">
-                            <tr><td colspan="6" class="text-center">加载中...</td></tr>
-                        </tbody>
-                    </table>
-                </div>
-            </div>
-
-            <!-- API Key 管理页面 -->
-            <div id="page-apikeys" class="page-content hidden">
-                <div class="page-header">
-                    <h1>🔑 API Key 管理</h1>
-                    <button class="btn btn-primary" onclick="showAddApiKeyModal()">+ 生成 API Key</button>
-                </div>
-                
-                <div class="filter-bar">
-                    <input type="text" id="apikey-search" placeholder="搜索 Key 名称..." onkeyup="filterApiKeys()">
-                    <select id="apikey-status-filter" onchange="filterApiKeys()">
-                        <option value="">所有状态</option>
-                        <option value="active">有效</option>
-                        <option value="revoked">已撤销</option>
-                    </select>
-                </div>
-                
-                <div class="table-wrapper">
-                    <table class="data-table">
-                        <thead>
-                            <tr>
-                                <th>名称</th>
-                                <th>Key</th>
-                                <th>模型组</th>
-                                <th>限制</th>
-                                <th>状态</th>
-                                <th>操作</th>
-                            </tr>
-                        </thead>
-                        <tbody id="apikeys-table-body">
-                            <tr><td colspan="6" class="text-center">加载中...</td></tr>
-                        </tbody>
-                    </table>
-                </div>
-            </div>
-
-            <!-- 调用日志页面 -->
-            <div id="page-logs" class="page-content hidden">
-                <div class="page-header">
-                    <h1>📋 调用日志</h1>
-                    <div class="header-actions">
-                        <button class="btn btn-outline-danger" onclick="showDeleteLogsModal()">🗑️ 清理日志</button>
-                        <button class="btn btn-info" onclick="loadCallLogs()">🔄 刷新</button>
-                    </div>
-                </div>
-                
-                <!-- 统计卡片 -->
-                <div class="stats-grid stats-grid-4" style="margin-bottom: 20px;">
-                    <div class="stat-card">
-                        <div class="stat-icon">📡</div>
-                        <div class="stat-label">24h 调用数</div>
-                        <div class="stat-value" id="log-stat-calls">-</div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-icon" style="background: #d1fae5;">✅</div>
-                        <div class="stat-label">成功率</div>
-                        <div class="stat-value" id="log-stat-success-rate">-</div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-icon" style="background: #fef3c7;">💎</div>
-                        <div class="stat-label">24h Token</div>
-                        <div class="stat-value" id="log-stat-tokens">-</div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-icon" style="background: #fce7f3;">💰</div>
-                        <div class="stat-label">24h 费用</div>
-                        <div class="stat-value" id="log-stat-cost">-</div>
-                    </div>
-                </div>
-                
-                <!-- 过滤器 -->
-                <div class="filter-bar">
-                    <select id="log-apikey-filter" onchange="filterCallLogs()">
-                        <option value="">所有 API Key</option>
-                    </select>
-                    <select id="log-status-filter" onchange="filterCallLogs()">
-                        <option value="">所有状态</option>
-                        <option value="success">成功</option>
-                        <option value="error">失败</option>
-                    </select>
-                    <select id="log-model-filter" onchange="filterCallLogs()">
-                        <option value="">所有模型组</option>
-                    </select>
-                    <input type="number" id="log-limit" value="50" min="10" max="200" style="width: 80px;" onchange="loadCallLogs()">
-                    <span class="text-muted">条记录</span>
-                </div>
-                
-                <!-- 日志表格 -->
-                <div class="table-wrapper">
-                    <table class="data-table logs-table">
-                        <thead>
-                            <tr>
-                                <th style="width: 140px;">时间</th>
-                                <th>API Key</th>
-                                <th>账号</th>
-                                <th>模型</th>
-                                <th>Token</th>
-                                <th>费用</th>
-                                <th>耗时</th>
-                                <th>状态</th>
-                                <th style="width: 60px;">详情</th>
-                            </tr>
-                        </thead>
-                        <tbody id="logs-table-body">
-                            <tr><td colspan="9" class="text-center">加载中...</td></tr>
-                        </tbody>
-                    </table>
-                </div>
-            </div>
-
         </main>
     </div>
 
@@ -622,7 +948,7 @@
     <div id="import-accounts-modal" class="modal-overlay">
         <div class="modal modal-lg">
             <div class="modal-header">
-                <h2>📥 批量导入账号</h2>
+                <h2>批量导入账号</h2>
                 <button class="modal-close" onclick="closeModal('import-accounts-modal')">&times;</button>
             </div>
             <form id="import-accounts-form">
@@ -684,7 +1010,7 @@
                     </div>
                 </div>
                 <div class="import-preview hidden" id="import-preview">
-                    <h4>📋 预览 (<span id="import-count">0</span> 条记录)</h4>
+                    <h4>导入预览 (<span id="import-count">0</span> 条记录)</h4>
                     <div class="import-preview-list" id="import-preview-list"></div>
                 </div>
                 <div class="modal-footer">
@@ -880,15 +1206,15 @@
     <div id="new-apikey-modal" class="modal-overlay">
         <div class="modal">
             <div class="modal-header">
-                <h2>✅ API Key 已生成</h2>
+                <h2>API Key 已生成</h2>
                 <button class="modal-close" onclick="closeModal('new-apikey-modal')">&times;</button>
             </div>
             <div class="tip">
-                <strong>⚠️ 重要：</strong>请立即复制此 Key，关闭后将无法再次查看完整内容！
+                <strong>注意：</strong>请立即复制此 Key，关闭后将无法再次查看完整内容。
             </div>
             <div class="api-key-display mt-20">
                 <span class="key-value" id="new-apikey-value"></span>
-                <button class="copy-btn" onclick="copyNewApiKey()">📋 复制</button>
+                <button class="copy-btn" onclick="copyNewApiKey()">复制</button>
             </div>
             <div class="modal-footer">
                 <button type="button" class="btn btn-primary" onclick="closeModal('new-apikey-modal')">我已复制</button>
@@ -900,7 +1226,7 @@
     <div id="apikey-detail-modal" class="modal-overlay">
         <div class="modal">
             <div class="modal-header">
-                <h2>🔑 API Key 详情</h2>
+                <h2>API Key 详情</h2>
                 <button class="modal-close" onclick="closeModal('apikey-detail-modal')">&times;</button>
             </div>
             <div id="apikey-detail-content">
@@ -918,14 +1244,14 @@
     <div id="delete-logs-modal" class="modal-overlay">
         <div class="modal">
             <div class="modal-header">
-                <h2>🗑️ 删除调用日志</h2>
+                <h2>删除调用日志</h2>
                 <button class="modal-close" onclick="closeModal('delete-logs-modal')">&times;</button>
             </div>
             <form id="delete-logs-form">
                 <div class="form-group">
                     <label for="delete-logs-date">删除该日期及之前的日志</label>
                     <input type="date" id="delete-logs-date" required>
-                    <small class="text-muted">⚠️ 此操作不可恢复！</small>
+                    <small class="text-muted">此操作不可恢复。</small>
                 </div>
                 <div class="modal-footer">
                     <button type="button" class="btn btn-secondary" onclick="closeModal('delete-logs-modal')">取消</button>
@@ -939,7 +1265,7 @@
     <div id="confirm-modal" class="modal-overlay">
         <div class="modal">
             <div class="modal-header">
-                <h2 id="confirm-title">⚠️ 确认操作</h2>
+                <h2 id="confirm-title">确认操作</h2>
                 <button class="modal-close" onclick="closeModal('confirm-modal')">&times;</button>
             </div>
             <p id="confirm-message">确定要执行此操作吗？</p>
@@ -954,7 +1280,7 @@
     <div id="test-result-modal" class="modal-overlay">
         <div class="modal modal-lg">
             <div class="modal-header">
-                <h2 id="test-result-title">🧪 测试结果</h2>
+                <h2 id="test-result-title">测试结果</h2>
                 <button class="modal-close" onclick="closeModal('test-result-modal')">&times;</button>
             </div>
             <div id="test-result-content" class="test-result-content">
@@ -970,7 +1296,7 @@
     <div id="log-detail-modal" class="modal-overlay">
         <div class="modal modal-lg">
             <div class="modal-header">
-                <h2>📋 调用详情</h2>
+                <h2>调用详情</h2>
                 <button class="modal-close" onclick="closeModal('log-detail-modal')">&times;</button>
             </div>
             <div id="log-detail-content" class="log-detail-content">
@@ -986,7 +1312,7 @@
     <div id="performance-settings-modal" class="modal-overlay">
         <div class="modal">
             <div class="modal-header">
-                <h2>⚙️ 性能配置</h2>
+                <h2>性能配置</h2>
                 <button class="modal-close" onclick="closeModal('performance-settings-modal')">&times;</button>
             </div>
             <form id="performance-settings-form">
@@ -1016,7 +1342,7 @@
                     <small class="text-muted">推荐值: 30-120 秒</small>
                 </div>
                 <div class="tip" style="margin-top: 15px;">
-                    <strong>⚠️ 注意：</strong>修改配置后需要重启服务才能生效。配置将保存到环境变量。
+                    <strong>注意：</strong>修改配置后需要重启服务才能生效。配置将保存到环境变量。
                 </div>
                 <div class="modal-footer">
                     <button type="button" class="btn btn-secondary" onclick="closeModal('performance-settings-modal')">取消</button>
@@ -1029,6 +1355,7 @@
     <!-- Toast 提示 -->
     <div id="toast" class="toast"></div>
 
-    <script src="/static/admin.js?v=2"></script>
+    <script src="https://cdn.jsdelivr.net/npm/tom-select@2.4.1/dist/js/tom-select.complete.min.js"></script>
+    <script src="/static/admin.js?v=12"></script>
 </body>
 </html>

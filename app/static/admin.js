@@ -15,12 +15,18 @@ let callLogsData = [];
 let adminMeta = {
     version: null
 };
+const DEFAULT_WORKSPACE_META = {
+    kicker: 'Overview',
+    title: '监控中心',
+    subtitle: '查看账号配额、调用量和服务健康状态。'
+};
 
 // ==================== 初始化 ====================
 
 document.addEventListener('DOMContentLoaded', () => {
     // 检查登录状态
     if (authToken) {
+        currentPage = 'dashboard';
         showAdminPage();
         loadAdminMeta();
         loadDashboard();
@@ -31,6 +37,9 @@ document.addEventListener('DOMContentLoaded', () => {
     
     // 绑定事件
     bindEvents();
+
+    // 初始化 Tom Select 增强下拉
+    initEnhancedSelects();
 });
 
 function bindEvents() {
@@ -206,6 +215,7 @@ async function handleLogin(e) {
         authToken = data.token;
         localStorage.setItem('authToken', authToken);
         
+        currentPage = 'dashboard';
         showAdminPage();
         await loadAdminMeta();
         loadDashboard();
@@ -217,6 +227,10 @@ async function handleLogin(e) {
 }
 
 function handleLogout() {
+    stopPerformanceAutoRefresh();
+    stopMonitorAutoSync();
+    closeMobileMenu();
+    currentPage = 'login';
     authToken = null;
     localStorage.removeItem('authToken');
     adminMeta.version = null;
@@ -226,32 +240,78 @@ function handleLogout() {
 }
 
 function showLoginPage() {
+    currentPage = 'login';
     document.getElementById('login-page').classList.remove('hidden');
     document.getElementById('admin-page').classList.add('hidden');
+    setActiveSidebarLink(null);
+    document.title = 'Service Control';
 }
 
 function showAdminPage() {
+    if (currentPage === 'login') {
+        currentPage = 'dashboard';
+    }
     document.getElementById('login-page').classList.add('hidden');
     document.getElementById('admin-page').classList.remove('hidden');
+    setActiveSidebarLink(currentPage);
+    updateWorkspaceHeader(currentPage);
+}
+
+function setActiveSidebarLink(page) {
+    document.querySelectorAll('.sidebar-nav a[data-page]').forEach(link => {
+        link.classList.toggle('active', Boolean(page) && link.dataset.page === page);
+    });
+}
+
+function isPageActive(page) {
+    const adminPage = document.getElementById('admin-page');
+    return Boolean(authToken)
+        && currentPage === page
+        && adminPage
+        && !adminPage.classList.contains('hidden');
 }
 
 function setSidebarVersion(version) {
     const versionEl = document.getElementById('sidebar-version');
-    if (!versionEl) return;
+    const workspaceVersionEl = document.getElementById('workspace-version');
+    if (!versionEl && !workspaceVersionEl) return;
     
     if (!version) {
-        versionEl.textContent = '版本 -';
+        if (versionEl) versionEl.textContent = '版本 -';
+        if (workspaceVersionEl) workspaceVersionEl.textContent = '-';
         return;
     }
     
     const versionText = String(version).trim();
     if (!versionText) {
-        versionEl.textContent = '版本 -';
+        if (versionEl) versionEl.textContent = '版本 -';
+        if (workspaceVersionEl) workspaceVersionEl.textContent = '-';
         return;
     }
     
     const normalized = versionText.startsWith('v') ? versionText : `v${versionText}`;
-    versionEl.textContent = `版本 ${normalized}`;
+    if (versionEl) versionEl.textContent = `版本 ${normalized}`;
+    if (workspaceVersionEl) workspaceVersionEl.textContent = normalized;
+}
+
+function updateWorkspaceHeader(page = currentPage) {
+    const activeLink = document.querySelector(`.sidebar-nav a[data-page="${page}"]`);
+    const kickerEl = document.getElementById('workspace-kicker');
+    const titleEl = document.getElementById('workspace-title');
+    const subtitleEl = document.getElementById('workspace-subtitle');
+
+    const meta = activeLink
+        ? {
+            kicker: activeLink.dataset.kicker || DEFAULT_WORKSPACE_META.kicker,
+            title: activeLink.dataset.title || DEFAULT_WORKSPACE_META.title,
+            subtitle: activeLink.dataset.subtitle || DEFAULT_WORKSPACE_META.subtitle
+        }
+        : DEFAULT_WORKSPACE_META;
+
+    if (kickerEl) kickerEl.textContent = meta.kicker;
+    if (titleEl) titleEl.textContent = meta.title;
+    if (subtitleEl) subtitleEl.textContent = meta.subtitle;
+    document.title = `${meta.title} · Service Control`;
 }
 
 async function loadAdminMeta() {
@@ -273,12 +333,7 @@ function switchPage(page) {
     currentPage = page;
     
     // 更新导航高亮
-    document.querySelectorAll('.sidebar-nav a').forEach(link => {
-        link.classList.remove('active');
-        if (link.dataset.page === page) {
-            link.classList.add('active');
-        }
-    });
+    setActiveSidebarLink(page);
     
     // 隐藏所有页面
     document.querySelectorAll('.page-content').forEach(el => {
@@ -287,6 +342,7 @@ function switchPage(page) {
     
     // 显示目标页面
     document.getElementById(`page-${page}`).classList.remove('hidden');
+    updateWorkspaceHeader(page);
     
     // 停止仪表板自动同步（如果离开仪表板）
     if (page !== 'dashboard') {
@@ -384,7 +440,9 @@ async function loadDashboard() {
         // 启动自动同步
         startMonitorAutoSync();
     } catch (error) {
-        showToast('加载仪表板失败: ' + error.message, 'error');
+        if (isPageActive('dashboard')) {
+            showToast('加载仪表板失败: ' + error.message, 'error');
+        }
         // 显示错误状态
         document.getElementById('stat-active-accounts').textContent = '0';
         document.getElementById('stat-api-keys').textContent = '0';
@@ -759,7 +817,7 @@ function renderMonitorTable(accounts) {
             <tr data-org-id="${escapeHtml(org.org_id)}">
                 <td>
                     <div class="account-name-cell">
-                        ${escapeHtml(org.name)}
+                        <strong class="account-name-primary">${escapeHtml(org.name)}</strong>
                         <span class="account-org">${escapeHtml(org.org_id?.substring(0, 8) || '')}...</span>
                     </div>
                 </td>
@@ -772,11 +830,11 @@ function renderMonitorTable(accounts) {
                     <span class="${percentage >= 80 ? 'text-warning' : ''}">${formatNumber(remaining)}</span>
                 </td>
                 <td>
-                    <div style="display: flex; align-items: center; gap: 10px;">
+                    <div class="monitor-usage-rate">
                         <div class="usage-bar-mini">
-                            <div class="usage-fill ${usageClass}" style="width: ${Math.min(percentage, 100)}%"></div>
+                            <div class="usage-fill ${usageClass}${percentage > 0 ? ' has-value' : ''}" style="width: ${Math.min(percentage, 100)}%"></div>
                         </div>
-                        <span class="${usageClass}" style="font-weight: 600; min-width: 45px;">${percentage}%</span>
+                        <span class="${usageClass} usage-rate-text">${percentage}%</span>
                     </div>
                 </td>
                 <td>${formatNumber(org.total_tokens)}</td>
@@ -971,27 +1029,31 @@ function renderAccountsTable() {
             <tr data-account-id="${account.id}">
                 <td>
                     <div class="account-name-cell">
-                        ${escapeHtml(account.name)}
+                        <strong class="account-name-primary">${escapeHtml(account.name)}</strong>
                         <span class="account-org">${escapeHtml(account.org_id?.substring(0, 8) || '')}...</span>
                     </div>
                 </td>
                 <td>
-                    ${modelTags}
-                    ${testStatus}
+                    <div class="model-tag-list">
+                        ${modelTags}
+                        ${testStatus}
+                    </div>
                 </td>
                 <td>
                     <span class="usage-inline">${formatNumber(account.daily_used)} / ${formatNumber(account.daily_quota)}</span>
                 </td>
                 <td><span class="status-badge ${statusClass}">${getStatusText(account.status)}</span></td>
                 <td><span class="last-used-time ${lastUsedClass}">${account.last_used_at ? formatDateTime(account.last_used_at) : '-'}</span></td>
-                <td class="actions">
-                    <button class="btn btn-sm btn-info" id="test-btn-${account.id}" onclick="testAccount('${account.id}')" title="测试连接">测试</button>
-                    <button class="btn btn-sm btn-secondary" onclick="editAccount('${account.id}')">编辑</button>
-                    ${account.status === 'disabled' 
-                        ? `<button class="btn btn-sm btn-success" onclick="toggleAccountStatus('${account.id}', 'active')" title="启用此账号">启用</button>`
-                        : `<button class="btn btn-sm btn-warning" onclick="toggleAccountStatus('${account.id}', 'disabled')" title="禁用此账号">禁用</button>`
-                    }
-                    <button class="btn btn-sm btn-danger" onclick="deleteAccount('${account.id}')">删除</button>
+                <td class="actions-cell">
+                    <div class="actions">
+                        <button class="btn btn-sm btn-info" id="test-btn-${account.id}" onclick="testAccount('${account.id}')" title="测试连接">测试</button>
+                        <button class="btn btn-sm btn-secondary" onclick="editAccount('${account.id}')">编辑</button>
+                        ${account.status === 'disabled'
+                            ? `<button class="btn btn-sm btn-success" onclick="toggleAccountStatus('${account.id}', 'active')" title="启用此账号">启用</button>`
+                            : `<button class="btn btn-sm btn-warning" onclick="toggleAccountStatus('${account.id}', 'disabled')" title="禁用此账号">禁用</button>`
+                        }
+                        <button class="btn btn-sm btn-danger" onclick="deleteAccount('${account.id}')">删除</button>
+                    </div>
                 </td>
             </tr>
         `;
@@ -1371,6 +1433,7 @@ async function loadGroupsForImportSelect() {
             option.textContent = group.name;
             select.appendChild(option);
         });
+        syncSelect(select);
     } catch (error) {
         console.error('加载模型组失败:', error);
     }
@@ -1549,7 +1612,7 @@ function renderImportPreview() {
                 <span class="item-detail">models: ${escapeHtml((item.model_groups || [item.model_group]).join(', '))} | org: ${item.org_id.substring(0, 8)}... | flow: ${item.flow_id.substring(0, 8)}...</span>
             </div>
             <span class="item-status ${item.status}" id="import-status-${index}">
-                ${item.isDuplicate ? '⚠️ 已存在' : '⏳ 待导入'}
+                ${item.isDuplicate ? '已存在' : '待导入'}
             </span>
         </div>
     `).join('');
@@ -1611,7 +1674,7 @@ async function handleImportSubmit(e) {
             if (result.status === 'created') {
                 item.status = 'success';
                 if (statusEl) {
-                    statusEl.innerHTML = '✅ 成功';
+                    statusEl.textContent = '成功';
                     statusEl.className = 'item-status success';
                 }
                 return;
@@ -1620,7 +1683,7 @@ async function handleImportSubmit(e) {
             if (result.status === 'skipped_existing' || result.status === 'skipped_duplicate') {
                 item.status = 'duplicate';
                 if (statusEl) {
-                    statusEl.innerHTML = '⚠️ 跳过';
+                    statusEl.textContent = '跳过';
                     statusEl.className = 'item-status duplicate';
                 }
                 return;
@@ -1628,7 +1691,7 @@ async function handleImportSubmit(e) {
 
             item.status = 'error';
             if (statusEl) {
-                statusEl.innerHTML = '❌ 失败';
+                statusEl.textContent = '失败';
                 statusEl.className = 'item-status error';
             }
         });
@@ -1703,9 +1766,7 @@ function editAccount(id) {
     
     const modelSelect = document.getElementById('account-model-group');
     const selectedModels = getAccountModels(account);
-    Array.from(modelSelect.options).forEach(option => {
-        option.selected = selectedModels.includes(option.value);
-    });
+    setSelectValue(modelSelect, selectedModels);
     document.getElementById('account-daily-quota').value = account.daily_quota;
     
     // Private API Key
@@ -1932,7 +1993,7 @@ async function testAllAccounts() {
     // 完成
     progressFill.style.width = '100%';
     progressText.textContent = `测试完成！成功: ${validResults.filter(r => r.success).length}/${total}`;
-    testAllBtn.innerHTML = '🧪 一键测试全部';
+    testAllBtn.textContent = '批量测试';
     testAllBtn.classList.remove('btn-testing');
     
     // 3秒后隐藏进度条
@@ -1951,7 +2012,7 @@ function showTestResultModal(results) {
     const successCount = results.filter(r => r.success).length;
     const failCount = results.length - successCount;
     
-    title.textContent = `🧪 测试结果 (成功: ${successCount}, 失败: ${failCount})`;
+    title.textContent = `测试结果 · 成功 ${successCount} / 失败 ${failCount}`;
     
     if (results.length === 0) {
         content.innerHTML = '<div class="empty-state"><p>没有测试结果</p></div>';
@@ -2016,7 +2077,7 @@ function renderGroupsTable() {
         // 计价显示
         const inputPrice = group.pricing?.input || 0;
         const outputPrice = group.pricing?.output || 0;
-        const pricingDisplay = `<span class="pricing-input">入: $${inputPrice}</span> / <span class="pricing-output">出: $${outputPrice}</span>`;
+        const pricingDisplay = `<span class="pricing-inline"><span class="pricing-input">入: $${inputPrice}</span> / <span class="pricing-output">出: $${outputPrice}</span></span>`;
         
         // 可用额度显示
         const available = group.quota?.available || 0;
@@ -2029,8 +2090,8 @@ function renderGroupsTable() {
         
         return `
         <tr>
-            <td><strong>${escapeHtml(group.name)}</strong></td>
-            <td>${escapeHtml(group.description || '-')}</td>
+            <td><strong class="cell-title">${escapeHtml(group.name)}</strong></td>
+            <td><span class="cell-secondary">${escapeHtml(group.description || '-')}</span></td>
             <td class="pricing-cell">${pricingDisplay}</td>
             <td>
                 <div class="quota-display">
@@ -2041,10 +2102,17 @@ function renderGroupsTable() {
                     </div>
                 </div>
             </td>
-            <td>${group.active_account_count || 0} / ${group.account_count || 0}</td>
-            <td class="actions">
-                <button class="btn btn-sm btn-secondary" onclick="editGroup('${group.id}')">编辑</button>
-                <button class="btn btn-sm btn-danger" onclick="deleteGroup('${group.id}')">删除</button>
+            <td>
+                <div class="group-account-summary">
+                    <span class="group-account-main">${group.active_account_count || 0} / ${group.account_count || 0}</span>
+                    <span class="group-account-sub">活跃 / 总账号</span>
+                </div>
+            </td>
+            <td class="actions-cell">
+                <div class="actions">
+                    <button class="btn btn-sm btn-secondary" onclick="editGroup('${group.id}')">编辑</button>
+                    <button class="btn btn-sm btn-danger" onclick="deleteGroup('${group.id}')">删除</button>
+                </div>
             </td>
         </tr>
     `}).join('');
@@ -2191,7 +2259,7 @@ function renderApiKeysTable() {
             <tr>
                 <td>
                     <div class="account-name-cell">
-                        ${escapeHtml(key.name || '未命名')}
+                        <strong class="account-name-primary">${escapeHtml(key.name || '未命名')}</strong>
                     </div>
                 </td>
                 <td>
@@ -2200,22 +2268,34 @@ function renderApiKeysTable() {
                     </span>
                 </td>
                 <td>
-                    ${groups.map(g => `<span class="model-group-tag" style="margin-right: 6px; margin-bottom: 4px;">${escapeHtml(g)}</span>`).join('')}
+                    <div class="model-tag-list">
+                        ${groups.map(g => `<span class="model-group-tag">${escapeHtml(g)}</span>`).join('')}
+                    </div>
                 </td>
                 <td>
-                    <div class="limit-info">
-                        <span class="limit-type-badge ${limitInfo.class}">${limitInfo.type}</span>
-                        <span class="usage-inline">${limitInfo.display}</span>
+                    <div class="limit-info ${limitInfo.class}">
+                        <div class="limit-head">
+                            <span class="limit-type-badge ${limitInfo.class}">${limitInfo.type}</span>
+                            ${limitInfo.ratio ? `<span class="limit-ratio">${limitInfo.ratio}</span>` : ''}
+                        </div>
+                        <span class="limit-main">${limitInfo.primary}</span>
+                        ${limitInfo.percent !== null ? `
+                            <span class="limit-track">
+                                <span class="limit-track-fill ${limitInfo.class}" style="width: ${Math.max(0, Math.min(limitInfo.percent, 100))}%;"></span>
+                            </span>
+                        ` : ''}
                     </div>
                 </td>
                 <td><span class="status-badge ${statusClass}">${statusText}</span></td>
-                <td class="actions">
-                    <button class="btn btn-sm btn-info" onclick="showApiKeyDetail('${key.id}')">详情</button>
-                    <button class="btn btn-sm btn-secondary" onclick="editApiKey('${key.id}')">编辑</button>
-                    ${key.status === 'active' 
-                        ? `<button class="btn btn-sm btn-warning" onclick="revokeApiKey('${key.id}')">禁用</button>` 
-                        : `<button class="btn btn-sm btn-success" onclick="enableApiKey('${key.id}')">启用</button>`}
-                    <button class="btn btn-sm btn-danger" onclick="deleteApiKey('${key.id}')">删除</button>
+                <td class="actions-cell">
+                    <div class="actions">
+                        <button class="btn btn-sm btn-info" onclick="showApiKeyDetail('${key.id}')">详情</button>
+                        <button class="btn btn-sm btn-secondary" onclick="editApiKey('${key.id}')">编辑</button>
+                        ${key.status === 'active'
+                            ? `<button class="btn btn-sm btn-warning" onclick="revokeApiKey('${key.id}')">禁用</button>`
+                            : `<button class="btn btn-sm btn-success" onclick="enableApiKey('${key.id}')">启用</button>`}
+                        <button class="btn btn-sm btn-danger" onclick="deleteApiKey('${key.id}')">删除</button>
+                    </div>
                 </td>
             </tr>
         `;
@@ -2232,7 +2312,9 @@ function getKeyLimitInfo(key) {
         return {
             type: '费用',
             class: 'limit-cost',
-            display: `$${used.toFixed(2)} / $${limit.toFixed(2)} (${percent}%)`
+            ratio: `${percent}%`,
+            primary: `$${used.toFixed(2)} / $${limit.toFixed(2)}`,
+            percent
         };
     } else if (key.token_quota) {
         const used = key.total_tokens || 0;
@@ -2241,7 +2323,9 @@ function getKeyLimitInfo(key) {
         return {
             type: 'Token',
             class: 'limit-token',
-            display: `${formatNumber(used)} / ${formatNumber(limit)} (${percent}%)`
+            ratio: `${percent}%`,
+            primary: `${formatNumber(used)} / ${formatNumber(limit)}`,
+            percent
         };
     } else if (key.request_quota) {
         const used = key.total_requests || 0;
@@ -2250,13 +2334,17 @@ function getKeyLimitInfo(key) {
         return {
             type: '请求',
             class: 'limit-request',
-            display: `${formatNumber(used)} / ${formatNumber(limit)} (${percent}%)`
+            ratio: `${percent}%`,
+            primary: `${formatNumber(used)} / ${formatNumber(limit)}`,
+            percent
         };
     } else {
         return {
             type: '无限制',
             class: 'limit-none',
-            display: `${formatNumber(key.total_requests || 0)} 次请求`
+            ratio: '',
+            primary: `${formatNumber(key.total_requests || 0)} 次请求`,
+            percent: null
         };
     }
 }
@@ -2340,7 +2428,7 @@ async function showApiKeyDetail(id) {
         
         content.innerHTML = `
             <div class="detail-section">
-                <h4>📌 基本信息</h4>
+                <h4>基本信息</h4>
                 <div class="detail-grid">
                     <div class="detail-item">
                         <span class="detail-label">名称</span>
@@ -2372,14 +2460,14 @@ async function showApiKeyDetail(id) {
             </div>
             
             <div class="detail-section">
-                <h4>📁 授权模型组</h4>
+                <h4>授权模型组</h4>
                 <div class="model-groups-list">
                     ${groups.map(g => `<span class="model-group-tag">${escapeHtml(g)}</span>`).join(' ')}
                 </div>
             </div>
             
             <div class="detail-section">
-                <h4>📊 使用统计</h4>
+                <h4>使用统计</h4>
                 <div class="stats-grid stats-grid-3" style="margin: 0;">
                     <div class="stat-card mini">
                         <div class="stat-label">总请求数</div>
@@ -2467,6 +2555,8 @@ async function showAddApiKeyModal() {
     select.innerHTML = groupsData.map(g => 
         `<option value="${escapeHtml(g.name)}">${escapeHtml(g.name)}</option>`
     ).join('');
+    syncSelect(select);
+    setSelectValue(select, []);
     
     document.getElementById('apikey-form').reset();
     openModal('apikey-modal');
@@ -2526,12 +2616,11 @@ async function editApiKey(id) {
     select.innerHTML = groupsData.map(g => 
         `<option value="${escapeHtml(g.name)}">${escapeHtml(g.name)}</option>`
     ).join('');
+    syncSelect(select);
     
     // 选中当前的模型组
     const groups = Array.isArray(key.model_groups) ? key.model_groups : [key.model_groups];
-    Array.from(select.options).forEach(opt => {
-        opt.selected = groups.includes(opt.value);
-    });
+    setSelectValue(select, groups);
     
     // 设置限制
     document.getElementById('apikey-edit-request-quota').value = key.request_quota || '';
@@ -2607,7 +2696,7 @@ function revokeApiKey(id) {
         } catch (error) {
             showToast('禁用失败: ' + error.message, 'error');
         }
-    }, { title: '⚠️ 确认禁用', btnText: '确认禁用', btnClass: 'btn-warning' });
+    }, { title: '确认禁用', btnText: '确认禁用', btnClass: 'btn-warning' });
 }
 
 async function enableApiKey(id) {
@@ -2635,7 +2724,7 @@ function deleteApiKey(id) {
             console.error('Delete error:', error);
             showToast('删除失败: ' + error.message, 'error');
         }
-    }, { title: '⚠️ 确认删除', btnText: '确认删除', btnClass: 'btn-danger' });
+    }, { title: '确认删除', btnText: '确认删除', btnClass: 'btn-danger' });
 }
 
 // ==================== 辅助函数 ====================
@@ -2650,25 +2739,24 @@ async function loadGroupsForSelect() {
         // 更新账号管理页面的模型组下拉框
         const accountGroupSelect = document.getElementById('account-model-group');
         if (accountGroupSelect) {
-            const currentValues = Array.from(accountGroupSelect.selectedOptions || []).map(
-                option => option.value
-            );
+            const currentValues = getSelectValue(accountGroupSelect) || [];
             accountGroupSelect.innerHTML = '<option value="">选择模型组</option>' + 
                 groupsData.map(g => `<option value="${escapeHtml(g.name)}">${escapeHtml(g.name)}</option>`).join('');
-            if (currentValues.length > 0) {
-                Array.from(accountGroupSelect.options).forEach(option => {
-                    option.selected = currentValues.includes(option.value);
-                });
+            syncSelect(accountGroupSelect);
+            const restoreValues = Array.isArray(currentValues) ? currentValues : [currentValues].filter(Boolean);
+            if (restoreValues.length > 0) {
+                setSelectValue(accountGroupSelect, restoreValues);
             }
         }
         
         // 更新账号筛选的模型组下拉框
         const accountGroupFilter = document.getElementById('account-group-filter');
         if (accountGroupFilter) {
-            const currentValue = accountGroupFilter.value;
+            const currentValue = getSelectValue(accountGroupFilter);
             accountGroupFilter.innerHTML = '<option value="">所有模型组</option>' + 
                 groupsData.map(g => `<option value="${escapeHtml(g.name)}">${escapeHtml(g.name)}</option>`).join('');
-            if (currentValue) accountGroupFilter.value = currentValue;
+            syncSelect(accountGroupFilter);
+            if (currentValue) setSelectValue(accountGroupFilter, currentValue);
         }
     } catch (error) {
         console.error('加载模型组失败:', error);
@@ -2688,7 +2776,7 @@ function closeModal(modalId) {
 }
 
 function showConfirmModal(message, onConfirm, options = {}) {
-    const title = options.title || '⚠️ 确认操作';
+    const title = options.title || '确认操作';
     const btnText = options.btnText || '确认';
     const btnClass = options.btnClass || 'btn-danger';
     
@@ -2925,7 +3013,7 @@ async function updateLogApiKeyFilter() {
     const select = document.getElementById('log-apikey-filter');
     if (!select) return;
     
-    const currentValue = select.value;
+    const currentValue = getSelectValue(select);
     
     // 确保有 API Key 数据
     if (apiKeysData.length === 0) {
@@ -2939,8 +3027,9 @@ async function updateLogApiKeyFilter() {
     
     select.innerHTML = '<option value="">所有 API Key</option>' + 
         apiKeysData.map(k => `<option value="${k.id}">${escapeHtml(k.name || k.key_prefix + '...')}</option>`).join('');
+    syncSelect(select);
     
-    if (currentValue) select.value = currentValue;
+    if (currentValue) setSelectValue(select, currentValue);
 }
 
 // 显示删除日志模态框
@@ -2964,7 +3053,7 @@ async function handleDeleteLogs(e) {
     }
     
     showConfirmModal(
-        `确定要删除 ${dateStr} 及之前的所有调用日志吗？\n\n⚠️ 此操作不可恢复！`,
+        `确定要删除 ${dateStr} 及之前的所有调用日志吗？\n\n此操作不可恢复。`,
         async () => {
             try {
                 const response = await apiCall('/logs/calls', {
@@ -2981,7 +3070,7 @@ async function handleDeleteLogs(e) {
                 showToast('删除失败: ' + error.message, 'error');
             }
         },
-        { title: '⚠️ 确认删除日志', btnText: '确认删除', btnClass: 'btn-danger' }
+        { title: '确认删除日志', btnText: '确认删除', btnClass: 'btn-danger' }
     );
 }
 
@@ -2990,7 +3079,7 @@ async function updateLogModelFilter() {
     if (!select) return;
     
     // 保存当前选择
-    const currentValue = select.value;
+    const currentValue = getSelectValue(select);
     
     // 确保有模型组数据
     if (groupsData.length === 0) {
@@ -3004,8 +3093,9 @@ async function updateLogModelFilter() {
     
     select.innerHTML = '<option value="">所有模型组</option>' + 
         groupsData.map(g => `<option value="${escapeHtml(g.name)}">${escapeHtml(g.name)}</option>`).join('');
+    syncSelect(select);
     
-    if (currentValue) select.value = currentValue;
+    if (currentValue) setSelectValue(select, currentValue);
 }
 
 function filterCallLogs() {
@@ -3039,7 +3129,7 @@ function renderCallLogsTable() {
         
         // 账号显示
         const accountDisplay = log.account?.name || '-';
-        const modelGroup = log.account?.model_group || '-';
+        const requestModel = log.request?.model || '-';
         
         // Token 显示
         const tokenDisplay = `${formatNumber(log.tokens?.input || 0)} / ${formatNumber(log.tokens?.output || 0)}`;
@@ -3054,18 +3144,27 @@ function renderCallLogsTable() {
             <tr class="${log.status === 'error' ? 'row-error' : ''}">
                 <td><span class="log-time">${timeStr}</span></td>
                 <td>
-                    <span class="key-name" title="${escapeHtml(log.api_key?.prefix || '')}">${escapeHtml(keyDisplay)}</span>
+                    <div class="key-stack">
+                        <span class="key-name" title="${escapeHtml(log.api_key?.prefix || '')}">${escapeHtml(keyDisplay)}</span>
+                        <span class="cell-secondary">${escapeHtml(log.api_key?.prefix || '-')}</span>
+                    </div>
                 </td>
                 <td>
-                    <span class="account-name">${escapeHtml(accountDisplay)}</span>
+                    <div class="account-cell">
+                        <span class="account-name">${escapeHtml(accountDisplay)}</span>
+                    </div>
                 </td>
-                <td><span class="model-name">${escapeHtml(log.request?.model || '-')}</span></td>
+                <td>
+                    <span class="log-model-tag" title="${escapeHtml(requestModel)}">${escapeHtml(requestModel)}</span>
+                </td>
                 <td><span class="token-display">${tokenDisplay}</span></td>
                 <td><span class="cost-display">${costDisplay}</span></td>
                 <td><span class="time-display">${timeMs}</span></td>
                 <td><span class="status-badge ${statusClass}">${statusText}</span></td>
-                <td>
-                    <button class="btn btn-sm btn-secondary" onclick="showLogDetail(${index})">查看</button>
+                <td class="actions-cell">
+                    <div class="actions">
+                        <button class="btn btn-sm btn-secondary" onclick="showLogDetail(${index})">查看</button>
+                    </div>
                 </td>
             </tr>
         `;
@@ -3100,7 +3199,7 @@ function showLogDetail(index) {
     
     content.innerHTML = `
         <div class="log-detail-section">
-            <h4>📌 基本信息</h4>
+            <h4>基本信息</h4>
             <div class="detail-grid">
                 <div class="detail-item">
                     <span class="detail-label">时间</span>
@@ -3126,7 +3225,7 @@ function showLogDetail(index) {
         </div>
         
         <div class="log-detail-section">
-            <h4>🔑 调用方</h4>
+            <h4>调用方</h4>
             <div class="detail-grid">
                 <div class="detail-item">
                     <span class="detail-label">API Key</span>
@@ -3144,7 +3243,7 @@ function showLogDetail(index) {
         </div>
         
         <div class="log-detail-section">
-            <h4>👤 账号信息</h4>
+            <h4>账号信息</h4>
             <div class="detail-grid">
                 <div class="detail-item">
                     <span class="detail-label">账号名称</span>
@@ -3166,7 +3265,7 @@ function showLogDetail(index) {
         </div>
         
         <div class="log-detail-section">
-            <h4>💎 Token 与费用</h4>
+            <h4>Token 与费用</h4>
             <div class="detail-grid">
                 <div class="detail-item">
                     <span class="detail-label">输入 Token</span>
@@ -3197,21 +3296,21 @@ function showLogDetail(index) {
         
         ${log.input_preview ? `
         <div class="log-detail-section">
-            <h4>📥 输入预览</h4>
+            <h4>输入预览</h4>
             <pre class="preview-box">${escapeHtml(log.input_preview)}</pre>
         </div>
         ` : ''}
         
         ${log.output_preview ? `
         <div class="log-detail-section">
-            <h4>📤 输出预览 (前10行)</h4>
+            <h4>输出预览 (前10行)</h4>
             <pre class="preview-box">${escapeHtml(log.output_preview)}</pre>
         </div>
         ` : ''}
         
         ${log.error_message ? `
         <div class="log-detail-section">
-            <h4>❌ 错误信息</h4>
+            <h4>错误信息</h4>
             <pre class="preview-box error">${escapeHtml(log.error_message)}</pre>
         </div>
         ` : ''}
@@ -3226,15 +3325,28 @@ function showLogDetail(index) {
 let performanceInterval = null;
 
 async function loadPerformanceStats() {
+    if (!isPageActive('performance')) {
+        return false;
+    }
+
     try {
         const response = await apiCall('/performance/stats');
+        if (!isPageActive('performance')) {
+            return false;
+        }
         if (response.success) {
             updatePerformanceDisplay(response);
+            return true;
         }
     } catch (error) {
         console.error('加载性能统计失败:', error);
+        if (!isPageActive('performance')) {
+            return false;
+        }
         showToast('加载性能统计失败: ' + error.message, 'error');
     }
+
+    return false;
 }
 
 function perfNumber(value, digits = 0) {
@@ -3399,9 +3511,11 @@ function stopPerformanceAutoRefresh() {
     }
 }
 
-function refreshPerformanceStats() {
-    loadPerformanceStats();
-    showToast('已刷新', 'success');
+async function refreshPerformanceStats() {
+    const success = await loadPerformanceStats();
+    if (success && isPageActive('performance')) {
+        showToast('已刷新', 'success');
+    }
 }
 
 function showPerformanceSettingsModal() {
@@ -3473,4 +3587,79 @@ async function resetPerformanceStats() {
     } catch (error) {
         showToast('重置失败: ' + error.message, 'error');
     }
+}
+
+// ==================== Tom Select 增强下拉 ====================
+// 把 .form-group / .filter-bar 内的所有 <select> 升级为带搜索 / 自定义浮层的下拉。
+// 设计：保留原生 <select> 作为表单值后备 + 可访问性兜底；TS 加载失败时自动降级。
+
+function initEnhancedSelects(root) {
+    if (typeof TomSelect === 'undefined') return;
+    const scope = root || document;
+    const selects = scope.querySelectorAll('.form-group select, .filter-bar select');
+    selects.forEach(initEnhancedSelect);
+}
+
+function initEnhancedSelect(select) {
+    if (typeof TomSelect === 'undefined') return null;
+    if (!select || select.tomselect) return select && select.tomselect;
+    if (select.dataset.skipTs === 'true') return null;
+
+    const isMultiple = !!select.multiple;
+    const placeholderOption = select.querySelector('option[value=""]');
+    const placeholderText = (placeholderOption && placeholderOption.textContent && placeholderOption.textContent.trim())
+        || (isMultiple ? '请选择（可多选）' : '请选择...');
+
+    const config = {
+        allowEmptyOption: !isMultiple,
+        create: false,
+        maxOptions: 500,
+        plugins: isMultiple ? ['remove_button'] : [],
+        hideSelected: isMultiple,
+        closeAfterSelect: !isMultiple,
+        placeholder: placeholderText,
+        controlInput: isMultiple ? undefined : null,
+        // 关键：把下拉浮层直接挂到 <body>，逃离任何 card / section 的 overflow 与 stacking-context 限制
+        dropdownParent: 'body',
+    };
+
+    try {
+        return new TomSelect(select, config);
+    } catch (err) {
+        console.warn('TomSelect init failed for', select.id || select.name, err);
+        return null;
+    }
+}
+
+function syncSelect(idOrEl) {
+    const el = typeof idOrEl === 'string' ? document.getElementById(idOrEl) : idOrEl;
+    if (!el) return;
+    if (!el.tomselect) {
+        // 还没初始化，懒加载一次（覆盖运行时插入的新 select）
+        initEnhancedSelect(el);
+        return;
+    }
+    el.tomselect.sync();
+}
+
+function setSelectValue(idOrEl, value) {
+    const el = typeof idOrEl === 'string' ? document.getElementById(idOrEl) : idOrEl;
+    if (!el) return;
+    if (el.tomselect) {
+        el.tomselect.setValue(value == null ? '' : value, true);
+        return;
+    }
+    if (Array.isArray(value)) {
+        Array.from(el.options).forEach(o => { o.selected = value.includes(o.value); });
+    } else {
+        el.value = value == null ? '' : value;
+    }
+}
+
+function getSelectValue(idOrEl) {
+    const el = typeof idOrEl === 'string' ? document.getElementById(idOrEl) : idOrEl;
+    if (!el) return null;
+    if (el.tomselect) return el.tomselect.getValue();
+    if (el.multiple) return Array.from(el.selectedOptions).map(o => o.value);
+    return el.value;
 }

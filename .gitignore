@@ -57,6 +57,8 @@ data/stress_reports/cc_dialogue_requests_*.jsonl
 data/stress_reports/cc_dialogue_sessions_*.jsonl
 data/stress_reports/real_claude_cli_smoke_report_*.json
 data/stress_reports/claude_code_regression_gate_*.json
+data/stress_reports/blogdemo_cli_stress_report_*.json
+data/stress_reports/blogdemo_cli_stress_sessions_*.jsonl
 
 # Testing
 .coverage

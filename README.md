@@ -76,19 +76,18 @@ pinned: false
 真实 Claude CLI 冒烟测试：
 
 - 使用 [run_local_real_claude_cli_smoke.sh](./scripts/run_local_real_claude_cli_smoke.sh) 验证完整的 `claude` CLI -> `st-api` -> Anthropic `/v1/messages` 链路，提示词设计为应在单轮内收敛。
-- 当 `ST_API_KEY` 未设置时，脚本会先启动本地网关，再通过管理 API 创建一个临时 API Key，执行一次真实 `claude` 请求，校验 JSON 结果载荷，最后删除这个临时 key。
+- 当 `ST_API_KEY` 未设置时，脚本会先启动网关，再通过管理 API 创建一个临时 API Key，执行一次真实 `claude` 请求，校验 JSON 结果载荷，最后删除这个临时 key。
 - 成功时会打印 `gate_status=PASS`；失败时会打印 `gate_status=FAIL`，并附带失败阶段与原因。
 - 脚本还会把结构化 gate 报告写入 `data/stress_reports/real_claude_cli_smoke_report_*.json`。
 - 默认要求回答中同时包含 `Vue` 和 `Vite`。如果你故意修改了 smoke prompt，可通过 `EXPECTED_SUBSTRINGS=...` 覆盖。
 - 默认前置条件：
-  - 本地已安装 `claude` CLI，且在 `PATH` 中可用
-  - 本地可用管理后台凭据，通过 `ADMIN_USERNAME` / `ADMIN_PASSWORD` 提供，或使用默认值 `admin` / `admin123`
-  - 本地已存在模型组 `claude-opus-4-6`，否则请通过 `MODEL=...` 覆盖
+  - 已安装 `claude` CLI，且在 `PATH` 中可用
+  - 管理后台凭据可通过 `ADMIN_USERNAME` / `ADMIN_PASSWORD` 提供
+  - 已存在模型组 `claude-opus-4-6`，否则请通过 `MODEL=...` 覆盖
 
 示例：
 
 ```bash
-cd /home/ww/Project/st-api
 bash scripts/run_local_real_claude_cli_smoke.sh
 ```
 
@@ -104,7 +103,7 @@ bash scripts/run_local_real_claude_cli_smoke.sh
 
 统一 Claude Code 回归闸门：
 
-- 使用 [run_claude_code_regression_gate.sh](./scripts/run_claude_code_regression_gate.sh) 执行一条命令的本地验收。
+- 使用 [run_claude_code_regression_gate.sh](./scripts/run_claude_code_regression_gate.sh) 执行一条命令的验收。
 - 该脚本会先运行聚焦的 Claude Code 兼容性 pytest 测试集，然后再运行真实 Claude CLI smoke gate。
 - 顶层 gate 报告会写入 `data/stress_reports/claude_code_regression_gate_*.json`。
 - 如果只想执行协议 / 单元回归部分，可设置 `SKIP_REAL_CLI_SMOKE=1`。
@@ -114,17 +113,14 @@ bash scripts/run_local_real_claude_cli_smoke.sh
 示例：
 
 ```bash
-cd /home/ww/Project/st-api
 bash scripts/run_claude_code_regression_gate.sh
 ```
 
 ```bash
-cd /home/ww/Project/st-api
 AUTO_CLEANUP=1 AUTO_CLEANUP_KEEP_LATEST=2 bash scripts/run_claude_code_regression_gate.sh
 ```
 
 ```bash
-cd /home/ww/Project/st-api
 SKIP_REAL_CLI_SMOKE=1 AUTO_CLEANUP=1 AUTO_CLEANUP_DRY_RUN=1 \
 bash scripts/run_claude_code_regression_gate.sh
 ```
@@ -138,12 +134,10 @@ bash scripts/run_claude_code_regression_gate.sh
 示例：
 
 ```bash
-cd /home/ww/Project/st-api
 bash scripts/cleanup_claude_code_artifacts.sh --dry-run
 ```
 
 ```bash
-cd /home/ww/Project/st-api
 bash scripts/cleanup_claude_code_artifacts.sh --keep-latest 2
 ```
 
@@ -211,7 +205,8 @@ curl -X POST "https://api.example.com/v1/messages" \
 示例请求：
 
 ```bash
-curl "http://127.0.0.1:8000/v1/key/info?key=sk-xxx"
+BASE_URL="https://<your-deployment-url>"
+curl "${BASE_URL}/v1/key/info?key=sk-xxx"
 ```
 
 示例响应：
@@ -290,9 +285,9 @@ DATABASE_URL=sqlite+aiosqlite:///./data/api_service.db
 
 部署建议：
 
-- 本地或单台 VPS 直接使用默认路径即可。
-- Docker、HF Spaces 等容器环境请把数据库文件放到持久化目录。
-- HF Spaces 推荐使用 `/data/api_service.db`，并开启 Persistent Storage。
+- 单机部署直接使用默认路径即可。
+- Docker、Hugging Face Spaces 等容器环境请把数据库文件放到持久化目录。
+- Hugging Face Spaces 推荐使用 `/data/api_service.db`，并开启 Persistent Storage。
 - 默认会启用 `journal_mode=WAL` 和 `busy_timeout=30s`；管理后台性能面板会直接展示这两个运行参数。
 - `MAX_CONCURRENT_DB_OPS` 建议从 `10` 起步，再按机器磁盘性能和写入竞争情况调整。
 
@@ -336,7 +331,7 @@ python scripts/release.py --version 1.0.1 \
   --run-claude-code-gate
 ```
 
-如果本地环境暂时还没有可用的 `claude` CLI，也可以先只执行聚焦的 pytest gate：
+如果暂时还没有可用的 `claude` CLI，也可以先只执行聚焦的 pytest gate：
 
 ```bash
 python scripts/release.py --version 1.0.1 \

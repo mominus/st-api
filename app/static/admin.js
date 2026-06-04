@@ -51,6 +51,7 @@ function bindEvents() {
     
     // 移动端菜单
     const mobileMenuBtn = document.getElementById('mobile-menu-btn');
+    const sidebarCloseBtn = document.getElementById('sidebar-close-btn');
     const sidebar = document.getElementById('sidebar');
     const sidebarOverlay = document.getElementById('sidebar-overlay');
     
@@ -65,6 +66,10 @@ function bindEvents() {
     
     if (sidebarOverlay) {
         sidebarOverlay.addEventListener('click', closeMobileMenu);
+    }
+
+    if (sidebarCloseBtn) {
+        sidebarCloseBtn.addEventListener('click', closeMobileMenu);
     }
     
     // 侧边栏导航

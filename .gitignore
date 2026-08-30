@@ -52,6 +52,10 @@ logs/
 /tmp/st_api_real_cli_smoke_result.json
 
 # Generated Claude Code regression artifacts
+data/stress_reports/*.csv
+data/stress_reports/*.json
+data/stress_reports/*.jsonl
+!data/stress_reports/.gitkeep
 data/stress_reports/cc_dialogue_report_*.json
 data/stress_reports/cc_dialogue_requests_*.jsonl
 data/stress_reports/cc_dialogue_sessions_*.jsonl

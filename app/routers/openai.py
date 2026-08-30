@@ -113,6 +113,18 @@ def _normalize_tool_turn_output(parsed: ParsedOutput, *, tools_declared: bool) -
     return parsed
 
 
+def _parse_canonical_output(bridge, canonical: CanonicalRequest, output: str) -> ParsedOutput:
+    """Only promote calls to tools declared by this request."""
+    names = [
+        str(tool.get("name") or "") if isinstance(tool, dict) else str(tool.name)
+        for tool in canonical.tools
+    ]
+    return bridge.parse_model_output(
+        output,
+        allowed_tool_names=names,
+    )
+
+
 class _ToolAwareTextBuffer:
     """Incremental text parser that suppresses tool-call payload leakage."""
 
@@ -492,7 +504,7 @@ async def chat_completions(
 
                         raw_output = "".join(raw_tokens)
                         parsed = _normalize_tool_turn_output(
-                            bridge.parse_model_output(raw_output),
+                            _parse_canonical_output(bridge, canonical, raw_output),
                             tools_declared=True,
                         )
 
@@ -562,7 +574,7 @@ async def chat_completions(
                                 )
                             )
 
-                        parsed = bridge.parse_model_output("".join(raw_tokens))
+                        parsed = _parse_canonical_output(bridge, canonical, "".join(raw_tokens))
                         finish_reason = "tool_calls" if parsed.tool_calls else "stop"
                         # If tool calls are unexpectedly returned without tool declaration,
                         # pass them in final chunk to keep downstream compatibility.
@@ -602,7 +614,7 @@ async def chat_completions(
                     raw_output = "".join(raw_tokens)
                     if parsed is None:
                         parsed = _normalize_tool_turn_output(
-                            bridge.parse_model_output(raw_output),
+                            _parse_canonical_output(bridge, canonical, raw_output),
                             tools_declared=bool(canonical.tools),
                         )
                     usage = runtime.finalize_usage(
@@ -660,7 +672,7 @@ async def chat_completions(
         )
         raw_output = runtime.extract_content(backend_response)
         parsed = _normalize_tool_turn_output(
-            bridge.parse_model_output(raw_output),
+            _parse_canonical_output(bridge, canonical, raw_output),
             tools_declared=bool(canonical.tools),
         )
         usage = runtime.usage_from_sync(
@@ -880,7 +892,7 @@ async def create_response(
 
                         raw_output = "".join(raw_tokens)
                         parsed = _normalize_tool_turn_output(
-                            bridge.parse_model_output(raw_output),
+                            _parse_canonical_output(bridge, canonical, raw_output),
                             tools_declared=True,
                         )
 
@@ -987,7 +999,7 @@ async def create_response(
                     raw_output = "".join(raw_tokens)
                     if parsed is None:
                         parsed = _normalize_tool_turn_output(
-                            bridge.parse_model_output(raw_output),
+                            _parse_canonical_output(bridge, canonical, raw_output),
                             tools_declared=bool(canonical.tools),
                         )
                     usage = runtime.finalize_usage(
@@ -1056,7 +1068,7 @@ async def create_response(
         )
         raw_output = runtime.extract_content(backend_response)
         parsed = _normalize_tool_turn_output(
-            bridge.parse_model_output(raw_output),
+            _parse_canonical_output(bridge, canonical, raw_output),
             tools_declared=bool(canonical.tools),
         )
         usage = runtime.usage_from_sync(

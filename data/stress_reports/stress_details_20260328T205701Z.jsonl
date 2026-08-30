@@ -1,8 +1,0 @@
-{"session_id": "tenantA-user-0000", "turn": 0, "stream": false, "ok": true, "status_code": 200, "latency_ms": 6571, "error_type": "", "error_message": "", "response_chars": 498}
-{"session_id": "tenantA-user-0000", "turn": 1, "stream": false, "ok": true, "status_code": 200, "latency_ms": 4552, "error_type": "", "error_message": "", "response_chars": 410}
-{"session_id": "tenantA-user-0000", "turn": 2, "stream": false, "ok": true, "status_code": 200, "latency_ms": 3732, "error_type": "", "error_message": "", "response_chars": 346}
-{"session_id": "tenantA-user-0000", "turn": 3, "stream": false, "ok": true, "status_code": 200, "latency_ms": 4147, "error_type": "", "error_message": "", "response_chars": 320}
-{"session_id": "tenantA-user-0000", "turn": 4, "stream": false, "ok": true, "status_code": 200, "latency_ms": 3676, "error_type": "", "error_message": "", "response_chars": 287}
-{"session_id": "tenantA-user-0000", "turn": 5, "stream": false, "ok": true, "status_code": 200, "latency_ms": 3266, "error_type": "", "error_message": "", "response_chars": 334}
-{"session_id": "tenantA-user-0000", "turn": 6, "stream": false, "ok": true, "status_code": 200, "latency_ms": 3123, "error_type": "", "error_message": "", "response_chars": 264}
-{"session_id": "tenantA-user-0000", "turn": 7, "stream": false, "ok": true, "status_code": 200, "latency_ms": 2834, "error_type": "", "error_message": "", "response_chars": 250}

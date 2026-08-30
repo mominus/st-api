@@ -59,8 +59,8 @@ class _FakeBridge:
     def render_prompt(self, _canonical):
         return "prompt text"
 
-    def parse_model_output(self, output):
-        return self._real.parse_model_output(output)
+    def parse_model_output(self, output, **kwargs):
+        return self._real.parse_model_output(output, **kwargs)
 
 
 class _FakeRuntime:

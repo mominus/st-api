@@ -10,6 +10,7 @@ from __future__ import annotations
 import copy
 import json
 import uuid
+import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -31,6 +32,14 @@ class CanonicalTool:
     description: str = ""
     input_schema: Dict[str, Any] = field(default_factory=dict)
     source_type: str = "function"
+
+
+@dataclass(frozen=True)
+class CanonicalToolChoice:
+    """Provider-neutral tool selection policy."""
+
+    mode: str = "auto"
+    name: Optional[str] = None
 
 
 @dataclass
@@ -69,6 +78,7 @@ class CanonicalRequest:
     metadata: Dict[str, Any] = field(default_factory=dict)
     raw_messages: List[Dict[str, Any]] = field(default_factory=list)
     raw: Dict[str, Any] = field(default_factory=dict)
+    normalized_tool_choice: CanonicalToolChoice = field(default_factory=CanonicalToolChoice)
 
     def input_preview(self) -> str:
         for msg in reversed(self.messages):
@@ -107,6 +117,9 @@ class ProtocolBridge:
         self._tool_parser = ToolParser(registry=None)
         self._tool_result_formatter = ToolResultFormatter()
         self._tool_context_builder = ToolContextBuilder(formatter=self._tool_result_formatter)
+
+    _TOOL_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_.:/-]{1,128}$")
+    _MAX_TOOLS = 128
 
     # ---------------------------------------------------------------------
     # Key helpers
@@ -172,6 +185,11 @@ class ProtocolBridge:
             tool_calls = item.get("tool_calls")
             if isinstance(tool_calls, list) and tool_calls:
                 content = self._append_openai_tool_calls_history(content, tool_calls)
+            elif isinstance(item.get("function_call"), dict):
+                content = self._append_openai_tool_calls_history(
+                    content,
+                    [{"id": item.get("tool_call_id"), "function": item["function_call"]}],
+                )
 
             if role == "system":
                 if content:
@@ -191,6 +209,7 @@ class ProtocolBridge:
 
         tools, capabilities = self._parse_openai_tools(payload.get("tools"))
 
+        choice = self._normalize_tool_choice(payload.get("tool_choice"), tools)
         return CanonicalRequest(
             source="openai_chat",
             model=model,
@@ -199,11 +218,15 @@ class ProtocolBridge:
             messages=messages,
             tools=tools,
             tool_choice=payload.get("tool_choice"),
+            normalized_tool_choice=choice,
             temperature=self._to_optional_float(payload.get("temperature")),
             top_p=self._to_optional_float(payload.get("top_p")),
-            max_tokens=self._to_optional_int(payload.get("max_tokens")),
+            max_tokens=self._to_optional_int(
+                payload.get("max_completion_tokens") or payload.get("max_tokens")
+            ),
             capabilities=capabilities,
             response_language=self._detect_preferred_language(messages),
+            metadata=self._parse_optional_dict(payload.get("metadata")) or {},
             raw=payload,
         )
 
@@ -229,6 +252,31 @@ class ProtocolBridge:
                 if not isinstance(item, dict):
                     continue
 
+                item_type = str(item.get("type") or "").strip()
+                if item_type in {"function_call", "custom_tool_call"}:
+                    name = str(item.get("name") or "").strip()
+                    call_id = str(item.get("call_id") or item.get("id") or "").strip()
+                    arguments = item.get("arguments", "{}")
+                    if isinstance(arguments, dict):
+                        arguments = json.dumps(arguments, ensure_ascii=False, separators=(",", ":"))
+                    messages.append(
+                        CanonicalMessage(
+                            role="assistant",
+                            content=f"[tool_call id={call_id} name={name}]\n{arguments}",
+                        )
+                    )
+                    continue
+                if item_type in {"function_call_output", "custom_tool_call_output"}:
+                    call_id = str(item.get("call_id") or item.get("id") or "").strip()
+                    output = self._flatten_openai_content(item.get("output"))
+                    messages.append(
+                        CanonicalMessage(
+                            role="user",
+                            content=f"[tool_result id={call_id} name=tool]\n{output}".strip(),
+                        )
+                    )
+                    continue
+
                 role = str(item.get("role") or "user")
                 content = self._flatten_openai_content(item.get("content"))
 
@@ -251,6 +299,7 @@ class ProtocolBridge:
 
         tools, capabilities = self._parse_openai_tools(payload.get("tools"))
 
+        choice = self._normalize_tool_choice(payload.get("tool_choice"), tools)
         return CanonicalRequest(
             source="openai_responses",
             model=model,
@@ -259,6 +308,7 @@ class ProtocolBridge:
             messages=messages,
             tools=tools,
             tool_choice=payload.get("tool_choice"),
+            normalized_tool_choice=choice,
             temperature=self._to_optional_float(payload.get("temperature")),
             top_p=self._to_optional_float(payload.get("top_p")),
             max_tokens=self._to_optional_int(
@@ -308,6 +358,7 @@ class ProtocolBridge:
 
         tools = self._parse_anthropic_tools(payload.get("tools"))
 
+        choice = self._normalize_tool_choice(payload.get("tool_choice"), tools)
         return CanonicalRequest(
             source="anthropic_messages",
             model=model,
@@ -316,6 +367,7 @@ class ProtocolBridge:
             messages=messages,
             tools=tools,
             tool_choice=payload.get("tool_choice"),
+            normalized_tool_choice=choice,
             temperature=self._to_optional_float(payload.get("temperature")),
             top_p=self._to_optional_float(payload.get("top_p")),
             max_tokens=self._to_optional_int(payload.get("max_tokens")),
@@ -394,10 +446,13 @@ class ProtocolBridge:
             parts.append(f"[Capabilities]\n{cap_text}")
 
         if request.tools:
+            normalized_choice: Dict[str, Any] = {"type": request.normalized_tool_choice.mode}
+            if request.normalized_tool_choice.name:
+                normalized_choice["name"] = request.normalized_tool_choice.name
             parts.append(
                 self._render_tool_instruction(
                     request.tools,
-                    request.tool_choice,
+                    normalized_choice,
                     response_language=request.response_language,
                 )
             )
@@ -424,29 +479,47 @@ class ProtocolBridge:
     # Output parsing
     # ---------------------------------------------------------------------
 
-    def parse_model_output(self, output: str) -> ParsedOutput:
+    def parse_model_output(
+        self,
+        output: str,
+        *,
+        allowed_tool_names: Optional[Iterable[str]] = None,
+    ) -> ParsedOutput:
         text = output or ""
         parse_result = self._tool_parser.parse(text)
+        allowed = set(allowed_tool_names) if allowed_tool_names is not None else None
 
         if parse_result.has_tool_calls:
+            calls = [
+                call for call in parse_result.tool_calls
+                if allowed is None or call.tool_name in allowed
+            ]
+            if not calls:
+                return ParsedOutput(text=text)
             merged_text = self._merge_clean_text(parse_result.text_before, parse_result.text_after)
             return ParsedOutput(
                 text=merged_text,
                 tool_calls=[
                     CanonicalToolCall(
-                        call_id=self._new_call_id(),
+                        call_id=self._normalize_call_id(call.call_id),
                         name=call.tool_name,
                         arguments=call.arguments or {},
                     )
-                    for call in parse_result.tool_calls
+                    for call in calls
                 ],
             )
 
         fallback_call = self._parse_single_tool_object(text)
-        if fallback_call is not None:
+        if fallback_call is not None and (allowed is None or fallback_call.name in allowed):
             return ParsedOutput(text="", tool_calls=[fallback_call])
 
         return ParsedOutput(text=text)
+
+    def _normalize_call_id(self, value: Optional[str]) -> str:
+        call_id = str(value or "").strip()
+        if re.fullmatch(r"[A-Za-z0-9_-]{1,128}", call_id):
+            return call_id
+        return self._new_call_id()
 
     # ---------------------------------------------------------------------
     # Provider response formatting
@@ -943,63 +1016,36 @@ class ProtocolBridge:
         self,
         messages: List[Dict[str, Any]],
     ) -> None:
-        if not messages:
-            return
+        for index, message in enumerate(messages):
+            content = self._anthropic_content_blocks(message.get("content"))
+            result_positions = [
+                pos for pos, block in enumerate(content)
+                if isinstance(block, dict) and str(block.get("type") or "") == "tool_result"
+            ]
+            if not result_positions:
+                continue
+            if str(message.get("role") or "") != "user":
+                raise ValueError("tool_result blocks must be in a user message")
+            # Anthropic permits text after results, but result blocks must come first.
+            if result_positions != list(range(len(result_positions))):
+                raise ValueError("tool_result blocks must come before other content")
+            if index == 0 or str(messages[index - 1].get("role") or "") != "assistant":
+                raise ValueError("tool_result blocks are not matching any tool_use from the previous message")
 
-        last_message = messages[-1]
-        if str(last_message.get("role") or "user") != "user":
-            return
-
-        last_content = self._anthropic_content_blocks(last_message.get("content"))
-        has_tool_results = any(
-            isinstance(block, dict) and str(block.get("type") or "") == "tool_result"
-            for block in last_content
-        )
-        if not has_tool_results:
-            return
-
-        if any(
-            not isinstance(block, dict) or str(block.get("type") or "") != "tool_result"
-            for block in last_content
-        ):
-            raise ValueError(
-                "The last message must contain only tool_result content if any is present"
-            )
-
-        if len(messages) < 2:
-            raise ValueError(
-                "tool_result blocks are not matching any tool_use from the previous message"
-            )
-
-        previous_message = messages[-2]
-        previous_content = self._anthropic_content_blocks(previous_message.get("content"))
-        tool_use_ids = [
-            str(block.get("id") or "").strip()
-            for block in previous_content
-            if isinstance(block, dict) and str(block.get("type") or "") == "tool_use"
-        ]
-        tool_use_ids = [tool_id for tool_id in tool_use_ids if tool_id]
-
-        if not tool_use_ids:
-            raise ValueError(
-                "tool_result blocks are not matching any tool_use from the previous message"
-            )
-
-        tool_result_ids = [
-            str(block.get("tool_use_id") or "").strip()
-            for block in last_content
-            if isinstance(block, dict) and str(block.get("type") or "") == "tool_result"
-        ]
-
-        if (
-            any(not tool_id for tool_id in tool_result_ids)
-            or len(tool_use_ids) != len(set(tool_use_ids))
-            or len(tool_result_ids) != len(set(tool_result_ids))
-            or set(tool_use_ids) != set(tool_result_ids)
-        ):
-            raise ValueError(
-                "ids of tool_result blocks and tool_use blocks from previous message do not match"
-            )
+            previous = self._anthropic_content_blocks(messages[index - 1].get("content"))
+            use_ids = [
+                str(block.get("id") or "").strip() for block in previous
+                if isinstance(block, dict) and str(block.get("type") or "") == "tool_use"
+            ]
+            result_ids = [str(content[pos].get("tool_use_id") or "").strip() for pos in result_positions]
+            if (
+                not use_ids
+                or any(not item for item in [*use_ids, *result_ids])
+                or len(use_ids) != len(set(use_ids))
+                or len(result_ids) != len(set(result_ids))
+                or set(use_ids) != set(result_ids)
+            ):
+                raise ValueError("ids of tool_result blocks and preceding tool_use blocks do not match")
 
     def _flatten_gemini_system(self, system_instruction: Any) -> str:
         if not isinstance(system_instruction, dict):
@@ -1059,23 +1105,29 @@ class ProtocolBridge:
         tools: List[CanonicalTool] = []
         capabilities: List[str] = []
 
-        if not isinstance(tools_raw, list):
+        if tools_raw is None:
             return tools, capabilities
+        if not isinstance(tools_raw, list):
+            raise ValueError("tools must be a list")
 
         for idx, item in enumerate(tools_raw):
             if not isinstance(item, dict):
-                continue
+                raise ValueError(f"tools[{idx}] must be an object")
             tool_type = str(item.get("type") or "")
             if tool_type == "function":
-                fn = item.get("function") or {}
+                # Chat Completions nests the definition under ``function``;
+                # Responses API uses a flat function tool object.
+                fn = item.get("function") or item
                 if not isinstance(fn, dict):
-                    continue
+                    raise ValueError(f"tools[{idx}].function must be an object")
                 name = str(fn.get("name") or "").strip()
                 if not name:
-                    continue
+                    raise ValueError(f"tools[{idx}] requires a function name")
                 description = str(fn.get("description") or "")
-                schema = fn.get("parameters")
-                if not isinstance(schema, dict):
+                schema = fn.get("parameters") or fn.get("input_schema")
+                if schema is not None and not isinstance(schema, dict):
+                    raise ValueError(f"parameters for tool {name!r} must be an object")
+                if schema is None:
                     schema = {"type": "object", "properties": {}}
                 tools.append(
                     CanonicalTool(
@@ -1108,18 +1160,22 @@ class ProtocolBridge:
 
     def _parse_anthropic_tools(self, tools_raw: Any) -> List[CanonicalTool]:
         tools: List[CanonicalTool] = []
-        if not isinstance(tools_raw, list):
+        if tools_raw is None:
             return tools
+        if not isinstance(tools_raw, list):
+            raise ValueError("tools must be a list")
 
-        for item in tools_raw:
+        for idx, item in enumerate(tools_raw):
             if not isinstance(item, dict):
-                continue
+                raise ValueError(f"tools[{idx}] must be an object")
             name = str(item.get("name") or "").strip()
             if not name:
-                continue
+                raise ValueError(f"tools[{idx}] requires a name")
             description = str(item.get("description") or "")
             schema = item.get("input_schema")
-            if not isinstance(schema, dict):
+            if schema is not None and not isinstance(schema, dict):
+                raise ValueError(f"input_schema for tool {name!r} must be an object")
+            if schema is None:
                 schema = {"type": "object", "properties": {}}
             tools.append(
                 CanonicalTool(
@@ -1130,6 +1186,57 @@ class ProtocolBridge:
                 )
             )
         return tools
+
+    def _normalize_tool_choice(
+        self,
+        value: Any,
+        tools: List[CanonicalTool],
+    ) -> CanonicalToolChoice:
+        """Normalize the three public API shapes and reject impossible policies."""
+        if len(tools) > self._MAX_TOOLS:
+            raise ValueError(f"tools must contain at most {self._MAX_TOOLS} entries")
+
+        names: set[str] = set()
+        for tool in tools:
+            if not self._TOOL_NAME_PATTERN.fullmatch(tool.name):
+                raise ValueError(f"invalid tool name: {tool.name!r}")
+            if tool.name in names:
+                raise ValueError(f"duplicate tool name: {tool.name}")
+            names.add(tool.name)
+            if not isinstance(tool.input_schema, dict):
+                raise ValueError(f"input schema for tool {tool.name!r} must be an object")
+            schema_type = tool.input_schema.get("type")
+            if schema_type not in (None, "object"):
+                raise ValueError(f"input schema for tool {tool.name!r} must describe an object")
+
+        if value is None:
+            return CanonicalToolChoice("auto")
+        if isinstance(value, str):
+            aliases = {"required": "any", "auto": "auto", "none": "none", "any": "any"}
+            mode = aliases.get(value.strip().lower())
+            if mode is None:
+                raise ValueError(f"unsupported tool_choice: {value!r}")
+            if mode == "any" and not tools:
+                raise ValueError("tool_choice requires at least one declared tool")
+            return CanonicalToolChoice(mode)
+        if not isinstance(value, dict):
+            raise ValueError("tool_choice must be a string or object")
+
+        choice_type = str(value.get("type") or "").strip().lower()
+        name = self._extract_requested_tool_name(value)
+        if choice_type in {"function", "tool"} or name:
+            if not name:
+                raise ValueError("named tool_choice requires a tool name")
+            if name not in names:
+                raise ValueError(f"tool_choice references undeclared tool: {name}")
+            return CanonicalToolChoice("tool", name)
+        aliases = {"required": "any", "any": "any", "auto": "auto", "none": "none"}
+        mode = aliases.get(choice_type)
+        if mode is None:
+            raise ValueError(f"unsupported tool_choice type: {choice_type!r}")
+        if mode == "any" and not tools:
+            raise ValueError("tool_choice requires at least one declared tool")
+        return CanonicalToolChoice(mode)
 
     def _parse_gemini_tools(self, tools_raw: Any) -> List[CanonicalTool]:
         tools: List[CanonicalTool] = []

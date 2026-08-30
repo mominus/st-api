@@ -129,6 +129,14 @@ class BackendClient:
             1.0,
             float(os.getenv("HTTP_KEEPALIVE_EXPIRY_SECONDS", "15.0")),
         )
+        self.max_response_bytes = max(
+            1024,
+            int(os.getenv("BACKEND_MAX_RESPONSE_BYTES", str(16 * 1024 * 1024))),
+        )
+        self.max_stream_line_bytes = max(
+            1024,
+            int(os.getenv("BACKEND_MAX_STREAM_LINE_BYTES", str(1024 * 1024))),
+        )
         configured_backend_stream_cap = os.getenv("BACKEND_MAX_CONCURRENT_STREAMS")
         if configured_backend_stream_cap is None or str(configured_backend_stream_cap).strip() == "":
             if self.effective_http_max_connections <= 1:
@@ -488,6 +496,12 @@ class BackendClient:
                         response_data=error_data
                     )
 
+                if len(response.content) > self.max_response_bytes:
+                    raise BackendAPIError(
+                        message="Backend response exceeded configured size limit",
+                        status_code=502,
+                    )
+
                 result = response.json()
                 logger.debug(f"Backend sync response received: {len(str(result))} bytes")
                 return result
@@ -644,10 +658,21 @@ class BackendClient:
 
                             while "\n" in buffer:
                                 line, buffer = buffer.split("\n", 1)
+                                if len(line.encode("utf-8")) > self.max_stream_line_bytes:
+                                    raise BackendAPIError(
+                                        message="Backend stream line exceeded configured size limit",
+                                        status_code=502,
+                                    )
                                 line = line.strip()
                                 if line:
                                     yielded_any = True
                                     yield line
+
+                            if len(buffer.encode("utf-8")) > self.max_stream_line_bytes:
+                                raise BackendAPIError(
+                                    message="Backend stream line exceeded configured size limit",
+                                    status_code=502,
+                                )
 
                         if buffer.strip():
                             yielded_any = True

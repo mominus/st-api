@@ -32,8 +32,9 @@ class _FakeScalars:
 
 
 class _FakeResult:
-    def __init__(self, rows: List[_FakeAccount]):
+    def __init__(self, rows: List[_FakeAccount], rowcount=None):
         self._rows = rows
+        self.rowcount = rowcount
 
     def scalars(self):
         return _FakeScalars(self._rows)
@@ -54,13 +55,39 @@ class _BatchResult:
 class _FakeSession:
     def __init__(self, execute_rows: List[List[_FakeAccount]]):
         self._execute_rows = list(execute_rows)
+        self._accounts = {
+            account.id: account
+            for rows in self._execute_rows
+            for account in rows
+        }
         self.flush_calls = 0
         self.commit_calls = 0
 
     async def execute(self, _query):
+        value_keys = {getattr(key, "key", str(key)) for key in getattr(_query, "_values", {})}
+        if "daily_usage_date" in value_keys and "last_used_at" not in value_keys:
+            return _FakeResult([], rowcount=0)
         if not self._execute_rows:
-            raise AssertionError("unexpected execute() call")
+            params = _query.compile().params
+            account_id = next(
+                (value for key, value in params.items() if key.startswith("id_")),
+                None,
+            )
+            account = self._accounts.get(account_id)
+            if account is None:
+                return _FakeResult([], rowcount=0)
+            now = utc_now_naive()
+            account.inflight_requests = (
+                AccountPoolService._effective_inflight_requests(account, now=now) + 1
+            )
+            account.inflight_updated_at = now
+            account.last_used_at = now
+            account.updated_at = now
+            return _FakeResult([], rowcount=1)
         return _FakeResult(self._execute_rows.pop(0))
+
+    async def refresh(self, _account):
+        return None
 
     async def flush(self):
         self.flush_calls += 1
@@ -121,7 +148,7 @@ def test_get_available_account_prefers_fresh_active_accounts_over_partially_used
     assert fresh_active.inflight_updated_at is not None
     assert fresh_active.last_used_at is not None
     assert fresh_active.updated_at is not None
-    assert session.flush_calls == 1
+    assert session.flush_calls == 0
     assert session.commit_calls == 0
 
 
@@ -168,7 +195,7 @@ def test_get_available_account_prefers_lower_inflight_when_usage_is_equal():
     assert selected is less_busy
     assert less_busy.inflight_requests == 2
     assert less_busy.last_used_at is not None
-    assert session.flush_calls == 1
+    assert session.flush_calls == 0
 
 
 def test_get_available_account_returns_none_when_no_active_or_recoverable():
@@ -233,7 +260,7 @@ def test_get_available_account_reserves_last_used_at():
     assert account.inflight_updated_at is not None
     assert account.last_used_at is not None
     assert account.updated_at is not None
-    assert session.flush_calls == 1
+    assert session.flush_calls == 0
 
 
 def test_get_available_account_resets_stale_inflight_lease_before_reserving():

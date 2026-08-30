@@ -40,7 +40,9 @@ ASYNC_USAGE_FLUSH_INTERVAL_SECONDS = max(
     0.05,
     float(os.getenv("ASYNC_USAGE_FLUSH_INTERVAL_SECONDS", "0.5")),
 )
-ASYNC_USAGE_WORKERS = max(1, int(os.getenv("ASYNC_USAGE_WORKERS", "2")))
+# SQLite has one writer; parallel flush workers add lock contention rather
+# than commit throughput. Increase batch size before increasing this value.
+ASYNC_USAGE_WORKERS = max(1, int(os.getenv("ASYNC_USAGE_WORKERS", "1")))
 ASYNC_USAGE_DB_ACQUIRE_TIMEOUT_SECONDS = max(
     0.1,
     float(
@@ -268,25 +270,33 @@ class AsyncUsageAggregator:
         async with session_factory() as session:
             try:
                 async with self._acquire_db_permit():
-                    for account_id, bucket in account_agg.items():
-                        await self.account_pool.record_usage_history(
-                            session,
-                            account_id=account_id,
-                            api_key_id=None,
-                            input_tokens=int(bucket["in"]),
-                            output_tokens=int(bucket["out"]),
-                            request_count=int(bucket["req"]),
-                        )
+                    await self.account_pool.record_usage_history_bulk(
+                        session,
+                        [
+                            {
+                                "account_id": account_id,
+                                "api_key_id": None,
+                                "input_tokens": int(bucket["in"]),
+                                "output_tokens": int(bucket["out"]),
+                                "request_count": int(bucket["req"]),
+                            }
+                            for account_id, bucket in account_agg.items()
+                        ],
+                    )
 
-                    for key_id, bucket in key_agg.items():
-                        await self.api_key_service.update_key_stats(
-                            session,
-                            key_id=key_id,
-                            input_tokens=int(bucket["in"]),
-                            output_tokens=int(bucket["out"]),
-                            cost=str(bucket["cost"]),
-                            request_count=int(bucket["req"]),
-                        )
+                    await self.api_key_service.update_key_stats_bulk(
+                        session,
+                        [
+                            {
+                                "key_id": key_id,
+                                "input_tokens": int(bucket["in"]),
+                                "output_tokens": int(bucket["out"]),
+                                "cost": str(bucket["cost"]),
+                                "request_count": int(bucket["req"]),
+                            }
+                            for key_id, bucket in key_agg.items()
+                        ],
+                    )
 
                     if ENABLE_SYSTEM_STATS_PERSIST and total_requests > 0:
                         await self.stats_service.update_system_stats(

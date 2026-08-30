@@ -355,28 +355,32 @@ class BackendClient:
         acquired_total = False
         acquired_stream = False
         try:
-            await asyncio.wait_for(
-                self._backend_slot_semaphore.acquire(),
-                timeout=self.http_pool_timeout,
-            )
-            acquired_total = True
-
+            # Acquire the narrower stream gate first. Otherwise streams waiting
+            # for a stream slot consume the shared connection permits and can
+            # starve short synchronous requests (priority inversion).
             if kind == "stream" and self._backend_stream_slot_semaphore is not None:
-                remaining_timeout = max(
-                    0.001,
-                    self.http_pool_timeout - max(0.0, time.monotonic() - start),
-                )
                 await asyncio.wait_for(
                     self._backend_stream_slot_semaphore.acquire(),
-                    timeout=remaining_timeout,
+                    timeout=self.http_pool_timeout,
                 )
                 acquired_stream = True
+
+            remaining_timeout = max(
+                0.001,
+                self.http_pool_timeout - max(0.0, time.monotonic() - start),
+            )
+            await asyncio.wait_for(
+                self._backend_slot_semaphore.acquire(),
+                timeout=remaining_timeout,
+            )
+            acquired_total = True
         except asyncio.TimeoutError as exc:
-            if kind == "stream" and acquired_total and not acquired_stream:
+            if kind == "stream" and not acquired_stream:
                 self._backend_stream_slot_timeout_count += 1
-                self._backend_slot_semaphore.release()
             else:
                 self._backend_slot_timeout_count += 1
+            if acquired_stream and self._backend_stream_slot_semaphore is not None:
+                self._backend_stream_slot_semaphore.release()
             raise BackendAcquireTimeoutError(
                 f"Backend concurrency gate timed out after {self.http_pool_timeout}s"
             ) from exc

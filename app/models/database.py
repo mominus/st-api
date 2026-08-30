@@ -10,14 +10,14 @@ from typing import Optional, AsyncGenerator
 
 from sqlalchemy import (
     Column, String, Integer, Text, DateTime, Date,
-    Boolean, text, UniqueConstraint
+    Boolean, text, UniqueConstraint, event
 )
 from sqlalchemy.ext.asyncio import (
     create_async_engine, AsyncSession, async_sessionmaker
 )
 from sqlalchemy.orm import declarative_base
 
-from app.services.time_utils import utc_now_naive
+from app.services.time_utils import utc_now_naive, utc_today
 
 # 创建基类
 Base = declarative_base()
@@ -30,7 +30,13 @@ DATABASE_URL = os.getenv(
 )
 
 SQLITE_JOURNAL_MODE = "WAL"
-SQLITE_BUSY_TIMEOUT_MS = 30000
+SQLITE_BUSY_TIMEOUT_MS = max(1000, int(os.getenv("SQLITE_BUSY_TIMEOUT_MS", "30000")))
+SQLITE_SYNCHRONOUS = os.getenv("SQLITE_SYNCHRONOUS", "NORMAL").strip().upper()
+SQLITE_WAL_AUTOCHECKPOINT_PAGES = max(
+    100,
+    int(os.getenv("SQLITE_WAL_AUTOCHECKPOINT_PAGES", "1000")),
+)
+SQLITE_CACHE_SIZE_KIB = max(1024, int(os.getenv("SQLITE_CACHE_SIZE_KIB", "32768")))
 
 
 class BackendAccount(Base):
@@ -46,6 +52,7 @@ class BackendAccount(Base):
     model_group = Column(String(255), nullable=False)
     daily_quota = Column(Integer, default=1000000)
     daily_used = Column(Integer, default=0)
+    daily_usage_date = Column(Date, default=utc_today)
     inflight_requests = Column(Integer, default=0, nullable=False)
     inflight_updated_at = Column(DateTime, nullable=True)
     status = Column(String(20), default="active")  # active, exhausted, disabled
@@ -258,6 +265,20 @@ async def init_database() -> None:
     
     # 创建异步引擎
     _engine = create_async_engine(db_url, **engine_kwargs)
+
+    # These PRAGMAs are connection-local and must be applied to every pooled
+    # connection, not only the migration connection.
+    @event.listens_for(_engine.sync_engine, "connect")
+    def _configure_sqlite_connection(dbapi_connection, _connection_record) -> None:
+        cursor = dbapi_connection.cursor()
+        try:
+            cursor.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_MS}")
+            cursor.execute(f"PRAGMA synchronous={SQLITE_SYNCHRONOUS}")
+            cursor.execute(f"PRAGMA wal_autocheckpoint={SQLITE_WAL_AUTOCHECKPOINT_PAGES}")
+            cursor.execute("PRAGMA temp_store=MEMORY")
+            cursor.execute(f"PRAGMA cache_size=-{SQLITE_CACHE_SIZE_KIB}")
+        finally:
+            cursor.close()
     
     # 创建会话工厂
     _async_session_factory = async_sessionmaker(
@@ -295,6 +316,7 @@ async def _migrate_sqlite_columns(conn) -> None:
         ("model_groups", "capability_overrides", "TEXT"),
         ("backend_accounts", "inflight_requests", "INTEGER DEFAULT 0 NOT NULL"),
         ("backend_accounts", "inflight_updated_at", "DATETIME"),
+        ("backend_accounts", "daily_usage_date", "DATE"),
     ]
     
     for table_name, column_name, column_def in migrations:
@@ -425,6 +447,11 @@ async def _ensure_account_routing_indexes(conn) -> None:
         ),
         (
             "CREATE INDEX IF NOT EXISTS "
+            "ix_backend_accounts_daily_usage_date "
+            "ON backend_accounts(daily_usage_date)"
+        ),
+        (
+            "CREATE INDEX IF NOT EXISTS "
             "ix_backend_accounts_routable_order "
             "ON backend_accounts(last_used_at, updated_at, id) "
             "WHERE status IN ('active', 'exhausted')"
@@ -473,4 +500,7 @@ def get_sqlite_runtime_settings() -> dict[str, object]:
         "journal_mode": SQLITE_JOURNAL_MODE,
         "busy_timeout_ms": SQLITE_BUSY_TIMEOUT_MS,
         "busy_timeout_seconds": SQLITE_BUSY_TIMEOUT_MS / 1000,
+        "synchronous": SQLITE_SYNCHRONOUS,
+        "wal_autocheckpoint_pages": SQLITE_WAL_AUTOCHECKPOINT_PAGES,
+        "cache_size_kib": SQLITE_CACHE_SIZE_KIB,
     }

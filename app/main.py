@@ -20,6 +20,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pathlib import Path
 import os
 import secrets
+import hmac
 
 from app.routers import openai_router, anthropic_router, gemini_router, admin_router
 from app.models.database import init_database, close_database
@@ -121,7 +122,10 @@ else:
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
-    allow_credentials=True,
+    # Browsers reject wildcard origins with credentials; more importantly,
+    # reflecting credentials to every origin is unsafe. Explicit origins may
+    # opt into cookies/authorization credentials.
+    allow_credentials=origins != ["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -142,7 +146,7 @@ async def verify_worker_proxy_secret(request: Request, call_next):
 
         if is_protected_api:
             provided = request.headers.get("x-proxy-secret", "")
-            if provided != PROXY_SHARED_SECRET:
+            if not hmac.compare_digest(provided, PROXY_SHARED_SECRET):
                 return JSONResponse(
                     status_code=403,
                     content={"error": {"message": "Forbidden", "type": "permission_error"}}

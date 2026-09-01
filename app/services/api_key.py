@@ -9,10 +9,10 @@ import uuid
 import json
 from decimal import Decimal, InvalidOperation
 from datetime import datetime
-from typing import Optional, List, Tuple
+from typing import Optional, List, Tuple, Dict, Any
 import logging
 
-from sqlalchemy import select, and_, update
+from sqlalchemy import select, and_, update, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.database import APIKey, get_session_factory
@@ -516,6 +516,61 @@ class APIKeyService:
             f"requests={api_key.total_requests}, tokens={api_key.total_tokens}, cost={api_key.total_cost}"
         )
         return api_key
+
+    async def update_key_stats_bulk(
+        self,
+        session: AsyncSession,
+        buckets: List[Dict[str, Any]],
+    ) -> None:
+        """Apply aggregated key counters in one executemany round trip.
+
+        This avoids a SELECT plus ORM UPDATE for every key in each usage batch.
+        Quota checks use the post-increment values in the same atomic statement.
+        """
+        if not buckets:
+            return
+        now = utc_now_naive()
+        parameters = [
+            {
+                "key_id": str(item["key_id"]),
+                "request_count": max(1, int(item.get("request_count", 1))),
+                "total_tokens": max(0, int(item.get("input_tokens", 0)))
+                + max(0, int(item.get("output_tokens", 0))),
+                "cost": str(item.get("cost") or "0"),
+                "last_used_at": now,
+            }
+            for item in buckets
+        ]
+        await session.execute(
+            text(
+                """
+                UPDATE api_keys SET
+                    total_requests = COALESCE(total_requests, 0) + :request_count,
+                    total_tokens = COALESCE(total_tokens, 0) + :total_tokens,
+                    total_cost = CAST(
+                        CAST(COALESCE(total_cost, '0') AS NUMERIC) + CAST(:cost AS NUMERIC)
+                        AS TEXT
+                    ),
+                    last_used_at = :last_used_at,
+                    status = CASE
+                        WHEN status = 'revoked' THEN status
+                        WHEN request_quota IS NOT NULL
+                             AND COALESCE(total_requests, 0) + :request_count >= request_quota
+                            THEN 'exhausted'
+                        WHEN token_quota IS NOT NULL
+                             AND COALESCE(total_tokens, 0) + :total_tokens >= token_quota
+                            THEN 'exhausted'
+                        WHEN cost_limit IS NOT NULL
+                             AND CAST(COALESCE(total_cost, '0') AS NUMERIC) + CAST(:cost AS NUMERIC)
+                                 >= CAST(cost_limit AS NUMERIC)
+                            THEN 'exhausted'
+                        ELSE status
+                    END
+                WHERE id = :key_id
+                """
+            ),
+            parameters,
+        )
     
     async def check_quota(
         self,

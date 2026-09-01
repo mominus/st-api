@@ -72,6 +72,13 @@ def _anthropic_event(event: str, payload: Dict[str, Any]) -> str:
     return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
+def _declared_tool_names(canonical: CanonicalRequest) -> List[str]:
+    return [
+        str(tool.get("name") or "") if isinstance(tool, dict) else str(tool.name)
+        for tool in canonical.tools
+    ]
+
+
 def _invalid_request_capture_enabled() -> bool:
     for name in ("ST_DEBUG_INVALID_ANTHROPIC_REQUESTS", "DEBUG"):
         value = str(os.getenv(name, "") or "").strip().lower()
@@ -1011,7 +1018,10 @@ async def create_message(
                         yield event
 
                     raw_output = "".join(raw_tokens)
-                    parsed = bridge.parse_model_output(raw_output)
+                    parsed = bridge.parse_model_output(
+                        raw_output,
+                        allowed_tool_names=_declared_tool_names(canonical),
+                    )
                     usage = runtime.finalize_usage(
                         preferred_usage=state["best_usage"],
                         prompt_text=prompt_text,
@@ -1088,7 +1098,10 @@ async def create_message(
             session=session,
         )
         raw_output = runtime.extract_content(backend_response)
-        parsed = bridge.parse_model_output(raw_output)
+        parsed = bridge.parse_model_output(
+            raw_output,
+            allowed_tool_names=_declared_tool_names(canonical),
+        )
         usage = runtime.usage_from_sync(
             backend_response=backend_response,
             prompt_text=prompt_text,

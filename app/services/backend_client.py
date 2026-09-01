@@ -129,6 +129,14 @@ class BackendClient:
             1.0,
             float(os.getenv("HTTP_KEEPALIVE_EXPIRY_SECONDS", "15.0")),
         )
+        self.max_response_bytes = max(
+            1024,
+            int(os.getenv("BACKEND_MAX_RESPONSE_BYTES", str(16 * 1024 * 1024))),
+        )
+        self.max_stream_line_bytes = max(
+            1024,
+            int(os.getenv("BACKEND_MAX_STREAM_LINE_BYTES", str(1024 * 1024))),
+        )
         configured_backend_stream_cap = os.getenv("BACKEND_MAX_CONCURRENT_STREAMS")
         if configured_backend_stream_cap is None or str(configured_backend_stream_cap).strip() == "":
             if self.effective_http_max_connections <= 1:
@@ -347,28 +355,32 @@ class BackendClient:
         acquired_total = False
         acquired_stream = False
         try:
-            await asyncio.wait_for(
-                self._backend_slot_semaphore.acquire(),
-                timeout=self.http_pool_timeout,
-            )
-            acquired_total = True
-
+            # Acquire the narrower stream gate first. Otherwise streams waiting
+            # for a stream slot consume the shared connection permits and can
+            # starve short synchronous requests (priority inversion).
             if kind == "stream" and self._backend_stream_slot_semaphore is not None:
-                remaining_timeout = max(
-                    0.001,
-                    self.http_pool_timeout - max(0.0, time.monotonic() - start),
-                )
                 await asyncio.wait_for(
                     self._backend_stream_slot_semaphore.acquire(),
-                    timeout=remaining_timeout,
+                    timeout=self.http_pool_timeout,
                 )
                 acquired_stream = True
+
+            remaining_timeout = max(
+                0.001,
+                self.http_pool_timeout - max(0.0, time.monotonic() - start),
+            )
+            await asyncio.wait_for(
+                self._backend_slot_semaphore.acquire(),
+                timeout=remaining_timeout,
+            )
+            acquired_total = True
         except asyncio.TimeoutError as exc:
-            if kind == "stream" and acquired_total and not acquired_stream:
+            if kind == "stream" and not acquired_stream:
                 self._backend_stream_slot_timeout_count += 1
-                self._backend_slot_semaphore.release()
             else:
                 self._backend_slot_timeout_count += 1
+            if acquired_stream and self._backend_stream_slot_semaphore is not None:
+                self._backend_stream_slot_semaphore.release()
             raise BackendAcquireTimeoutError(
                 f"Backend concurrency gate timed out after {self.http_pool_timeout}s"
             ) from exc
@@ -486,6 +498,12 @@ class BackendClient:
                         message=f"Backend API returned error: {response.status_code}",
                         status_code=response.status_code,
                         response_data=error_data
+                    )
+
+                if len(response.content) > self.max_response_bytes:
+                    raise BackendAPIError(
+                        message="Backend response exceeded configured size limit",
+                        status_code=502,
                     )
 
                 result = response.json()
@@ -644,10 +662,21 @@ class BackendClient:
 
                             while "\n" in buffer:
                                 line, buffer = buffer.split("\n", 1)
+                                if len(line.encode("utf-8")) > self.max_stream_line_bytes:
+                                    raise BackendAPIError(
+                                        message="Backend stream line exceeded configured size limit",
+                                        status_code=502,
+                                    )
                                 line = line.strip()
                                 if line:
                                     yielded_any = True
                                     yield line
+
+                            if len(buffer.encode("utf-8")) > self.max_stream_line_bytes:
+                                raise BackendAPIError(
+                                    message="Backend stream line exceeded configured size limit",
+                                    status_code=502,
+                                )
 
                         if buffer.strip():
                             yielded_any = True

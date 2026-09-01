@@ -10,7 +10,7 @@ from typing import Optional, List, Dict, Any, Tuple
 from collections import defaultdict
 import logging
 
-from sqlalchemy import select, update, delete, and_, case
+from sqlalchemy import select, update, delete, and_, case, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.database import (
@@ -44,6 +44,7 @@ class AccountPoolService:
         """初始化账号池服务"""
         # 轮询索引，按模型组分别维护
         self._round_robin_index: Dict[str, int] = defaultdict(int)
+        self._last_daily_reset_date: Optional[date] = None
 
     @staticmethod
     def _chunked(values: List[str], chunk_size: int = 500) -> List[List[str]]:
@@ -169,6 +170,7 @@ class AccountPoolService:
             model_group=normalized_groups[0],
             daily_quota=daily_quota,
             daily_used=0,
+            daily_usage_date=utc_today(),
             status="active",
             created_at=utc_now_naive(),
             updated_at=utc_now_naive()
@@ -257,6 +259,7 @@ class AccountPoolService:
                 model_group=normalized_groups[0],
                 daily_quota=daily_quota,
                 daily_used=0,
+                daily_usage_date=utc_today(),
                 status="active",
                 created_at=now,
                 updated_at=now,
@@ -821,6 +824,7 @@ class AccountPoolService:
         Returns:
             可用的账号对象，如果没有可用账号则返回 None
         """
+        await self._ensure_current_daily_quotas(session)
         accounts = await self._list_model_group_accounts(session, model_group)
 
         if not accounts:
@@ -855,27 +859,28 @@ class AccountPoolService:
             and self._has_inflight_capacity(account)
         ]
 
-        if active_eligible_accounts:
+        # The candidate snapshot can be stale when several workers select at
+        # once. Reserve with a conditional UPDATE and retry another candidate
+        # when this worker loses the race. This makes the quota/inflight limit
+        # effective across processes sharing the database.
+        remaining_candidates = list(active_eligible_accounts)
+        while remaining_candidates:
             account = self._select_prioritized_active_account(
                 model_group,
-                active_eligible_accounts,
+                remaining_candidates,
             )
-            now = utc_now_naive()
-            if self._reservation_enabled():
-                account.inflight_requests = self._effective_inflight_requests(account, now=now) + 1
-                account.inflight_updated_at = now
-            account.last_used_at = now
-            account.updated_at = now
-            await session.flush()
-            logger.debug(
-                "Selected active account %s for group %s (used=%s quota=%s remaining=%s)",
-                getattr(account, "id", None),
-                model_group,
-                getattr(account, "daily_used", None),
-                getattr(account, "daily_quota", None),
-                self._remaining_quota_value(account),
-            )
-            return account
+            if await self._try_reserve_account(session, account.id):
+                await session.refresh(account)
+                logger.debug(
+                    "Selected active account %s for group %s (used=%s quota=%s remaining=%s)",
+                    getattr(account, "id", None),
+                    model_group,
+                    getattr(account, "daily_used", None),
+                    getattr(account, "daily_quota", None),
+                    self._remaining_quota_value(account),
+                )
+                return account
+            remaining_candidates = [item for item in remaining_candidates if item.id != account.id]
 
         logger.debug(
             "All active accounts are quota-blocked or inflight-limited for group %s (active=%d)",
@@ -883,6 +888,54 @@ class AccountPoolService:
             len(active_accounts),
         )
         return None
+
+    async def _ensure_current_daily_quotas(self, session: AsyncSession) -> None:
+        """Reset stale daily counters once per process/day with an atomic update."""
+        today = utc_today()
+        if self._last_daily_reset_date == today:
+            return
+        now = utc_now_naive()
+        await session.execute(
+            update(STAccount)
+            .where(
+                (STAccount.daily_usage_date.is_(None))
+                | (STAccount.daily_usage_date < today)
+            )
+            .values(
+                daily_used=0,
+                daily_usage_date=today,
+                status=case(
+                    (STAccount.status == "exhausted", "active"),
+                    else_=STAccount.status,
+                ),
+                updated_at=now,
+            )
+        )
+        self._last_daily_reset_date = today
+
+    async def _try_reserve_account(self, session: AsyncSession, account_id: str) -> bool:
+        """Atomically reserve capacity if quota and inflight limits still allow it."""
+        now = utc_now_naive()
+        stale_before = self._reservation_stale_before(now)
+        conditions = [
+            STAccount.id == account_id,
+            STAccount.status == "active",
+            STAccount.daily_used < STAccount.daily_quota,
+        ]
+        values: Dict[str, Any] = {"last_used_at": now, "updated_at": now}
+        if self._reservation_enabled():
+            effective = self._effective_inflight_expr(stale_before)
+            conditions.append(effective < ACCOUNT_MAX_INFLIGHT_REQUESTS_PER_ACCOUNT)
+            values.update(
+                inflight_requests=effective + 1,
+                inflight_updated_at=now,
+            )
+
+        result = await session.execute(
+            update(STAccount).where(and_(*conditions)).values(**values)
+        )
+        rowcount = getattr(result, "rowcount", None)
+        return rowcount != 0 if rowcount is not None else True
 
     def _select_round_robin_account(
         self,
@@ -1088,14 +1141,20 @@ class AccountPoolService:
         """
         total_tokens = max(0, int(input_tokens)) + max(0, int(output_tokens))
         now = utc_now_naive()
+        today = utc_today()
+        current_daily_used = case(
+            (STAccount.daily_usage_date == today, STAccount.daily_used),
+            else_=0,
+        )
         values: Dict[str, Any] = {
-            "daily_used": STAccount.daily_used + total_tokens,
+            "daily_used": current_daily_used + total_tokens,
+            "daily_usage_date": today,
             "last_used_at": now,
             "updated_at": now,
             "status": case(
                 (STAccount.status == "disabled", "disabled"),
                 (
-                    (STAccount.daily_used + total_tokens) >= STAccount.daily_quota,
+                    (current_daily_used + total_tokens) >= STAccount.daily_quota,
                     "exhausted",
                 ),
                 else_=STAccount.status,
@@ -1158,6 +1217,45 @@ class AccountPoolService:
             input_tokens,
             output_tokens,
             request_count=request_count,
+        )
+
+    async def record_usage_history_bulk(
+        self,
+        session: AsyncSession,
+        buckets: List[Dict[str, Any]],
+    ) -> None:
+        """Upsert aggregated daily buckets in one executemany round trip."""
+        if not buckets:
+            return
+        today = utc_today()
+        parameters = [
+            {
+                "date": today,
+                "account_id": item.get("account_id"),
+                "api_key_id": item.get("api_key_id"),
+                "input_tokens": max(0, int(item.get("input_tokens", 0))),
+                "output_tokens": max(0, int(item.get("output_tokens", 0))),
+                "request_count": max(1, int(item.get("request_count", 1))),
+            }
+            for item in buckets
+        ]
+        await session.execute(
+            text(
+                """
+                INSERT INTO token_usage_history (
+                    date, account_id, api_key_id,
+                    input_tokens, output_tokens, request_count
+                ) VALUES (
+                    :date, :account_id, :api_key_id,
+                    :input_tokens, :output_tokens, :request_count
+                )
+                ON CONFLICT DO UPDATE SET
+                    input_tokens = token_usage_history.input_tokens + excluded.input_tokens,
+                    output_tokens = token_usage_history.output_tokens + excluded.output_tokens,
+                    request_count = token_usage_history.request_count + excluded.request_count
+                """
+            ),
+            parameters,
         )
     
     async def _record_usage_history(
@@ -1299,23 +1397,20 @@ class AccountPoolService:
         Returns:
             重置的账号数量
         """
-        # 获取所有账号
-        result = await session.execute(select(STAccount))
-        accounts = list(result.scalars().all())
-        
-        reset_count = 0
-        for account in accounts:
-            # 重置每日使用量
-            account.daily_used = 0
-            
-            # 如果账号之前是耗尽状态，恢复为活跃
-            if account.status == "exhausted":
-                account.status = "active"
-            
-            account.updated_at = utc_now_naive()
-            reset_count += 1
-        
-        await session.flush()
+        today = utc_today()
+        result = await session.execute(
+            update(STAccount).values(
+                daily_used=0,
+                daily_usage_date=today,
+                status=case(
+                    (STAccount.status == "exhausted", "active"),
+                    else_=STAccount.status,
+                ),
+                updated_at=utc_now_naive(),
+            )
+        )
+        reset_count = int(getattr(result, "rowcount", 0) or 0)
+        self._last_daily_reset_date = today
         
         logger.info(f"Reset daily usage for {reset_count} accounts")
         return reset_count
@@ -1340,6 +1435,7 @@ class AccountPoolService:
             return False
         
         account.daily_used = 0
+        account.daily_usage_date = utc_today()
         if account.status == "exhausted":
             account.status = "active"
         account.updated_at = utc_now_naive()

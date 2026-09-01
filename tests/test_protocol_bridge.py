@@ -1210,36 +1210,24 @@ def test_parse_anthropic_messages_accepts_single_tool_result_pair():
     assert canonical.messages[-1].content.startswith("[tool_result id=toolu_single]")
 
 
-def test_parse_anthropic_messages_rejects_mixed_tool_result_and_text_tail():
+def test_parse_anthropic_messages_accepts_standard_tool_result_then_text():
     payload = {
         "model": "claude-opus-4-6",
         "messages": [
-            {
-                "role": "assistant",
-                "content": [
-                    {
-                        "type": "tool_use",
-                        "id": "toolu_1",
-                        "name": "Read",
-                        "input": {"file_path": "README.md"},
-                    }
-                ],
-            },
-            {
-                "role": "user",
-                "content": [
-                    {"type": "tool_result", "tool_use_id": "toolu_1", "content": "ok"},
-                    {"type": "text", "text": "额外文本"},
-                ],
-            },
+            {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "toolu_1", "name": "Read", "input": {}}
+            ]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "toolu_1", "content": "ok"},
+                {"type": "text", "text": "continue"},
+            ]},
         ],
     }
 
-    try:
-        bridge.parse_anthropic_messages(payload)
-        raise AssertionError("expected ValueError")
-    except ValueError as exc:
-        assert "only tool_result content" in str(exc)
+    canonical = bridge.parse_anthropic_messages(payload)
+
+    assert "[tool_result id=toolu_1" in canonical.messages[-1].content
+    assert "continue" in canonical.messages[-1].content
 
 
 def test_parse_anthropic_messages_accepts_claude_code_mixed_tool_result_and_text_tail():
@@ -1592,3 +1580,78 @@ def test_non_tool_json_block_does_not_create_tool_call():
 ```"""
     )
     assert parsed.has_tool_calls is False
+
+
+def test_responses_function_call_history_is_preserved():
+    canonical = bridge.parse_openai_responses({
+        "model": "gpt-5",
+        "input": [
+            {"type": "function_call", "call_id": "call_1", "name": "read_file", "arguments": "{\"path\":\"a.txt\"}"},
+            {"type": "function_call_output", "call_id": "call_1", "output": "hello"},
+        ],
+        "tools": [{"type": "function", "name": "read_file", "description": "Read", "parameters": {"type": "object"}}],
+    })
+
+    assert canonical.normalized_tool_choice.mode == "auto"
+    assert "[tool_call id=call_1 name=read_file]" in canonical.messages[0].content
+    assert "[tool_result id=call_1" in canonical.messages[1].content
+
+
+def test_tool_choice_normalizes_all_public_protocol_shapes():
+    chat = bridge.parse_openai_chat({
+        "model": "gpt-5", "messages": [{"role": "user", "content": "read"}],
+        "tools": [{"type": "function", "function": {"name": "read_file", "parameters": {"type": "object"}}}],
+        "tool_choice": {"type": "function", "function": {"name": "read_file"}},
+    })
+    anthropic = bridge.parse_anthropic_messages({
+        "model": "claude", "messages": [{"role": "user", "content": "read"}],
+        "tools": [{"name": "read_file", "input_schema": {"type": "object"}}],
+        "tool_choice": {"type": "any"},
+    })
+
+    assert (chat.normalized_tool_choice.mode, chat.normalized_tool_choice.name) == ("tool", "read_file")
+    assert anthropic.normalized_tool_choice.mode == "any"
+
+
+def test_named_tool_choice_rejects_undeclared_tool():
+    try:
+        bridge.parse_openai_chat({
+            "model": "gpt-5", "messages": [], "tools": [],
+            "tool_choice": {"type": "function", "function": {"name": "missing"}},
+        })
+        raise AssertionError("expected ValueError")
+    except ValueError as exc:
+        assert "undeclared tool" in str(exc)
+
+
+def test_anthropic_validates_tool_results_in_earlier_turns():
+    try:
+        bridge.parse_anthropic_messages({
+            "model": "claude",
+            "messages": [
+                {"role": "assistant", "content": [{"type": "tool_use", "id": "one", "name": "x", "input": {}}]},
+                {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "wrong", "content": "x"}]},
+                {"role": "assistant", "content": "done"},
+                {"role": "user", "content": "next"},
+            ],
+        })
+        raise AssertionError("expected ValueError")
+    except ValueError as exc:
+        assert "do not match" in str(exc)
+
+
+def test_parse_model_output_preserves_safe_upstream_call_id():
+    parsed = bridge.parse_model_output(
+        '[tool_call id=call_stable_123 name=Read]\n{"file_path":"README.md"}',
+        allowed_tool_names={"Read"},
+    )
+
+    assert parsed.tool_calls[0].call_id == "call_stable_123"
+
+
+def test_parse_model_output_does_not_promote_undeclared_tool():
+    raw = '```json\n{"tool":"Bash","arguments":{"command":"rm -rf /"}}\n```'
+    parsed = bridge.parse_model_output(raw, allowed_tool_names={"Read"})
+
+    assert parsed.has_tool_calls is False
+    assert parsed.text == raw

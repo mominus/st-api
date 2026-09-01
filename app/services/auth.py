@@ -228,6 +228,13 @@ class AuthService:
             except (ValueError, IndexError):
                 pass
         return False
+
+    def _local_lockout_bypass_enabled(self, ip: str) -> bool:
+        return (
+            os.getenv("ALLOW_LOCAL_LOGIN_LOCKOUT_BYPASS", "false").strip().lower()
+            in {"1", "true", "yes", "on"}
+            and self._is_local_ip(ip)
+        )
     
     async def check_login_allowed(self, ip: str) -> Tuple[bool, Optional[datetime]]:
         """
@@ -241,10 +248,12 @@ class AuthService:
             
         Requirements: 4.3
         
-        Note: 本地 IP 地址不受登录锁定限制
+        Note: 仅显式启用开发选项时，本地 IP 不受登录锁定限制。
         """
-        # 本地 IP 跳过锁定检查
-        if self._is_local_ip(ip):
+        # Reverse proxies commonly make every request appear local. Bypassing
+        # lockout for local addresses must therefore be an explicit development
+        # opt-in rather than a production default.
+        if self._local_lockout_bypass_enabled(ip):
             return True, None
         
         session_factory = self._get_session_factory()
@@ -283,10 +292,10 @@ class AuthService:
             
         Requirements: 4.3
         
-        Note: 本地 IP 地址不记录失败尝试，不会被锁定
+        Note: 仅显式启用开发选项时，本地 IP 不记录失败尝试。
         """
         # 本地 IP 跳过记录
-        if self._is_local_ip(ip):
+        if self._local_lockout_bypass_enabled(ip):
             return None
         
         session_factory = self._get_session_factory()

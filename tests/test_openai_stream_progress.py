@@ -23,10 +23,10 @@ class _FakeRequest:
 
 
 class _FakeCanonical:
-    def __init__(self):
+    def __init__(self, tools=None):
         self.model = "claude-opus-4-6"
         self.stream = True
-        self.tools = [{"name": "Read"}]
+        self.tools = tools if tools is not None else [{"name": "Read"}]
         self.messages = [SimpleNamespace(role="user", content="list files")]
 
     def input_preview(self):
@@ -50,8 +50,8 @@ class _FakeBridge:
     def render_prompt(self, _canonical):
         return "prompt"
 
-    def parse_model_output(self, output):
-        return self._real.parse_model_output(output)
+    def parse_model_output(self, output, **kwargs):
+        return self._real.parse_model_output(output, **kwargs)
 
     def to_openai_responses_response(self, **kwargs):
         return self._real.to_openai_responses_response(**kwargs)
@@ -221,7 +221,7 @@ def test_chat_completions_stream_with_tools_emits_incremental_content(monkeypatc
 
 
 def test_chat_completions_stream_with_malformed_edit_tool_call_suppresses_leak(monkeypatch):
-    canonical = _FakeCanonical()
+    canonical = _FakeCanonical(tools=[{"name": "Edit"}])
     bridge = _FakeBridge(canonical)
     runtime = _FakeRuntime(
         [

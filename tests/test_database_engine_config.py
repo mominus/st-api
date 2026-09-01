@@ -29,4 +29,7 @@ def test_get_sqlite_runtime_settings_matches_admin_display_contract():
         "journal_mode": "WAL",
         "busy_timeout_ms": 30000,
         "busy_timeout_seconds": 30.0,
+        "synchronous": "NORMAL",
+        "wal_autocheckpoint_pages": 1000,
+        "cache_size_kib": 32768,
     }

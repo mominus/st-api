@@ -14,10 +14,16 @@
 ## 接口列表
 
 - `POST /v1/chat/completions`：OpenAI 兼容接口
+- `POST /v1/responses`：OpenAI Responses API 兼容接口
 - `POST /v1/messages`：Anthropic 兼容接口
 - `POST /v1beta/models/{model}:generateContent`：Gemini 兼容接口
 - `GET /v1/key/info`：查询当前 API Key 可用模型、状态、用量和剩余额度
 - `GET /health`：健康检查
+
+三套主流 Agent 协议均支持函数/工具定义、强制工具选择、并行工具调用结果和多轮
+`tool_call` / `tool_result` 上下文。详细兼容格式与限制见
+[工具调用兼容说明](./docs/TOOL_CALLING.md)。安全部署前请阅读 [安全策略](./SECURITY.md)。
+并发扩容与是否迁移 Go 的技术决策见 [架构说明](./docs/ARCHITECTURE.md)。
 
 ## Claude Code 兼容性
 

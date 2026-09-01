@@ -30,6 +30,7 @@ class ParsedToolCall:
     tool_name: str
     arguments: Dict[str, Any] = field(default_factory=dict)
     raw_json: str = ""
+    call_id: Optional[str] = None
 
 
 @dataclass
@@ -224,14 +225,13 @@ class ToolParser:
             parsed_call = ParsedToolCall(
                 tool_name=tool_name,
                 arguments=arguments,
-                raw_json=json_content
+                raw_json=json_content,
+                call_id=tool_id,
             )
             
             # 验证工具调用
             if self._is_valid_tool_call(parsed_call):
                 tool_calls.append(parsed_call)
-                # 保存原始 ID 以便后续使用
-                parsed_call.raw_json = f"xml_id:{tool_id}"
             else:
                 logger.warning(f"Invalid XML tool call: {tool_name}")
             
@@ -295,10 +295,10 @@ class ToolParser:
                 tool_name=tool_name,
                 arguments=arguments,
                 raw_json=json.dumps(arguments, ensure_ascii=False, separators=(",", ":")),
+                call_id=tool_id,
             )
 
             if self._is_valid_tool_call(parsed_call):
-                parsed_call.raw_json = f"bracket_id:{tool_id}"
                 tool_calls.append(parsed_call)
             else:
                 logger.warning(f"Invalid bracket tool call: {tool_name}")
